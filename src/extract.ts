@@ -4,6 +4,7 @@ import type { MediaKind, PostObservation, Availability } from './domain.ts';
 import { mediaReferences, postMediaReferences } from './media-reference.ts';
 import type { MediaReference } from './media-reference.ts';
 import {PostIdentityError} from './sync-errors.ts';
+import {onlineEmbed} from './online-embed.ts';
 
 export interface RawPost {
   id: string | null; subreddit: string | null; permalink: string | null;
@@ -73,11 +74,7 @@ export function classifyMedia(row: Pick<RawPost, 'self' | 'body' | 'outbound' | 
   if (row.self || Boolean(row.body?.trim())) media.push('Text');
   let url: URL | null = null;
   try { if (row.outbound) url = new URL(row.outbound, 'https://www.reddit.com'); } catch { /* Unknown evidence. */ }
-  const youtube = url && ((['youtube.com', 'www.youtube.com', 'm.youtube.com'].includes(url.hostname) &&
-    ((url.pathname === '/watch' && Boolean(url.searchParams.get('v'))) || /^\/(shorts|embed)\/[a-z0-9_-]+\/?$/i.test(url.pathname))) ||
-    (url.hostname === 'youtu.be' && /^\/[a-z0-9_-]+\/?$/i.test(url.pathname)));
-  const vimeo = url && ['vimeo.com', 'www.vimeo.com', 'player.vimeo.com'].includes(url.hostname) && /^\/(video\/)?\d+\/?$/.test(url.pathname);
-  if (row.video || youtube || vimeo || url?.hostname === 'v.redd.it' || (url && /\.(mp4|webm|mov)$/i.test(url.pathname))) media.push('Video');
+  if (row.video || onlineEmbed(url?.href) || url?.hostname === 'v.redd.it' || (url && /\.(mp4|webm|mov)$/i.test(url.pathname))) media.push('Video');
   const gallery = url && ['www.reddit.com','reddit.com','old.reddit.com'].includes(url.hostname) && /^\/gallery\/[a-z0-9]+\/?$/i.test(url.pathname);
   if ((row.image && url?.hostname!=='v.redd.it') || gallery || url?.hostname === 'i.redd.it' || (url && /\.(png|jpe?g|gif|webp|avif)$/i.test(url.pathname))) media.push('Image');
   if (!media.length && url && /^https?:$/.test(url.protocol) && !['reddit.com', 'www.reddit.com', 'old.reddit.com'].includes(url.hostname)) media.push('Link');

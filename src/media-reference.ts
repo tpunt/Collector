@@ -1,3 +1,5 @@
+import {onlineEmbed} from './online-embed.ts';
+
 export interface MediaReference { kind: 'image' | 'video'; url: string; audioUrl?: string }
 
 export function isGallery(input: string | null | undefined): boolean {
@@ -26,6 +28,8 @@ export function mediaReferences(inputs: (string | null | undefined)[]): MediaRef
 /** A native video's poster/preview is not the video. Require its canonical file
  * or an observed manifest belonging to the same video before counting it offline. */
 export function postMediaReferences(outbound:string|null|undefined,references:MediaReference[]):MediaReference[] {
+  // A saved preview image is not a downloaded external video.
+  if(onlineEmbed(outbound))return references.filter(reference=>reference.kind==='video');
   let owner:URL;
   try{owner=new URL(outbound??'');}catch{return references;}
   if(owner.hostname!=='v.redd.it')return references;

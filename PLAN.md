@@ -42,6 +42,9 @@ integration or a generic plugin framework in this round.
   discovery and native-player timeouts remain retryable. Posts show orange
   Not downloaded / Partially downloaded pills with a reason; unsupported
   embeds retain their visible post and an explicit online original link.
+  YouTube/Vimeo also have online players, clearly labelled as not stored locally;
+  playback never counts as a completed offline download. Provider URL handling
+  is shared independently of the Reddit collection adapter.
 
 ### 1. Encrypted backup and restore
 
@@ -113,8 +116,9 @@ integration or a generic plugin framework in this round.
 - Handle repeated controls, unknown totals, mixed media, expired URLs, partial
   failure and Stop/Resume. Revisit the existing 20-reference safety bound;
   never silently truncate a larger gallery and mark it complete.
-- Unsupported embedded providers remain labelled links until a provider has a
-  separately verified, supported download path.
+- YouTube/Vimeo can play online with an orange Not downloaded pill and an
+  internet requirement. Other unsupported providers remain labelled links.
+  Offline saving needs a separately verified, supported download path.
 
 ### 6. Easier launching
 

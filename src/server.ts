@@ -55,7 +55,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
   const server = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src https://www.youtube-nocookie.com https://player.vimeo.com; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       if (req.headers.host !== new URL(origin).host || (req.headers.origin && req.headers.origin !== origin) || req.headers['sec-fetch-site'] === 'cross-site') { json(res, { error: 'Local requests only' },403); return; }
       const url = new URL(req.url ?? '/', origin);

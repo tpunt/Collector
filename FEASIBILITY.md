@@ -287,3 +287,43 @@ browser checks confirmed the orange pill, original link, saved-video local path,
 thread drawer and Incomplete/Resume explanation using the isolated fixture
 library. No external requests were made during this task; the user's library
 and browser profile were untouched.
+
+## Online players and future content sources — 27 October 2026
+
+The user's later preference replaces the link-only presentation for supported
+external videos: YouTube and Vimeo have inline online players, while the orange
+Not downloaded pill and explicit original link remain. Loading/playing an embed
+never changes the download ledger, collector request counter or storage usage.
+Online player traffic goes directly from the reading browser to the provider;
+it is separate from the collector's five-second queue. Saved local media keeps
+its existing offline path and other unknown providers retain an original link.
+
+Player URL parsing is a small shared module independent of Reddit extraction.
+It accepts known video URL shapes, upgrades legacy HTTP links to HTTPS players,
+retains Vimeo's supplied unlisted hash and discards arbitrary embed HTML and
+source autoplay/tracking parameters. Video preview images cannot count as a
+saved external video. Repository instructions and the plan now explicitly treat
+Reddit as the first platform and distinguish platform identity from live/archive
+provenance, without introducing a speculative plugin framework.
+
+The server permits only the two player origins in frame-src and retains local
+script/connect restrictions. Frames have scripts/same-origin/presentation
+permissions, no autoplay and an origin-only cross-site referrer. The global
+no-referrer policy remains unchanged. This follows YouTube's documented
+[privacy-enhanced embed mode](https://support.google.com/youtube/answer/171780)
+and [referrer requirement](https://developers.google.com/youtube/terms/required-minimum-functionality).
+Vimeo's [unlisted-video guidance](https://help.vimeo.com/hc/en-us/articles/12426470858001-Embedded-player-displays-This-video-does-not-exist-message)
+explains preservation of its existing privacy hash. Provider restrictions can
+still prevent a particular video from playing; no bypass is attempted.
+
+Validation: TypeScript and production build, 128 unit tests and all 39 local
+Chrome/API/network integration tests pass. Mock provider frames play a real MP4
+fixture on a user click, retain the orange warning, send only the local origin
+as referrer, preserve download state and fit the mobile layout. Failed provider
+requests leave the post, warning and original link visible. A separate manual
+in-app browser check loaded and played one official YouTube sample for 26
+seconds, muted it and paused it, while the orange pill remained visible and the
+collector count stayed zero. The screenshot is in the ignored QA directory.
+This live check contacted YouTube/its player resources; Vimeo playback was
+checked with fixtures, not a live provider call. No Reddit collection ran, and
+the user's library and sign-in profile were untouched.

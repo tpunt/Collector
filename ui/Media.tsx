@@ -1,8 +1,9 @@
 import React, {useEffect, useRef, useState} from 'react';
 import type {StoredPost,MediaSyncState} from '../src/store.ts';
 import type {MediaItem} from '../src/media.ts';
+import {onlineEmbed} from '../src/online-embed.ts';
 
-/** Reading the feed only reads local status/files. Sync owns every remote download. */
+/** Sync owns offline downloads. Known external players remain explicitly online. */
 export function PostMedia({post,syncing,revision,children}:{post:StoredPost;syncing:boolean;revision:number;children?:(controls:React.ReactNode)=>React.ReactNode}) {
   const ref=useRef<HTMLDivElement>(null);
   const [visible,setVisible]=useState(false),[items,setItems]=useState<MediaItem[]>([]),[error,setError]=useState<{key:string;message:string}|null>(null),[sync,setSync]=useState<MediaSyncState|null>(null);
@@ -44,14 +45,16 @@ export function PostMedia({post,syncing,revision,children}:{post:StoredPost;sync
     sync?.status==='failed'?`Download failed · Sync this feed again to retry. ${sync.reason??''}`:
     syncing?'Media queued for this sync':'Awaiting sync · Sync this feed to save it offline');
   const paths=ready.flatMap(item=>item.localPath?[item.localPath]:[]);
+  const embed=notDownloaded&&ready.length===0&&post.media.includes('Video')?onlineEmbed(post.outbound):null;
   let original:string|null=null;
-  if(notDownloaded&&!post.attachments.length&&post.outbound){
-    try{const url=new URL(post.outbound);if(url.protocol==='https:'&&!url.username&&!url.password)original=url.href;}catch{/* Invalid external links are not rendered. */}
+  if(notDownloaded&&(embed||!post.attachments.length)&&post.outbound){
+    try{const url=new URL(post.outbound);if(embed&&url.protocol==='http:')url.protocol='https:';if(url.protocol==='https:'&&!url.username&&!url.password)original=url.href;}catch{/* Invalid external links are not rendered. */}
   }
   const copyLocalPath=paths.length>0?<button type="button" className="copy-local-path" title={paths.join('\n')} aria-live="polite" onClick={()=>void copyPaths(paths)}>{copyStatus}</button>:null;
   const controls=<>{notDownloaded&&<span className="media-offline-status" role="status" title={note}>{ready.length?'Partially downloaded':'Not downloaded'}</span>}{localError&&hasMedia&&<span className="media-status-unknown" title={localError}>Status unknown</span>}{copyLocalPath}</>;
   return <>{children?.(controls)}{hasMedia&&<div className="post-media" ref={ref}>
     {ready.length>0&&<div className={'media-items '+(ready.length>1?'gallery':'')}>{ready.map((item,index)=>item.kind==='image'?<a href={item.url!} target="_blank" rel="noreferrer" key={item.key}><img src={item.url!} alt={ready.length>1?`${post.title} — image ${index+1}`:post.title} loading="lazy"/></a>:<video key={item.key} src={item.url!} controls preload="metadata" playsInline aria-label={post.title}/>)}</div>}
+    {embed&&<div className="online-media"><p className="media-note">Online player · Requires internet · Not saved locally</p><iframe key={embed.url} src={embed.url} title={`${embed.provider} player: ${post.title}`} loading="lazy" referrerPolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; fullscreen; picture-in-picture" allowFullScreen/></div>}
     {(!checked||localError||notDownloaded)&&<p className="media-note">{note}{original&&<a href={original} target="_blank" rel="noreferrer" title="Requires internet; this media is not stored locally">Open original ↗</a>}</p>}
   </div>}</>;
 }

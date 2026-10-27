@@ -121,8 +121,8 @@ function App() {
       </div>
       <div className="sidebar-bottom"><dl className="sidebar-stats" aria-label="Storage and requests">
         <div className={'storage-stat '+(state?.storage.full?'at-cap':'')}><dt>Stored</dt><dd><span>{(state?.storage.percentUsed??0).toFixed(2)}% used</span><small>{storedSize(state?.storage.usedBytes??0)} / {storedSize(state?.storage.limitBytes??10*GB)}</small></dd></div>
-        <div title="At most one Reddit/CDN request every five seconds"><dt>Request limit</dt><dd>0.2 req/s</dd></div>
-        <div><dt>Session requests</dt><dd>{(state?.job.requests.sessionTotal??0).toLocaleString()}</dd></div>
+        <div title="Collection requests: at most one every five seconds. Online players stream separately."><dt>Request limit</dt><dd>0.2 req/s</dd></div>
+        <div title="Collection requests only; excludes online video players"><dt>Session requests</dt><dd>{(state?.job.requests.sessionTotal??0).toLocaleString()}</dd></div>
       </dl><button onClick={()=>setModal('history')}>Collection history <span>{pending.length||''}</span></button><button onClick={openArchives}>Import an archive</button>
         <button className="settings-button" onClick={openSettings}>Settings</button>
       </div>
