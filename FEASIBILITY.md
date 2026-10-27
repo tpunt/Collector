@@ -442,3 +442,32 @@ Final stage checks: 151 unit tests and 47 local integration tests pass, plus
 type checking, production build and Git whitespace checks. A current-cap recheck
 protects confirmation after settings changes; a failed rollback snapshot leaves
 the validation ticket retryable without modifying current content.
+
+## Scoped indexed search — 27 October 2026
+
+The feed now has Title/Body/Title + body scopes, defaulting to both. Literal
+Unicode-normalized substrings compose with source, media, read status and cursor
+filters; removed and superseded text cannot match. Responsive controls remain
+usable at mobile width. Schema 4 adds a transactionally maintained normalized
+text table and SQLite FTS5 trigram index. Index hits narrow rare queries; broad
+terms fall back to the complete literal scan without truncating results. One-
+and two-character queries remain supported by scanning normalized text. Index
+rebuild uses the same reader provenance rules; deletion cascades and Clear remove
+indexed content. Backups from published schema 3 validate before being upgraded
+inside staging, and restore rebuilds the index from validated content.
+
+An isolated 50,000-post benchmark used a 631 MB long-text library. Before indexing,
+absent body/both queries took roughly 3.8–5.2 seconds. With indexing, absent
+queries took 0–2 ms and common matching body/both queries took 12–16 ms after
+optimizing broad hits. Short absent body queries still took about 1.1–1.2 seconds
+on that deliberately large text dataset. The indexed database occupied 1.75 GB;
+this overhead is included in the storage cap. Results are local measurements,
+not throughput guarantees. The generated database was removed after measurement;
+JSON results and the reproducible script remain in the ignored QA directory.
+
+The full 155-test unit suite passes. All 48 integration cases pass after updating
+capacity fixtures to leave room for the new index. The checks exposed and fixed
+a real reclamation issue: cleared index segments needed rebuilding/optimization
+before VACUUM could reclaim their storage. Backup identity validation now also
+rejects noncanonical post/feed/exclusion IDs. Type checking, production build and
+Git whitespace checks pass. No external collection requests were made.

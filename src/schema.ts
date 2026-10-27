@@ -1,7 +1,18 @@
 import type {DatabaseSync} from 'node:sqlite';
+import {SEARCH_TEXT_SELECT} from './reader-fields.ts';
 
-export const SCHEMA_VERSION=3;
+export const SCHEMA_VERSION=4;
 const APPLICATION_ID=0x52524452;
+const SEARCH_SCHEMA=`CREATE TABLE search_text (
+ post_id TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,title TEXT NOT NULL,body TEXT NOT NULL
+);
+CREATE VIRTUAL TABLE search_index USING fts5(title,body,content='search_text',content_rowid='rowid',tokenize='trigram case_sensitive 1');
+CREATE TRIGGER search_insert AFTER INSERT ON search_text BEGIN INSERT INTO search_index(rowid,title,body) VALUES(new.rowid,new.title,new.body); END;
+CREATE TRIGGER search_delete AFTER DELETE ON search_text BEGIN INSERT INTO search_index(search_index,rowid,title,body) VALUES('delete',old.rowid,old.title,old.body); END;
+CREATE TRIGGER search_update AFTER UPDATE ON search_text BEGIN
+ INSERT INTO search_index(search_index,rowid,title,body) VALUES('delete',old.rowid,old.title,old.body);
+ INSERT INTO search_index(rowid,title,body) VALUES(new.rowid,new.title,new.body); END;`;
+export function rebuildSearch(db:DatabaseSync){db.exec(`DELETE FROM search_text; INSERT INTO search_text(post_id,title,body) ${SEARCH_TEXT_SELECT};`);}
 const READ_SCHEMA=`CREATE TABLE read_states (
   post_id TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
   read_at INTEGER NOT NULL CHECK(read_at>=0)
@@ -95,6 +106,7 @@ CREATE INDEX media_owner_post ON post_media(post_id);
 CREATE TABLE excluded_posts (post_id TEXT PRIMARY KEY, subreddit TEXT NOT NULL, deleted_at INTEGER NOT NULL);
 ${BODY_SCHEMA}
 ${READ_SCHEMA}
+${SEARCH_SCHEMA}
 `;
 
 /** Unknown/prototype schemas are rejected. Published versions receive additive,
@@ -103,7 +115,7 @@ export function initializeSchema(db:DatabaseSync):void {
   const version=Number(db.prepare('PRAGMA user_version').get()!.user_version);
   const application=Number(db.prepare('PRAGMA application_id').get()!.application_id);
   const empty=!db.prepare("SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").get();
-  if(!(version===0&&application===0&&empty)&&!([1,2,SCHEMA_VERSION].includes(version)&&application===APPLICATION_ID))
+  if(!(version===0&&application===0&&empty)&&!([1,2,3,SCHEMA_VERSION].includes(version)&&application===APPLICATION_ID))
     throw new Error(`Unsupported reader database schema (${version}). Back up and move aside reader.sqlite and its WAL/SHM files, then restart to create a fresh database.`);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;');
   if(empty){
@@ -129,6 +141,11 @@ export function initializeSchema(db:DatabaseSync):void {
   if(!empty&&version<3){
     db.exec('BEGIN IMMEDIATE');
     try{db.exec(READ_SCHEMA);db.exec('PRAGMA user_version=3; COMMIT;');}
+    catch(error){db.exec('ROLLBACK');throw error;}
+  }
+  if(!empty&&version<4){
+    db.exec('BEGIN IMMEDIATE');
+    try{db.exec(SEARCH_SCHEMA);rebuildSearch(db);db.exec('PRAGMA user_version=4; COMMIT;');}
     catch(error){db.exec('ROLLBACK');throw error;}
   }
 }

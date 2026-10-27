@@ -132,7 +132,7 @@ test('storage settings reject invalid caps, preserve content when lowered, and b
   assert.equal((await post('settings',{maxStoredBytes:1_000_000},'')).status,403);
   for(const value of [null,0,999999,'1000000'])assert.equal((await post('settings',{maxStoredBytes:value})).status,400);
   assert.equal((await post('settings',{maxStoredBytes:1_000_000})).status,200);const limited=await(await fetch(origin+'/api/state')).json();assert(limited.storage.full);assert(limited.storage.percentUsed>100);assert.equal(limited.stats.posts,2);assert.equal((await post('sync',{names:['aww']})).status,400);assert.equal((await post('sync',{names:['aww']})).status,400);assert.equal(visits,0);
-  assert.equal((await post('settings',{maxStoredBytes:2_000_000})).status,200);assert.equal(app.jobs.state.running,false);assert.equal(visits,0);assert.equal((await post('sync',{names:['aww']})).status,200);
+  assert.equal((await post('settings',{maxStoredBytes:10_000_000})).status,200);assert.equal(app.jobs.state.running,false);assert.equal(visits,0);assert.equal((await post('sync',{names:['aww']})).status,200);
   const deadline=Date.now()+3000;while(app.jobs.state.running){if(Date.now()>deadline)throw Error('Storage fixture did not finish');await new Promise(resolve=>setTimeout(resolve,5));}assert(visits>0);assert.equal(app.store.stats().posts,2);
  }finally{await app.close();}
 });

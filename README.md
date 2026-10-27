@@ -2,7 +2,7 @@
 
 A local web app for reading selected subreddits on demand. Uses its own signed-in Chrome profile, Playwright, structured rendered Classic Reddit HTML, React, and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
 
-Viewport-based read tracking, encrypted backup/restore and complete native galleries are implemented. The [next-stage plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records the remaining search scopes, storage cleanup and launcher. Live-library encryption is deferred until after them.
+Viewport-based read tracking, encrypted backup/restore, scoped indexed search and complete native galleries are implemented. The [next-stage plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records the remaining storage cleanup and launcher. Live-library encryption is deferred until after them.
 
 Read status is local to Collector. A card is marked read after its full visible
 area has been shown for one second while the page is visible and unobscured.
@@ -45,6 +45,14 @@ Run only one instance at a time when sharing a data folder. Independently runnin
 
 The server binds only to `127.0.0.1`, validates Host/Origin and requires a per-launch token for mutations. It is a personal local app, not a hosted multiuser service.
 
+Search defaults to **Title + body**, with **Title** and **Body** scopes. It
+matches literal substrings with Unicode normalization and lowercase handling;
+quotes and punctuation are ordinary text. The local SQLite trigram index speeds
+terms of at least three characters. Broad terms avoid building huge result lists;
+shorter terms scan saved normalized text and can take longer in large libraries.
+The index follows the same live/archive text and removal policy as the reader,
+is updated transactionally, and counts toward database storage.
+
 ## Backup and restore
 
 Settings provides **Create encrypted backup**, **Download backup** and
@@ -58,7 +66,7 @@ recovery details](BACKUPS.md). The working library remains unencrypted.
 
 ## Persistence
 
-New databases use schema version 3, with an additive read-state upgrade for existing version-2 libraries. Existing version-1 libraries receive one additive, transactional upgrade for durable post-text work, preserving content, media, preferences and deletion exclusions. Previously unverified live text is queued for the next explicit sync; startup makes no website requests. Unknown/prototype schemas and application identities are rejected before writes. To start fresh, stop the app, back up and move aside `reader.sqlite` together with any `reader.sqlite-wal` / `reader.sqlite-shm` files and the `media` directory, then restart. Keep `browser-profile` to retain the browser session.
+New databases use schema version 4. Published versions receive preserving additive upgrades, including read states and the search index. Existing version-1 libraries receive one additive, transactional upgrade for durable post-text work, preserving content, media, preferences and deletion exclusions. Previously unverified live text is queued for the next explicit sync; startup makes no website requests. Unknown/prototype schemas and application identities are rejected before writes. To start fresh, stop the app, back up and move aside `reader.sqlite` together with any `reader.sqlite-wal` / `reader.sqlite-shm` files and the `media` directory, then restart. Keep `browser-profile` to retain the browser session.
 
 Feed subscription, history limit, current history goal and newest-check boundary share one `feeds` row. `feed_sync` records completion separately from individual scan checkpoints. Date bounds define scan scope; there are no obsolete recent/since/all-time target types or first-page refresh timestamps. Post-to-media links determine file ownership across posts and communities, so deletion and Clear preserve shared files without a second ownership index. Post and comment removal evidence, exclusions and live/archive precedence remain enforced.
 

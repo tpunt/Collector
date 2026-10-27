@@ -7,6 +7,8 @@ import {join} from 'node:path';
 import {Readable} from 'node:stream';
 import tar from 'tar-stream';
 import {Encrypter} from 'age-encryption';
+import {DatabaseSync} from 'node:sqlite';
+import {createHash} from 'node:crypto';
 import {ReaderStore} from '../src/store.ts';
 import {MediaCache} from '../src/media.ts';
 import {RequestQueue} from '../src/request-gate.ts';
@@ -97,4 +99,17 @@ test('startup recovers an interrupted database/media replacement before opening 
   await writeFile(join(work,'restore.json'),JSON.stringify({stage:'stage-fixture',committed:false}));recoverLibraryRestore(path,media,work);store=new ReaderStore(path);
   assert(store.getPost('abc'));assert.equal(store.getPost('later'),null);assert.equal(await readFile(join(media,'kept'),'utf8'),'Old media');
  }finally{store.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('published version-three backups upgrade only in staging and restore with a rebuilt search index',async()=>{
+ const h=await setup();
+ try{
+  const path=join(h.root,'legacy.sqlite');await h.store.snapshot(path);const old=new DatabaseSync(path);
+  old.exec("DROP TRIGGER search_insert; DROP TRIGGER search_update; DROP TRIGGER search_delete; DROP TABLE search_index; DROP TABLE search_text; UPDATE media_sync SET status='pending'; PRAGMA user_version=3;");old.close();
+  const raw=await readFile(path),manifest=JSON.stringify({format:'Collector',version:1,schema:3,files:[{name:'reader.sqlite',bytes:raw.length,sha256:createHash('sha256').update(raw).digest('hex')}]});
+  const pack=tar.pack();pack.entry({name:'manifest.json'},manifest);pack.entry({name:'reader.sqlite'},raw);pack.finalize();
+  const encryption=new Encrypter();encryption.setPassphrase(secret);encryption.setScryptWorkFactor(10);const bytes=await encryption.encrypt(Readable.toWeb(Readable.from(pack)) as ReadableStream<Uint8Array>);
+  const preview=await h.backups.prepare(Readable.fromWeb(bytes as any),secret);assert.equal(h.store.getSetting('account'),'fixture_user');await h.backups.restore(preview.id);
+  assert.equal(h.store.queryFeed({text:'sentinel',scope:'body'}).posts[0]!.id,'t3_abc');assert.notEqual(h.store.getPost('abc')!.readAt,null);assert.equal(h.store.getSetting('account'),null);
+ }finally{await h.close();}
 });

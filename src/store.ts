@@ -1,5 +1,5 @@
 import { DatabaseSync, backup } from 'node:sqlite';
-import {initializeSchema,recoverInterruptedWork} from './schema.ts';
+import {initializeSchema,recoverInterruptedWork,rebuildSearch,SCHEMA_VERSION} from './schema.ts';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -14,14 +14,12 @@ import {postMediaReferences,isGallery,completeCollection} from './media-referenc
 import {mediaKey} from './media-key.ts';
 import { DEFAULT_STORAGE_CAP, storageCap, StorageLimitError } from './storage-limit.ts';
 import type { StorageStatus } from './storage-limit.ts';
+import {normalizeText} from './search.ts';
+import {ARCHIVE_JOIN,POST_BODY} from './reader-fields.ts';
 
 // A listing can omit fields that an archive already saved. Compose the reader
 // view without relabelling archive evidence as a new live observation.
-const ARCHIVE_JOIN=`LEFT JOIN observations archived ON o.source='live' AND archived.rowid=(
-  SELECT rowid FROM observations WHERE post_id=p.id AND source='archive' AND availability='available'
-  ORDER BY observed_at DESC,source_key DESC LIMIT 1)`;
 const ARCHIVE_MEDIA_MATCH="(o.outbound IS NULL OR o.outbound=archived.outbound)";
-const POST_BODY='coalesce(o.body,archived.body)';
 const POST_MEDIA=`coalesce(o.media,CASE WHEN ${ARCHIVE_MEDIA_MATCH} THEN archived.media END)`;
 const POST_ATTACHMENTS=`coalesce(o.attachments,CASE WHEN ${ARCHIVE_MEDIA_MATCH} THEN archived.attachments END)`;
 const POST_OUTBOUND='coalesce(o.outbound,archived.outbound)';
@@ -99,6 +97,7 @@ export class ReaderStore {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     try {
+      this.db.function('normalize_text',{deterministic:true},text=>normalizeText(String(text??'')));
       initializeSchema(this.db);recoverInterruptedWork(this.db);
       this.db.function('has_media_reference',(outbound,attachments,kind)=>Number(
         (kind==='image'||kind==='video')&&postMediaReferences(outbound===null?null:String(outbound),JSON.parse(String(attachments??'[]')))
@@ -116,9 +115,11 @@ export class ReaderStore {
     try{
       this.transaction(()=>{
         this.db.exec('PRAGMA defer_foreign_keys=ON');
-        const tables=this.db.prepare("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row=>String(row.name));
+        const tables=this.db.prepare("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB 'search_*'").all().map(row=>String(row.name));
+        this.db.exec('DELETE FROM search_text');
         for(const table of tables)this.db.exec(`DELETE FROM main."${table}"`);
         for(const table of tables)this.db.exec(`INSERT INTO main."${table}" SELECT * FROM restored."${table}"`);
+        rebuildSearch(this.db);
         this.db.prepare("UPDATE metadata SET value=? WHERE key='generation'").run(Math.max(generation,this.generation)+1);
         this.db.prepare("UPDATE metadata SET value=? WHERE key='content_revision'").run(revision+1);
         if(portable)this.db.exec("DELETE FROM settings WHERE key IN ('account','accessPause')");
@@ -126,12 +127,13 @@ export class ReaderStore {
       recoverInterruptedWork(this.db);
     }finally{this.db.exec('DETACH DATABASE restored');}
   }
-  validateBackup(path:string){
+  validateBackup(path:string,allowPrevious=false){
     const db=new DatabaseSync(path,{readOnly:true});
     try{
-      const schema="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
-      if(JSON.stringify(db.prepare(schema).all())!==JSON.stringify(this.db.prepare(schema).all())||
-        Number(db.prepare('PRAGMA user_version').get()!.user_version)!==Number(this.db.prepare('PRAGMA user_version').get()!.user_version)||
+      const version=Number(db.prepare('PRAGMA user_version').get()!.user_version),previous=allowPrevious&&version===3;
+      const schema="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",order=' ORDER BY type,name';
+      if(JSON.stringify(db.prepare(schema+order).all())!==JSON.stringify(this.db.prepare(schema+(previous?" AND name NOT GLOB 'search_*'":'')+order).all())||
+        ![SCHEMA_VERSION,...(previous?[3]:[])].includes(version)||
         Number(db.prepare('PRAGMA application_id').get()!.application_id)!==Number(this.db.prepare('PRAGMA application_id').get()!.application_id))throw new Error('Backup schema is not compatible with this app version');
       if(db.prepare('PRAGMA quick_check').get()!.quick_check!=='ok'||db.prepare('PRAGMA foreign_key_check').all().length)throw new Error('Backup database integrity check failed');
       for(const row of db.prepare('SELECT * FROM observations JOIN posts ON posts.id=observations.post_id').iterate())validateObservation({
@@ -140,8 +142,11 @@ export class ReaderStore {
         observedAt:Number(row.observed_at),body:row.body as string??undefined,availability:row.availability as Availability,
         media:row.media?JSON.parse(String(row.media)):undefined,attachments:row.attachments?JSON.parse(String(row.attachments)):undefined,outbound:row.outbound as string??undefined});
       for(const row of db.prepare('SELECT * FROM media_evidence JOIN posts ON posts.id=media_evidence.post_id').iterate())validateObservation({id:String(row.id),subreddit:String(row.subreddit),permalink:String(row.permalink),title:'Media evidence',created:{epochMs:Number(row.created_ms),precisionMs:Number(row.precision_ms)},source:'live',observedAt:Number(row.observed_at),attachments:JSON.parse(String(row.attachments))});
-      for(const row of db.prepare('SELECT * FROM excluded_posts').iterate()){postId(String(row.post_id));subredditName(String(row.subreddit));}
-      for(const row of db.prepare('SELECT id FROM posts').iterate()){
+      for(const row of db.prepare('SELECT name FROM feeds').iterate())if(subredditName(String(row.name))!==row.name)throw new Error('Invalid backup feed identity');
+      for(const row of db.prepare('SELECT * FROM excluded_posts').iterate())if(postId(String(row.post_id))!==row.post_id||subredditName(String(row.subreddit))!==row.subreddit||!Number.isSafeInteger(row.deleted_at)||Number(row.deleted_at)<0)throw new Error('Invalid backup exclusion');
+      for(const row of db.prepare('SELECT * FROM posts').iterate()){
+        const identity=validateObservation({id:String(row.id),subreddit:String(row.subreddit),permalink:String(row.permalink),title:'Stored post',created:{epochMs:Number(row.created_ms),precisionMs:Number(row.precision_ms)},source:'live',observedAt:0});
+        if(identity.id!==row.id||identity.subreddit!==row.subreddit||identity.permalink!==row.permalink)throw new Error('Invalid backup post identity');
         const post=this.readPost(db,String(row.id)),expected=new Set((post?.attachments??[]).map(mediaKey));
         const owned=db.prepare('SELECT key FROM post_media WHERE post_id=?').all(String(row.id)).map(row=>String(row.key));
         if(owned.length!==expected.size||owned.some(key=>!expected.has(key)))throw new Error('Backup media ownership does not match its post references');
@@ -152,7 +157,7 @@ export class ReaderStore {
           snapshot.body!==null&&typeof snapshot.body!=='string'||snapshot.comments.some((comment:any)=>!/^t1_[a-z0-9]+$/.test(comment.id)||comment.postId!==row.post_id||typeof comment.body!=='string'))throw new Error('Invalid discussion in backup');
       }
       const cap=db.prepare("SELECT value FROM settings WHERE key='maxStoredBytes'").get();if(cap)storageCap(JSON.parse(String(cap.value)));
-      return {posts:Number(db.prepare('SELECT count(*) AS n FROM posts').get()!.n),keys:new Set(db.prepare('SELECT DISTINCT key FROM post_media').all().map(row=>String(row.key)))};
+      return {schema:version,posts:Number(db.prepare('SELECT count(*) AS n FROM posts').get()!.n),keys:new Set(db.prepare('SELECT DISTINCT key FROM post_media').all().map(row=>String(row.key)))};
     }finally{db.close();}
   }
   setExternalStorageUsage(readBytes:()=>number) { this.externalStorageBytes=readBytes; }
@@ -475,7 +480,7 @@ export class ReaderStore {
 
   clearContent(): number {
     const generation=this.transaction(() => {
-      this.db.exec(`DELETE FROM read_states; DELETE FROM feed_sync; DELETE FROM archive_fetches; DELETE FROM thread_snapshots; UPDATE feeds SET history_target_id=NULL,requested_ms=NULL;
+      this.db.exec(`DELETE FROM search_text; DELETE FROM read_states; DELETE FROM feed_sync; DELETE FROM archive_fetches; DELETE FROM thread_snapshots; UPDATE feeds SET history_target_id=NULL,requested_ms=NULL;
         UPDATE metadata SET value = value + 1 WHERE key = 'generation';
         DELETE FROM comment_states WHERE availability='available';
         DELETE FROM targets; DELETE FROM observations; DELETE FROM media_sync; DELETE FROM media_evidence; DELETE FROM post_media;
@@ -534,7 +539,10 @@ export class ReaderStore {
   private compactContent() {
     // Compaction is best effort; logical Clear and file cleanup must still finish.
     this.compactionWarning = null;
-    try { this.db.exec('VACUUM; PRAGMA wal_checkpoint(TRUNCATE);'); }
+    try {
+      const empty=!this.db.prepare('SELECT 1 FROM search_text LIMIT 1').get();
+      this.db.exec(`INSERT INTO search_index(search_index) VALUES ('${empty?'rebuild':'optimize'}'); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);`);
+    }
     catch { this.compactionWarning = 'Content cleared. Database compaction failed; some allocated space may remain in use.'; }
   }
 
@@ -670,11 +678,13 @@ export class ReaderStore {
     else this.db.prepare('DELETE FROM read_states WHERE post_id=?').run(id);
     return this.getPost(id)!;
   }
-  queryFeed(input: { subreddit?: string; media?: MediaFilter; text?: string; read?:string; readBefore?:number; afterMs?: number; beforeMs?: number; cursor?: string; limit?: number } = {}) {
+  queryFeed(input: { subreddit?: string; media?: MediaFilter; text?: string; scope?:string; read?:string; readBefore?:number; afterMs?: number; beforeMs?: number; cursor?: string; limit?: number } = {}) {
     const limit = Math.min(100, Math.max(1, input.limit ?? 50));
     const clauses: string[] = ["EXISTS(SELECT 1 FROM feeds f WHERE f.name=p.subreddit AND f.subscribed=1)"];
     const params: (string | number)[] = [];
     if (!Number.isInteger(limit)) throw new Error('Invalid feed limit');
+    if(input.scope&&!['both','title','body'].includes(input.scope))throw new Error('Invalid search scope');
+    if(input.text!==undefined&&(typeof input.text!=='string'||input.text.length>500))throw new Error('Search text must be at most 500 characters');
     if(input.read&&!['all','read','unread'].includes(input.read))throw new Error('Invalid read filter');
     const readBefore=input.readBefore??Date.now();if(!Number.isSafeInteger(readBefore)||readBefore<0)throw new Error('Invalid reading snapshot');
     if(input.read&&input.read!=='all'){
@@ -697,10 +707,26 @@ export class ReaderStore {
       });
       clauses.push(`coalesce(p.live_availability, o.availability) = 'available' AND (${matches.join(' OR ')})`);
     }
-    if (input.text) { clauses.push(`instr(lower(o.title || char(10) || CASE WHEN coalesce(p.live_availability,o.availability) = 'available' THEN coalesce(${POST_BODY},'') ELSE '' END), lower(?)) > 0`); params.push(input.text); }
+    if(input.text){
+      const normalized=normalizeText(input.text);
+      if(Array.from(normalized).length>=3&&!normalized.includes('\0')){
+        const match=(input.scope==='title'?'title:':input.scope==='body'?'body:':'')+'"'+normalized.replaceAll('"','""')+'"';
+        // Narrow rare matches without materializing an entire common-term hit
+        // list. Broad matches use the literal scan and still include every post.
+        const hits=this.db.prepare('SELECT rowid FROM search_index WHERE search_index MATCH ? LIMIT 501').all(match);
+        if(hits.length<=500){
+          clauses.push(hits.length?`p.id IN (SELECT post_id FROM search_text WHERE rowid IN (${hits.map(()=>'?').join(',')}))`:'0');
+          params.push(...hits.map(row=>Number(row.rowid)));
+        }
+      }
+      const body="CASE WHEN coalesce(p.live_availability,o.availability)='available' THEN st.body ELSE '' END";
+      const fields=input.scope==='title'?['st.title']:input.scope==='body'?[body]:['st.title',body];
+      clauses.push('('+fields.map(field=>{params.push(normalized);return `instr(${field},?)>0`;}).join(' OR ')+')');
+    }
     const ids = this.db.prepare(`SELECT p.id FROM posts p JOIN observations o ON o.rowid =
       (SELECT rowid FROM observations WHERE post_id = p.id ORDER BY (source = 'live') DESC, observed_at DESC, source_key DESC LIMIT 1)
       ${ARCHIVE_JOIN}
+      ${input.text?'JOIN search_text st ON st.post_id=p.id':''}
       ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''} ORDER BY p.created_ms DESC, p.id DESC LIMIT ?`).all(...params, limit + 1);
     const result = ids.map(row => this.getPost(String(row.id))!);
     const hasMore = result.length > limit;
@@ -861,6 +887,8 @@ export class ReaderStore {
       this.db.prepare(`INSERT INTO body_sync(post_id,status) VALUES (?,?) ON CONFLICT(post_id) DO UPDATE SET status=excluded.status,reason=NULL
         WHERE ? OR (? AND ?='live')`).run(record.id,status,Number(Boolean(record.bodyNeedsFetch)),Number(record.body!==undefined),record.source);
     }else this.db.prepare('DELETE FROM body_sync WHERE post_id=?').run(record.id);
+    this.db.prepare(`INSERT INTO search_text(post_id,title,body) VALUES (?,?,?) ON CONFLICT(post_id) DO UPDATE SET title=excluded.title,body=excluded.body WHERE title<>excluded.title OR body<>excluded.body`)
+      .run(record.id,normalizeText(preferred.title),normalizeText(preferred.body??''));
     this.db.prepare("UPDATE metadata SET value=value+1 WHERE key='content_revision'").run();
     return Number(insert.changes);
   }

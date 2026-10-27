@@ -26,7 +26,7 @@ test('read status survives refresh/import/restart, composes with pagination and 
   const rows=Array.from({length:4},(_,i)=>({id:'read'+i,subreddit:'python',title:'Read fixture '+i,body:'Saved body',permalink:`/r/python/comments/read${i}/`,created:{epochMs:1700000000000+i,precisionMs:1000},source:'archive' as const,exportId:'read-fixture',observedAt:1800000000000,media:['Text' as const]}));
   try{
     store.addSubreddit('python');store.importArchiveBatch(store.generation,rows);
-    store.close();const prior=new DatabaseSync(path);prior.exec('DROP TABLE read_states; PRAGMA user_version=2;');prior.close();store=new ReaderStore(path);
+    store.close();const prior=new DatabaseSync(path);prior.exec('DROP TRIGGER search_insert; DROP TRIGGER search_update; DROP TRIGGER search_delete; DROP TABLE search_index; DROP TABLE search_text; DROP TABLE read_states; PRAGMA user_version=2;');prior.close();store=new ReaderStore(path);
     assert.equal(store.getPost('read1')!.body,'Saved body');assert.equal(store.getPost('read1')!.readAt,null);
     store.setRead('read1',true);const at=store.getPost('read1')!.readAt!;
     assert.deepEqual(store.queryFeed({read:'read'}).posts.map(p=>p.id),['t3_read1']);

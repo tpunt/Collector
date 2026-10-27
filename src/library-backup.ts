@@ -7,7 +7,7 @@ import {createReadStream,createWriteStream,existsSync,readFileSync,writeFileSync
 import {mkdir,mkdtemp,rm,stat,readFile,chmod,rename} from 'node:fs/promises';
 import {join,basename} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
-import type {ReaderStore} from './store.ts';
+import {ReaderStore} from './store.ts';
 import type {MediaCache} from './media.ts';
 import {SCHEMA_VERSION} from './schema.ts';
 
@@ -116,7 +116,7 @@ export class LibraryBackups {
         if(!manifest){
           if(entry.name!=='manifest.json'||entry.size>MAX_MANIFEST)throw new Error('Backup must start with its bounded manifest');
           const chunks:Buffer[]=[];for await(const chunk of stream)chunks.push(Buffer.from(chunk as Uint8Array));manifest=JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          if(manifest?.format!=='Collector'||manifest.version!==1||manifest.schema!==SCHEMA_VERSION||!Array.isArray(manifest.files))throw new Error('Unsupported Collector backup format');
+          if(manifest?.format!=='Collector'||manifest.version!==1||![3,SCHEMA_VERSION].includes(manifest.schema)||!Array.isArray(manifest.files))throw new Error('Unsupported Collector backup format');
           const names=new Set<string>();let bytes=0;
           for(const file of manifest.files){if(!fileName.test(file.name)||names.has(file.name)||!Number.isSafeInteger(file.bytes)||file.bytes<0||!/^[a-f0-9]{64}$/.test(file.sha256))throw new Error('Invalid backup file index');names.add(file.name);index.set(file.name,file);bytes+=file.bytes;}
           if(!names.has('reader.sqlite'))throw new Error('Backup database is missing');
@@ -134,7 +134,14 @@ export class LibraryBackups {
       // Both the archive and age's authenticated final chunk must finish before
       // staged content can become visible or receive a confirmation ticket.
       if(!manifest||accepted.size!==manifest.files.length)throw new Error('Backup is incomplete');
-      const validated=this.store.validateBackup(join(directory,'reader.sqlite'));
+      const validated=this.store.validateBackup(join(directory,'reader.sqlite'),true);
+      if(validated.schema!==manifest.schema)throw new Error('Backup database version does not match its manifest');
+      if(validated.schema!==SCHEMA_VERSION){
+        // Published backups are upgraded only after authentication and validation,
+        // inside staging. The live library remains untouched until confirmation.
+        const upgraded=new ReaderStore(join(directory,'reader.sqlite'));upgraded.close();
+        this.store.validateBackup(join(directory,'reader.sqlite'));
+      }
       for(const file of manifest.files.filter(file=>file.name.startsWith('media/'))){
         if(!file.name.endsWith('.json')&&file.bytes===0)throw new Error('Backup contains an empty media file');
         const key=basename(file.name).replace(/\.json$/,'');
@@ -145,7 +152,9 @@ export class LibraryBackups {
           if(data.key!==key||data.bytes!==owned.bytes||!/^image\/(jpeg|png|gif|webp|avif)$|^video\/(mp4|webm)$/.test(data.type))throw new Error('Invalid media metadata');
         }
       }
-      const value={id:randomUUID(),directory,expires:Date.now()+10*60_000,posts:validated.posts,files:manifest.files.filter(file=>file.name.startsWith('media/')&&!file.name.endsWith('.json')).length,bytes:manifest.files.reduce((sum,file)=>sum+file.bytes,0)};
+      const bytes=manifest.files.filter(file=>file.name!=='reader.sqlite').reduce((sum,file)=>sum+file.bytes,0)+(await stat(join(directory,'reader.sqlite'))).size;
+      if(bytes>this.store.storageLimit)throw new Error('Upgraded backup exceeds the current storage cap; increase it before restoring');
+      const value={id:randomUUID(),directory,expires:Date.now()+10*60_000,posts:validated.posts,files:manifest.files.filter(file=>file.name.startsWith('media/')&&!file.name.endsWith('.json')).length,bytes};
       for(const old of this.prepared.values())await rm(old.directory,{recursive:true,force:true});this.prepared.clear();this.prepared.set(value.id,value);
       return{id:value.id,posts:value.posts,files:value.files,bytes:value.bytes};
     }catch(error){

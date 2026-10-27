@@ -45,7 +45,7 @@ Restore writes decrypted data only into a private directory. It checks the whole
 age stream, including its authenticated final chunk, file checksums, database
 schema and integrity, post references and media ownership before issuing a
 confirmation ticket. Wrong passwords, tampering, truncation, unsafe entries and
-incompatible libraries leave the current content intact. The current storage cap
+incompatible libraries leave the current content intact. Published schema-3 backups are validated first, then upgraded only in staging to schema 4; the search index is rebuilt from accepted content. The upgraded size is checked against the current cap. The current storage cap
 must fit the restored database and media; raise it before validating a larger
 backup. Temporary restore space is additional to the existing library.
 

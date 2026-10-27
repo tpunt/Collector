@@ -64,3 +64,5 @@
 @media(max-width:620px){.feed-card{padding:13px 13px 0}.feed-list{gap:10px}}
 
 .read-toggle{font-size:14px;color:#9cb9a8;padding:3px}.post-card.is-read .post-title{color:#a5b2b9}.filter-inputs{flex-wrap:wrap}.feed-meta>span>button{font-size:inherit;padding:0;color:var(--green)}
+
+@media(max-width:760px){.filter-inputs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%}.filter-inputs select,.filter-inputs .search{width:100%;max-width:none}.filter-inputs .search{grid-column:1/-1}}

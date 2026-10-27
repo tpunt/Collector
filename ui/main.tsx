@@ -52,6 +52,7 @@ function App() {
   const [state,setState]=useState<State|null>(null),[posts,setPosts]=useState<StoredPost[]>([]),[next,setNext]=useState<string|null>(null);
   const [view,setView]=useState(location.hash==='#feeds'?'feeds':'posts');
   const [source,setSource]=useState(''),[media,setMedia]=useState(''),[search,setSearch]=useState('');
+  const [searchScope,setSearchScope]=useState('both');
   const [readFilter,setReadFilter]=useState('all'),[readBefore,setReadBefore]=useState(Date.now);
   const suppressedReads=useRef(new Set<string>());
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[modal,setModal]=useState<'source'|'history'|'import'|'clear'|'settings'|null>(null),[removeFeed,setRemoveFeed]=useState<string|null>(null);
@@ -66,6 +67,7 @@ function App() {
   const token=useRef(''),feedVersion=useRef(0),threadId=useRef<string|null>(null),pollVersion=useRef(''),stateVersion=useRef(0),currentQuery=useRef('');
   const params=new URLSearchParams();if(source)params.set('subreddit',source);if(media)params.set('media',media);if(search)params.set('q',search);
   params.set('read',readFilter);params.set('readBefore',String(readBefore));
+  params.set('scope',searchScope);
   if(currentQuery.current!==params.toString()){currentQuery.current=params.toString();feedVersion.current++;}
   const feeds=state?.feeds??[],activeFeeds=feeds.filter(syncing),pending=state?.targets.filter(target=>['queued','paused'].includes(target.status))??[];
   const count=source?feeds.find(feed=>feed.name===source)?.postCount??0:feeds.reduce((sum,feed)=>sum+feed.postCount,0);
@@ -98,8 +100,8 @@ function App() {
     setThread(old=>old?.post.id===id?{...old,post:{...old.post,readAt:value.post.readAt}}:old);
   },[]);
   useReadTracking(view==='posts'&&!modal&&!thread&&!removeFeed&&!clearFeed&&!postToDelete&&Boolean(state),markRead,suppressedReads.current);
-  useEffect(()=>setReadBefore(Date.now()),[source,media,search]);
-  useEffect(()=>{const timer=setTimeout(()=>void loadFeed().catch(e=>setError(e.message)),200);return()=>clearTimeout(timer);},[source,media,search,readFilter,readBefore]);
+  useEffect(()=>setReadBefore(Date.now()),[source,media,search,searchScope]);
+  useEffect(()=>{const timer=setTimeout(()=>void loadFeed().catch(e=>setError(e.message)),200);return()=>clearTimeout(timer);},[source,media,search,searchScope,readFilter,readBefore]);
   useEffect(()=>{
     let pending=false,disposed=false;
     const timer=setInterval(()=>{
@@ -183,7 +185,7 @@ function App() {
         </div><p className="feed-page-note" id="feed-history-note">Sync saves recent posts, unfinished history and supported media locally. Expanding the history limit starts a sync; reducing it keeps saved posts. Older archives and stored date ranges may have gaps.</p></>:<div className="empty-state"><h2>No feeds yet</h2><button className="button primary" onClick={()=>{setName('');setMonths(1);setModal('source');}}>Add a feed</button></div>}
       </section>:<>
         <section className="feed-tools" aria-label="Feed filters"><div className="type-tabs">{['',...MEDIA_FILTERS].map(type=><button key={type} className={media===type?'selected':''} onClick={()=>setMedia(type)}>{type||'All posts'}</button>)}</div>
-          <div className="filter-inputs"><select aria-label="Read status" value={readFilter} onChange={e=>{setReadFilter(e.target.value);setReadBefore(Date.now());}}><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select><select aria-label="Filter by subreddit" value={source} onChange={e=>setSource(e.target.value)}><option value="">All subreddits</option>{feeds.map(feed=><option key={feed.name} value={feed.name}>r/{feed.name}</option>)}</select><input className="search" aria-label="Search stored posts" placeholder="Search posts…" value={search} onChange={e=>setSearch(e.target.value)}/></div>
+          <div className="filter-inputs"><select aria-label="Read status" value={readFilter} onChange={e=>{setReadFilter(e.target.value);setReadBefore(Date.now());}}><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select><select aria-label="Filter by subreddit" value={source} onChange={e=>setSource(e.target.value)}><option value="">All subreddits</option>{feeds.map(feed=><option key={feed.name} value={feed.name}>r/{feed.name}</option>)}</select><select aria-label="Search scope" value={searchScope} onChange={e=>setSearchScope(e.target.value)}><option value="both">Title + body</option><option value="title">Title</option><option value="body">Body</option></select><input maxLength={500} title="Literal search of saved post text. Longer terms are faster in large libraries." className="search" aria-label="Search stored posts" placeholder="Search posts…" value={search} onChange={e=>setSearch(e.target.value)}/></div>
         </section>
         <div className="feed-meta"><span>Newest first · <button onClick={()=>setReadBefore(Date.now())}>Refresh view</button></span>{currentFeed?<span>Last successful sync: {timestamp(currentFeed.sync.lastSuccessAt)} · {syncState(currentFeed)}{currentFeed.offline.total>0&&` · Media ${currentFeed.offline.ready}/${currentFeed.offline.total} offline`}</span>:<button onClick={()=>navigate('feeds')}>Manage feeds &amp; sync status →</button>}</div>
         <div className="feed">{posts.map(post=><article className={"post-card "+(post.readAt!==null?"is-read":"")} data-post-id={post.id} data-read={post.readAt!==null} key={post.id}>
@@ -217,7 +219,7 @@ function App() {
         <p className="muted">{storedSize(state?.storage.usedBytes??0)} stored. Includes the database and saved media. Browser profile and temporary files are excluded.</p>
         <p className="muted">Sync and imports pause at the cap. Lowering it keeps existing content. Raise it, then Resume to continue saving.</p>
         <div className="settings-save"><button className="button primary" disabled={busy||!state}>Save cap</button>{storageSaved&&<span role="status">Saved</span>}</div>
-      </form><BackupSettings token={token.current} setBusy={setBusy} changed={async()=>{await loadState();setSource('');setMedia('');setSearch('');setReadFilter('all');setReadBefore(Date.now());setThread(null);threadId.current=null;}}/><div className="settings-account"><p>{state?.account?'Signed in as '+state.account:'Account verified on collection'}</p><button className="button" disabled={busy} onClick={()=>void action(state?.job.manual?'sign-in/finish':'sign-in')}>{state?.job.manual?'Finish sign-in':'Open sign-in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setModal('clear');}}>Clear collected content</button></div></>}
+      </form><BackupSettings token={token.current} setBusy={setBusy} changed={async()=>{await loadState();setSource('');setMedia('');setSearch('');setSearchScope('both');setReadFilter('all');setReadBefore(Date.now());setThread(null);threadId.current=null;}}/><div className="settings-account"><p>{state?.account?'Signed in as '+state.account:'Account verified on collection'}</p><button className="button" disabled={busy} onClick={()=>void action(state?.job.manual?'sign-in/finish':'sign-in')}>{state?.job.manual?'Finish sign-in':'Open sign-in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setModal('clear');}}>Clear collected content</button></div></>}
       {modal==='source'&&<form onSubmit={e=>{e.preventDefault();void action('sources',{name,historyMonths:months}).then(result=>{if(result){setModal(null);setName('');}});}}>
         <label>Subreddit<input required placeholder="e.g. python or r/aww" value={name} onChange={e=>setName(e.target.value)}/></label><label>History limit<select value={months} onChange={e=>setMonths(Number(e.target.value) as HistoryMonths)}>{HISTORY_OPTIONS.map(option=><option key={option.months} value={option.months}>{option.label}</option>)}</select></label>
         <p className="muted">Saves recent posts, history and supported media locally, up to 60 minutes and 120 requests per session. Stop anytime and Resume from saved progress.</p><button className="button primary" disabled={busy}>Add &amp; sync</button>

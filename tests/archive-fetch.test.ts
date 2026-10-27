@@ -63,7 +63,7 @@ test('429 pauses once, persists the service-wide reset and blocks Resume or a di
 test('capacity rolls back the whole page with its cursor and Resume works after increasing storage',async()=>{
  const store=new ReaderStore(':memory:');store.setStorageLimit(1_000_000);let calls=0;
  const fetcher=new ArchiveFetcher(store,{queue:new RequestQueue({intervalMs:0}),fetch:async url=>{calls++;return json(Date.parse(new URL(String(url)).searchParams.get('after')!)<start?[row(0,{selftext:'x'.repeat(600_000)}),row(1,{selftext:'y'.repeat(600_000)})]:[]);},saveMedia:async()=>{}});
- try{const id=fetcher.start(input);await settled(fetcher);assert.equal(store.stats().posts,0);assert.equal(store.archiveFetch(id)?.cursorMs,start);assert.match(store.archiveFetch(id)?.reason??'',/Storage cap/);store.setStorageLimit(3_000_000);fetcher.resume(id);await settled(fetcher);assert.equal(store.archiveFetch(id)?.state,'done');assert.equal(store.stats().posts,2);assert.equal(calls,3);}finally{await fetcher.close();store.close();}
+ try{const id=fetcher.start(input);await settled(fetcher);assert.equal(store.stats().posts,0);assert.equal(store.archiveFetch(id)?.cursorMs,start);assert.match(store.archiveFetch(id)?.reason??'',/Storage cap/);store.setStorageLimit(10_000_000);fetcher.resume(id);await settled(fetcher);assert.equal(store.archiveFetch(id)?.state,'done');assert.equal(store.stats().posts,2);assert.equal(calls,3);}finally{await fetcher.close();store.close();}
 });
 
 test('excluded and malformed records are disclosed, skipped-only pages advance, and archives cannot replace live content',async()=>{
