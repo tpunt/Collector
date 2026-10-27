@@ -379,3 +379,19 @@ capacity, request pacing, interrupted work and database upgrades. The online
 player fixture loops its short sample to avoid racing clip completion when
 asserting playback; production playback behavior is unchanged. The detailed
 resolved-gap inventory and remaining source boundaries are in OFFLINE_AUDIT.md.
+
+## Randomized request spacing — 27 October 2026
+
+At the user's request, the shared collector queue now samples a fresh uniform
+4–6 second gap after response readiness instead of the fixed five-second gap.
+Browser and archive traffic, media redirects, manifests and separate video/audio
+tracks all use the policy. Sampled deadlines survive cancelled waiters and browser
+restarts. Longer service cooldowns, navigation waits and request budgets remain
+in force. The sidebar, archive dialog and sign-in instructions describe the range.
+
+Validation: 143 unit tests and 44 local integration tests pass, plus type
+checking, production build and Git whitespace checks. Injected clocks and random
+samples verify exact 4/6-second endpoints, varying intermediate gaps, response
+completion, cancellation, shared archive/media pacing and video/audio hops.
+Local Chrome fixtures verify request gating and offline playback. No Reddit or
+other external collection requests were made for this change.

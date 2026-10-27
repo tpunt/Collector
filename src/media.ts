@@ -10,7 +10,6 @@ import { RequestQueue } from './request-gate.ts';
 import { AccessError } from './browser.ts';
 import { retryAfter } from './limiter.ts';
 import { spawn } from 'node:child_process';
-import { setTimeout as delay } from 'node:timers/promises';
 import { dashMedia } from './dash.ts';
 import { SyncLimitError, UnsupportedMediaError } from './sync-errors.ts';
 import {mediaKey} from './media-key.ts';
@@ -199,7 +198,7 @@ export class MediaCache {
         const location=response.headers.get('location');await response.body?.cancel();
         let next:string;try{next=new URL(location??'',url).href;}catch{throw new UnsupportedMediaError('Invalid media redirect');}
         if(!location||!mediaReference(next))throw new UnsupportedMediaError('Media redirect leaves supported public file hosts');
-        await delay(this.options.queue.intervalMs,undefined,{signal:task.controller.signal});url=next;continue;
+        await this.options.queue.waitInterval(task.controller.signal);url=next;continue;
       }
       if([403,429].includes(response.status)){
         await response.body?.cancel();
@@ -236,12 +235,12 @@ export class MediaCache {
     let published=false,renamed=false;
     try{
       let reference=task.reference;
-      if(/\.mpd(?:\?|$)/i.test(reference.url)){reference=await this.manifest(task);await delay(this.options.queue.intervalMs,undefined,{signal:task.controller.signal});}
+      if(/\.mpd(?:\?|$)/i.test(reference.url)){reference=await this.manifest(task);await this.options.queue.waitInterval(task.controller.signal);}
       let saved=await this.downloadFile(task,reference.url,temporary,reference.kind),result=temporary;
       if(reference.audioUrl){
         // Hold the shared queue while downloading both tracks. Space the second
         // actual HTTP request from completion too, including in this composite task.
-        await delay(this.options.queue.intervalMs,undefined,{signal:task.controller.signal});
+        await this.options.queue.waitInterval(task.controller.signal);
         await this.downloadFile(task,reference.audioUrl,audio,'audio');
         await new Promise<void>((resolve,reject)=>{
           const process=spawn('ffmpeg',['-nostdin','-hide_banner','-loglevel','error','-protocol_whitelist','file,pipe','-i',temporary,'-protocol_whitelist','file,pipe','-i',audio,'-map','0:v:0','-map','1:a:0','-c','copy','-movflags','+faststart','-f','mp4',muxed],{stdio:'ignore',signal:AbortSignal.any([task.controller.signal,AbortSignal.timeout(30_000)])});

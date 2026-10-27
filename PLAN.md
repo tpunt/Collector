@@ -7,6 +7,12 @@ planning below. The core offline-content work now includes full post text,
 complete native galleries, archive media metadata and resumable downloads.
 Backup/read/search/cleanup/launcher additions below remain planned. Keep the app a compact, on-demand local web reader.
 
+Request pacing now uses a fresh uniform random 4–6 second delay after response
+readiness, shared by browser, archive and media traffic, including redirects and
+native video/audio hops. This supersedes the former fixed five-second policy in
+the historical entries below. Longer service cooldowns, navigation readiness,
+request budgets and explicit Stop/Resume behavior still apply.
+
 ### Future content sources
 
 Reddit is the first platform; additional platforms may follow. Shared features

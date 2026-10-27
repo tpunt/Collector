@@ -234,7 +234,7 @@ export class ReaderJobs {
   async signIn() {
     if (this.pumping) throw new Error('Stop collection and wait for the browser to close first');
     this.allowed(true); this.manual = true; this.browserOpen = true;
-    this.message = 'Sign in in the dedicated Chrome window, then Finish sign-in. Loading is paced at five seconds per request.';
+    this.message = 'Sign in in the dedicated Chrome window, then Finish sign-in. Requests have random 4–6 second gaps after response readiness.';
     try { await this.browser.manualSignIn(); }
     catch (error) { this.pause(error instanceof Error ? error.message : 'Sign-in failed'); throw error; }
   }

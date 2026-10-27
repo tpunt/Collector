@@ -4,7 +4,8 @@ import type { BrowserContext, Page } from 'playwright';
 import { browserLaunchOptions } from './browser-options.ts';
 import { profileDirectory } from './paths.ts';
 import { BrowserLimiter, retryAfter } from './limiter.ts';
-import { ChromiumRequestGate, chromiumControlUrl, RequestQueue } from './request-gate.ts';
+import { ChromiumRequestGate, chromiumControlUrl, RequestQueue, DEFAULT_REQUEST_INTERVAL } from './request-gate.ts';
+import type { RequestInterval } from './request-gate.ts';
 import { redditUrl } from './domain.ts';
 
 export class AccessError extends Error {
@@ -20,13 +21,16 @@ export class ReaderBrowser {
   private limiter = new BrowserLimiter();
   private closing: Promise<void> | null = null;
   private lastClosed = 0;
-  private requestCounts = { intercepted: 0, released: 0, aborted: 0, suppressed: 0, intervalMs: 5_000 };
+  private requestCounts = { intercepted: 0, released: 0, aborted: 0, suppressed: 0, intervalMs: DEFAULT_REQUEST_INTERVAL as RequestInterval };
   private onAccess: (error: AccessError) => void;
-  private queue: RequestQueue | undefined;
+  private queue: RequestQueue;
   private observedMedia = new Set<string>();
   get mediaCandidates() { return [...this.observedMedia]; }
 
-  constructor(onAccess: (error: AccessError) => void = () => {}, queue?: RequestQueue) { this.onAccess = onAccess; this.queue = queue; }
+  constructor(onAccess: (error: AccessError) => void = () => {}, queue?: RequestQueue) {
+    this.onAccess = onAccess; this.queue = queue ?? new RequestQueue({fromCompletion:true});
+    this.requestCounts.intervalMs = this.queue.intervalMs;
+  }
   get counts() { return this.gate?.counts ?? this.requestCounts; }
 
   async open(maxRequests = 100, interactive: boolean | 'media' = false): Promise<void> {

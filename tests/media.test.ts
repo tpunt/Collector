@@ -22,7 +22,7 @@ test('media references admit only bounded direct CDN files and reject API, activ
 
 test('browser requests and media downloads share completion-based pacing; cached files survive restart without another request',async()=>{
  const directory=await mkdtemp(join(tmpdir(),'reader-media-test-')),store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[record(),record('def')]);
- let now=0,calls=0;const starts:number[]=[];const queue=new RequestQueue({fromCompletion:true,clock:{now:()=>now,sleep:async ms=>{now+=ms;}}});
+ let now=0,calls=0;const starts:number[]=[];const queue=new RequestQueue({fromCompletion:true,random:()=>0.5,clock:{now:()=>now,sleep:async ms=>{now+=ms;}}});
  const cache=new MediaCache(store,{directory,queue,onAccess:()=>assert.fail('No access pause expected'),fetch:async()=>{calls++;starts.push(now);return new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/jpeg'}});}});
  try{
   await queue.run(async()=>{starts.push(now);now+=2000;});await cache.enqueue('t3_abc');await cache.enqueue('t3_def');await settled(cache);await queue.run(async()=>{starts.push(now);});
@@ -37,10 +37,11 @@ test('media redirects and wrong content types fail once, and explicit retry is r
  try{await cache.enqueue('t3_abc');await settled(cache);assert.equal(calls,1);await cache.enqueue('t3_abc');await settled(cache);assert.equal(calls,1);assert.equal((await cache.items('t3_abc'))[0]?.state,'error');await cache.enqueue('t3_abc',true);await settled(cache);assert.equal(calls,2);assert.equal(cache.status.bytes,0);}finally{await cache.close();store.close();await rm(directory,{recursive:true,force:true});}
 });
 
-test('a safe observed CDN redirect is paced, downloaded and saved instead of being discarded',async()=>{
- const directory=await mkdtemp(join(tmpdir(),'reader-safe-redirect-')),store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[record()]);const starts:number[]=[];
- const cache=new MediaCache(store,{directory,queue:new RequestQueue({intervalMs:25,fromCompletion:true}),onAccess:()=>{},fetch:async()=>{starts.push(Date.now());return starts.length===1?new Response('',{status:302,headers:{Location:'https://i.redd.it/current.jpg'}}):new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/jpeg'}});}});
- try{await cache.syncPost('abc','redirect',3,new AbortController().signal);assert.equal(starts.length,2);assert(starts[1]!-starts[0]!>=20);assert.equal(store.mediaSync('abc')?.status,'ready');assert.equal((await cache.items('abc'))[0]?.state,'ready');}
+test('a safe observed CDN redirect uses a fresh randomized gap and is saved locally',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'reader-safe-redirect-')),store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[record()]);const starts:number[]=[];let now=0;
+ const samples=[0.25,0.75,0.5],queue=new RequestQueue({fromCompletion:true,random:()=>samples.shift()!,clock:{now:()=>now,sleep:async ms=>{now+=ms;}}});
+ const cache=new MediaCache(store,{directory,queue,onAccess:()=>{},fetch:async()=>{starts.push(now);now+=100;return starts.length===1?new Response('',{status:302,headers:{Location:'https://i.redd.it/current.jpg'}}):new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/jpeg'}});}});
+ try{await cache.syncPost('abc','redirect',3,new AbortController().signal);await queue.run(async()=>starts.push(now));assert.deepEqual(starts,[0,4600,10200]);assert.equal(samples.length,0);assert.equal(store.mediaSync('abc')?.status,'ready');assert.equal((await cache.items('abc'))[0]?.state,'ready');}
  finally{await cache.close();store.close();await rm(directory,{recursive:true,force:true});}
 });
 

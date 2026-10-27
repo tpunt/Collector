@@ -4,35 +4,57 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { Clock } from './limiter.ts';
 
+export type RequestInterval = number | readonly [number, number];
+export const DEFAULT_REQUEST_INTERVAL = [4_000, 6_000] as const;
+
 /** Spaces network starts, including redirects; not merely UI actions. */
 export class RequestQueue {
   private tail: Promise<unknown> = Promise.resolve();
-  private lastStart: number | null = null;
+  private nextAllowedAt: number | null = null;
   private controller = new AbortController();
   private clock: Clock;
   private fromCompletion: boolean;
-  readonly intervalMs: number;
+  private random: () => number;
+  readonly intervalMs: RequestInterval;
   released = 0;
 
-  constructor(options: { intervalMs?: number; clock?: Clock; fromCompletion?: boolean } = {}) {
-    this.intervalMs = options.intervalMs ?? 5_000;
+  constructor(options: { intervalMs?: RequestInterval; clock?: Clock; fromCompletion?: boolean; random?: () => number } = {}) {
+    this.intervalMs = typeof options.intervalMs === 'number' ? options.intervalMs : [...(options.intervalMs ?? DEFAULT_REQUEST_INTERVAL)] as [number,number];
     this.fromCompletion = options.fromCompletion ?? false;
-    if (!Number.isFinite(this.intervalMs) || this.intervalMs < 0) throw new Error('Invalid request interval');
+    const [min,max] = typeof this.intervalMs === 'number' ? [this.intervalMs,this.intervalMs] : this.intervalMs;
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min < 0 || max < min) throw new Error('Invalid request interval');
+    this.random = options.random ?? Math.random;
     this.clock = options.clock ?? { now: () => performance.now(), sleep: async (ms, signal) => { await delay(ms, undefined, { signal }); } };
   }
   stop(): void { this.controller.abort(); }
+  private sampleInterval(): number {
+    if (typeof this.intervalMs === 'number') return this.intervalMs;
+    const [min,max] = this.intervalMs;
+    if (min === max) return min;
+    const sample = this.random();
+    if (!Number.isFinite(sample) || sample < 0 || sample > 1) throw new Error('Invalid request interval sample');
+    return min + sample * (max - min);
+  }
+  private async waitUntil(deadline:number, signal?:AbortSignal):Promise<void> {
+    const combined = signal ? AbortSignal.any([signal,this.controller.signal]) : this.controller.signal;
+    combined.throwIfAborted();
+    while (this.clock.now() < deadline) await this.clock.sleep(deadline-this.clock.now(),combined);
+    combined.throwIfAborted();
+  }
+  /** Between HTTP hops within a composite media task, while it holds the queue. */
+  async waitInterval(signal?:AbortSignal):Promise<void> {
+    await this.waitUntil(this.clock.now()+this.sampleInterval(),signal);
+  }
   run<T>(release: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     const task = this.tail.then(async () => {
       signal?.throwIfAborted();
       this.controller.signal.throwIfAborted();
-      const wait = this.lastStart === null ? 0 : Math.max(0, this.lastStart + this.intervalMs - this.clock.now());
-      if (wait) await this.clock.sleep(wait, signal ? AbortSignal.any([signal, this.controller.signal]) : this.controller.signal);
-      signal?.throwIfAborted();
-      this.controller.signal.throwIfAborted();
-      this.lastStart = this.clock.now();
+      if (this.nextAllowedAt !== null) await this.waitUntil(this.nextAllowedAt,signal);
+      const startedAt = this.clock.now();
       this.released++;
       try { return await release(); }
-      finally { if (this.fromCompletion) this.lastStart = this.clock.now(); }
+      // Sample once per completed release, so cancelled waiters cannot shorten it.
+      finally { this.nextAllowedAt = (this.fromCompletion ? this.clock.now() : startedAt) + this.sampleInterval(); }
     });
     this.tail = task.catch(() => undefined);
     return task;
@@ -65,7 +87,7 @@ interface Pending {
 export interface RequestGateOptions {
   queue?: RequestQueue;
   onMediaRequest?: (url: string) => void;
-  intervalMs?: number;
+  intervalMs?: RequestInterval;
   isPaused?: () => boolean;
   onFailure?: (reason: string) => void;
   blockedResourceTypes?: string[];

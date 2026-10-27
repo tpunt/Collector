@@ -152,7 +152,7 @@ try {
       if (limiter.pauseState) {
         await terminal.question('Automatic browsing is paused. The dedicated browser stays open for manual inspection/sign-in. Press Enter to finish this probe; rerun explicitly after resolving access.\n');
       } else {
-        await terminal.question('The login page may load slowly under the five-second request limit. Sign in manually, including MFA; press Enter here only when signed in.\n');
+        await terminal.question('The login page may load slowly with random 4–6 second request gaps. Sign in manually, including MFA; press Enter here only when signed in.\n');
         userConfirmedLogin = true;
       }
     } finally { terminal.close(); }

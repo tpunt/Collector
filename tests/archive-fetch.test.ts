@@ -22,14 +22,16 @@ test('archive dates include the full UTC end date and support all available hist
 });
 
 test('paged fetching retains timestamp ties, deduplicates boundary replay, saves media before advancing and shares completion pacing',async()=>{
- const store=new ReaderStore(':memory:');let time=0,lastEnd=-1;const starts:number[]=[],visits:string[]=[];const media:string[][]=[];
- const queue=new RequestQueue({intervalMs:5000,fromCompletion:true,clock:{now:()=>time,sleep:async ms=>{time+=ms;}}});
+ const store=new ReaderStore(':memory:');let time=0,lastEnd=-1,sampled=0;const starts:number[]=[],visits:string[]=[],gaps:number[]=[];const media:string[][]=[];
+ const queue=new RequestQueue({fromCompletion:true,random:()=>sampled++%2===0?0.25:0.75,clock:{now:()=>time,sleep:async ms=>{time+=ms;}}});
+ const checkGap=()=>{if(lastEnd>=0){const gap=time-lastEnd;assert.equal(gap,gaps.length%2===0?4500:5500);gaps.push(gap);}};
  const rows=Array.from({length:205},(_,i)=>row(i,{created_utc:start/1000+(i>=99&&i<=102?99:i)}));
- const fetcher=new ArchiveFetcher(store,{queue,fetch:async(url,options)=>{assert.equal(options?.credentials,'omit');assert.equal(options?.redirect,'manual');assert.equal(new URL(url as URL).hostname,'arctic-shift.photon-reddit.com');if(lastEnd>=0)assert(time>=lastEnd+5000);starts.push(time);visits.push(String(url));const q=new URL(String(url)).searchParams,after=Date.parse(q.get('after')!);time+=100;lastEnd=time;return json(rows.filter(r=>r.created_utc*1000>after&&r.created_utc*1000<Date.parse(q.get('before')!)).slice(0,100));},saveMedia:async ids=>{media.push(ids);await queue.run(async()=>{time+=25;lastEnd=time;});}});
+ const fetcher=new ArchiveFetcher(store,{queue,fetch:async(url,options)=>{assert.equal(options?.credentials,'omit');assert.equal(options?.redirect,'manual');assert.equal(new URL(url as URL).hostname,'arctic-shift.photon-reddit.com');checkGap();starts.push(time);visits.push(String(url));const q=new URL(String(url)).searchParams,after=Date.parse(q.get('after')!);time+=100;lastEnd=time;return json(rows.filter(r=>r.created_utc*1000>after&&r.created_utc*1000<Date.parse(q.get('before')!)).slice(0,100));},saveMedia:async ids=>{media.push(ids);await queue.run(async()=>{checkGap();time+=25;lastEnd=time;});}});
  try{
   const id=fetcher.start(input);await settled(fetcher);const job=store.archiveFetch(id)!;
   assert.equal(job.state,'done');assert.equal(job.observed,205);assert.equal(job.added,205);assert.equal(store.stats().posts,205);assert.equal(job.omitted,0);assert.equal(job.pages,4);assert.equal(media.flat().length,205);assert.equal(starts.length,4);assert.equal(store.listTargets().length,0);assert(store.getPost(rows[100]!.id));assert(visits[1]!.includes('00%3A01%3A38.999Z'));
   for(const visit of visits)assert.deepEqual([...new URL(visit).searchParams.keys()].sort(),['after','before','limit','sort','subreddit']);
+  assert(gaps.includes(4500)&&gaps.includes(5500));
  }finally{await fetcher.close();store.close();}
 });
 

@@ -121,7 +121,7 @@ function App() {
       </div>
       <div className="sidebar-bottom"><dl className="sidebar-stats" aria-label="Storage and requests">
         <div className={'storage-stat '+(state?.storage.full?'at-cap':'')}><dt>Stored</dt><dd><span>{(state?.storage.percentUsed??0).toFixed(2)}% used</span><small>{storedSize(state?.storage.usedBytes??0)} / {storedSize(state?.storage.limitBytes??10*GB)}</small></dd></div>
-        <div title="Collection requests: at most one every five seconds. Online players stream separately."><dt>Request limit</dt><dd>0.2 req/s</dd></div>
+        <div title="Collection requests: a fresh random 4–6 second gap after each response is ready. Online players stream separately."><dt>Request spacing</dt><dd>4–6 s</dd></div>
         <div title="Collection requests only; excludes online video players"><dt>Session requests</dt><dd>{(state?.job.requests.sessionTotal??0).toLocaleString()}</dd></div>
       </dl><button onClick={()=>setModal('history')}>Collection history <span>{pending.length||''}</span></button><button onClick={openArchives}>Import an archive</button>
         <button className="settings-button" onClick={openSettings}>Settings</button>
@@ -218,7 +218,7 @@ function App() {
           <div className="archive-dates"><label>From (optional)<input type="date" value={archiveFrom} max={archiveTo||undefined} onInput={e=>setArchiveFrom(e.currentTarget.value)}/></label><label>To<input type="date" required value={archiveTo} min={archiveFrom||undefined} max={new Date().toISOString().slice(0,10)} onInput={e=>setArchiveTo(e.currentTarget.value)}/></label></div>
           <p className="muted">Dates include the whole day in UTC. Leave From blank for all available history. New subreddits are added to your feeds.</p>
           <button type="button" className="archive-all-time" onClick={()=>setArchiveFrom('')}>Use all available history</button>
-          <p className="muted">Downloads posts from <a href="https://arctic-shift.photon-reddit.com" target="_blank" rel="noreferrer">Arctic Shift</a> and saves supported media for offline reading. One request every five seconds; you can stop and resume. Archives and older media may have gaps.</p>
+          <p className="muted">Downloads posts from <a href="https://arctic-shift.photon-reddit.com" target="_blank" rel="noreferrer">Arctic Shift</a> and saves supported media for offline reading. Random 4–6 second gaps between requests; you can stop and resume. Archives and older media may have gaps.</p>
           <button className="button primary" disabled={busy||Boolean(archiveActive)||importBusy||state?.import?.state==='running'}>Fetch archive</button>
         </form>}
         {archiveMode==='file'&&<><p className="muted">Import an existing JSONL / NDJSON export, including .zst. Files are streamed in batches and pause at your storage cap.</p><label>Community<select value={importSource||state?.sources[0]||''} onChange={e=>setImportSource(e.target.value)}>{state?.sources.map(item=><option key={item}>{item}</option>)}</select></label><label>Comment post IDs (optional)<input placeholder="e.g. t3_abc, t3_def" value={importPostIds} onChange={e=>setImportPostIds(e.target.value)}/></label><p className="muted">For comment archives, enter up to 10 post IDs from Reddit links. Import their posts first. Leave blank for post archives.</p><label>Archive file<input type="file" accept=".jsonl,.ndjson,.zst" onChange={e=>setUpload(e.target.files?.[0]??null)}/></label>
