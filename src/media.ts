@@ -64,6 +64,14 @@ export class MediaCache {
     }
   }
   get status() { return {requests:this.requests,bytes:this.bytes,pending:this.tasks.size,revision:this.store.mediaSyncRevision}; }
+  async backupFiles():Promise<string[]> {
+    await this.ready;
+    return [...this.cached.keys()].filter(key=>this.store.hasMediaOwner(key)).flatMap(key=>[key,key+'.json']);
+  }
+  async reload(){
+    await this.close();this.cached.clear();this.states.clear();this.diskFiles.clear();this.bytes=0;this.metadataBytes=0;this.reconciledRevision=null;
+    this.ready=this.load();await this.initialize();
+  }
   async initialize() {
     await this.ready;
     await this.reconcile();

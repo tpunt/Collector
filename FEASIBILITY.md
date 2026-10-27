@@ -412,3 +412,33 @@ pass. The real Chrome fixture exercises hidden tabs, modal overlays, overrides,
 stable unread results, tall-card coverage and reload persistence. It caught and
 verified the fix for rounded corners interfering with obstruction hit tests.
 No website collection requests were made.
+
+## Encrypted backup and restore — 27 October 2026
+
+Settings now creates password-encrypted age backups and downloads them as files.
+Restore decrypts into private staging, authenticates the complete stream, validates
+strict TAR names, checksums, schema, post/media references and cache metadata, then
+offers an explicit replacement confirmation. Preferences, exclusions and reads
+are preserved. Browser profiles are excluded and remain at the destination; the
+next explicit collection verifies its account. Backup creation/replacement pauses
+collection and blocks concurrent mutations. A rollback database, previous media
+directory and startup recovery marker protect interrupted publication. Downloads
+and uncommitted validation tickets expire; an active replacement cannot expire.
+
+The established format is supplied by age-encryption 0.3.1, with production scrypt
+work factor 18; TAR streaming uses tar-stream 3.2.2. See BACKUPS.md for format,
+staging-space and recovery details. Live-library encryption remains deferred.
+
+Validation includes streaming an 8 MiB fixture, production password encryption,
+wrong passwords, truncated/tampered/interrupted inputs, unsafe TAR paths/links,
+capacity changes, snapshot disk failure, publication rollback and startup recovery.
+The Settings workflow downloads a real encrypted file, rejects a wrong password,
+validates without publishing, cancels and then confirms replacement. No Reddit
+requests or real user-library changes were made. Unit concurrency is bounded to
+four workers; the production KDF check runs with integration checks rather than
+competing with short unit-fixture deadlines.
+
+Final stage checks: 151 unit tests and 47 local integration tests pass, plus
+type checking, production build and Git whitespace checks. A current-cap recheck
+protects confirmation after settings changes; a failed rollback snapshot leaves
+the validation ticket retryable without modifying current content.

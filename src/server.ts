@@ -1,7 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
-import { extname, resolve, sep, join } from 'node:path';
+import { extname, resolve, sep, join, dirname } from 'node:path';
+import {createReadStream} from 'node:fs';
+import {pipeline} from 'node:stream/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { ReaderStore } from './store.ts';
@@ -17,18 +19,23 @@ import { MediaCache } from './media.ts';
 import type { MediaDependencies } from './media.ts';
 import { RequestQueue } from './request-gate.ts';
 import { STORAGE_CAP_MESSAGE } from './storage-limit.ts';
+import {LibraryBackups,recoverLibraryRestore} from './library-backup.ts';
 
-export function createReaderServer(options: { database?: string; port?: number; archive?:{fetch?:typeof fetch}; jobs?: JobDependencies; media?: Partial<Pick<MediaDependencies,'directory'|'fetch'|'maxBytes'|'maxRequests'>> } = {}) {
-  const store = new ReaderStore(options.database ?? databasePath);
+export function createReaderServer(options: { database?: string; port?: number; backup?:{workFactor?:number}; archive?:{fetch?:typeof fetch}; jobs?: JobDependencies; media?: Partial<Pick<MediaDependencies,'directory'|'fetch'|'maxBytes'|'maxRequests'>> } = {}) {
+  const database=options.database??databasePath;
+  const temporaryMedia=database===':memory:'&&!options.media?.directory;
+  const mediaDirectory=options.media?.directory??(temporaryMedia?join(tmpdir(),'reddit-reader-media-'+randomBytes(12).toString('hex')):options.database?join(dirname(resolve(database)),'media'):join(dataDirectory,'media'));
+  const backupDirectory=database===':memory:'?join(tmpdir(),'collector-backups-'+randomBytes(12).toString('hex')):join(dirname(database),'.backup-work');
+  recoverLibraryRestore(database,mediaDirectory,backupDirectory);
+  const store = new ReaderStore(database);
   const network = options.jobs?.network ?? new RequestQueue({fromCompletion:true});
   let media: MediaCache;
   let archive:ArchiveFetcher;
   const jobs = new ReaderJobs(store, {...options.jobs,network,onPause:()=>{media?.stop();archive?.pause(store.getSetting<{reason:string}>('accessPause')?.reason??'Collection stopped; Resume archive to continue');options.jobs?.onPause?.();}});
-  const temporaryMedia=options.database===':memory:'&&!options.media?.directory;
-  const mediaDirectory=options.media?.directory??(temporaryMedia?join(tmpdir(),'reddit-reader-media-'+randomBytes(12).toString('hex')):join(dataDirectory,'media'));
   media = new MediaCache(store,{...options.media,directory:mediaDirectory,queue:network,onAccess:error=>jobs.accessFailure(error)});
   jobs.attachMedia(options.jobs?.mediaSync===undefined?media:options.jobs.mediaSync);
   const importer = new ArchiveImporter(store);
+  const backups=new LibraryBackups(store,media,backupDirectory,mediaDirectory,options.backup?.workFactor);
   archive=new ArchiveFetcher(store,{...options.archive,queue:network,assertCanStart:resume=>{
     if(importer.progress?.state==='running')throw new Error('Stop the file import before fetching an archive');
     jobs.assertCanQueue(resume);
@@ -38,9 +45,10 @@ export function createReaderServer(options: { database?: string; port?: number; 
   const dist = fileURLToPath(new URL('../dist/', import.meta.url));
   let origin = '';
   let cleaningContent=false;
-  const cleanupPaths=new Set(['/api/remove','/api/clear-source','/api/delete-post','/api/clear']);
+  const cleanupPaths=new Set(['/api/remove','/api/clear-source','/api/delete-post','/api/clear','/api/backup/create','/api/restore/commit']);
   const stopPaths=new Set(['/api/pause','/api/import/stop','/api/archive/stop','/api/sign-in/finish']);
   const assertCleanupIdle=(path:string)=>{if(cleaningContent&&!stopPaths.has(path))throw new Error('Content cleanup is still in progress. Try again when it finishes.');};
+  const quiesce=async()=>{await archive.close();await importer.close();await jobs.close();await media.close();};
   const json = (res: ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value)); };
   const body = async (req: IncomingMessage) => {
     let content = ''; for await (const chunk of req) { content += chunk; if (content.length > 32_000) throw new Error('Request too large'); }
@@ -59,10 +67,17 @@ export function createReaderServer(options: { database?: string; port?: number; 
     try {
       if (req.headers.host !== new URL(origin).host || (req.headers.origin && req.headers.origin !== origin) || req.headers['sec-fetch-site'] === 'cross-site') { json(res, { error: 'Local requests only' },403); return; }
       const url = new URL(req.url ?? '/', origin);
+      if(backups.recoveryRequired)throw new Error('Restore recovery requires an application restart; library access is blocked until recovery');
       if (req.method === 'POST') {
         const supplied = String(req.headers['x-reader-token'] ?? '');
         if (supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { json(res,{error:'Invalid local request token'},403); return; }
         assertCleanupIdle(url.pathname);
+        if(url.pathname==='/api/restore/prepare'){
+          cleaningContent=true;
+          try{json(res,await backups.prepare(req,decodeURIComponent(String(req.headers['x-backup-passphrase']??''))));}
+          finally{cleaningContent=false;}
+          return;
+        }
         if (url.pathname === '/api/import') {
           if(archive.running)throw new Error('Stop the archive fetch before importing a file');
           const ids = (url.searchParams.get('postIds') ?? '').split(',').filter(Boolean).map(postId);
@@ -80,6 +95,13 @@ export function createReaderServer(options: { database?: string; port?: number; 
         if(cleansContent)cleaningContent=true;
         try {
         switch (url.pathname) {
+          case '/api/backup/create': {
+            const controller=new AbortController(),cancel=()=>controller.abort();res.once('close',cancel);
+            try{await quiesce();json(res,await backups.create(data.passphrase,controller.signal));}
+            finally{res.removeListener('close',cancel);}return;
+          }
+          case '/api/restore/commit': if(data.confirm!==true)throw new Error('Confirm library replacement first');await quiesce();await backups.restore(String(data.id));await importer.clear();json(res,{ok:true});return;
+          case '/api/restore/discard': await backups.discard(String(data.id));json(res,{ok:true});return;
           case '/api/read': json(res,{post:store.setRead(String(data.id),data.read as boolean)});return;
           case '/api/settings': {
             store.setStorageLimit(data.maxStoredBytes);
@@ -172,6 +194,11 @@ export function createReaderServer(options: { database?: string; port?: number; 
         } finally {if(cleansContent)cleaningContent=false;}
       }
       if (req.method !== 'GET') { json(res,{error:'Method not allowed'},405); return; }
+      if(url.pathname.startsWith('/api/backup/download/')){
+        const file=backups.download(url.pathname.slice('/api/backup/download/'.length));
+        res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':'attachment; filename="collector.tar.age"','Content-Length':file.bytes,'Cache-Control':'no-store'});
+        await pipeline(createReadStream(file.path),res);return;
+      }
       if (url.pathname === '/api/state') { json(res,{ token, sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
         storage:store.storage, import:importer.progress, imports:store.getSetting('imports') ?? [], account:store.getSetting('account') }); return; }
       if (url.pathname === '/api/feed') {
@@ -197,12 +224,12 @@ export function createReaderServer(options: { database?: string; port?: number; 
     } catch (error) { if (!res.headersSent) json(res,{error:error instanceof Error ? error.message : 'Request failed'},400); else res.end(); }
   });
   server.requestTimeout = 60 * 60_000;
-  return { server, store, jobs, importer, media, archive, async listen() {
+  return { server, store, jobs, importer, media, archive, backups, async listen() {
     await media.initialize();
     await new Promise<void>(resolve => server.listen(options.port ?? Number(process.env.PORT ?? 3210),'127.0.0.1',resolve));
     const address=server.address(); if (!address || typeof address === 'string') throw new Error('No local address');
     origin=`http://127.0.0.1:${address.port}`; return origin;
-  }, async close() { await archive.close();await importer.close(); await jobs.close();await media.close();server.closeAllConnections(); await new Promise<void>(resolve => server.close(()=>resolve()));store.close();if(temporaryMedia)await rm(mediaDirectory,{recursive:true,force:true}); } };
+  }, async close() {await backups.close(); await archive.close();await importer.close(); await jobs.close();await media.close();server.closeAllConnections(); await new Promise<void>(resolve => server.close(()=>resolve()));store.close();if(temporaryMedia)await rm(mediaDirectory,{recursive:true,force:true}); } };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const app=createReaderServer();

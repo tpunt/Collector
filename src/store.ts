@@ -1,4 +1,4 @@
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, backup } from 'node:sqlite';
 import {initializeSchema,recoverInterruptedWork} from './schema.ts';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -108,6 +108,53 @@ export class ReaderStore {
   }
 
   close(): void { this.db.close(); }
+  async snapshot(path:string){await backup(this.db,path);}
+  /** Called only with a fully authenticated, schema-validated staged backup. */
+  replaceFrom(path:string,portable=true){
+    const generation=this.generation,revision=this.contentRevision;
+    this.db.prepare('ATTACH DATABASE ? AS restored').run(path);
+    try{
+      this.transaction(()=>{
+        this.db.exec('PRAGMA defer_foreign_keys=ON');
+        const tables=this.db.prepare("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row=>String(row.name));
+        for(const table of tables)this.db.exec(`DELETE FROM main."${table}"`);
+        for(const table of tables)this.db.exec(`INSERT INTO main."${table}" SELECT * FROM restored."${table}"`);
+        this.db.prepare("UPDATE metadata SET value=? WHERE key='generation'").run(Math.max(generation,this.generation)+1);
+        this.db.prepare("UPDATE metadata SET value=? WHERE key='content_revision'").run(revision+1);
+        if(portable)this.db.exec("DELETE FROM settings WHERE key IN ('account','accessPause')");
+      });
+      recoverInterruptedWork(this.db);
+    }finally{this.db.exec('DETACH DATABASE restored');}
+  }
+  validateBackup(path:string){
+    const db=new DatabaseSync(path,{readOnly:true});
+    try{
+      const schema="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
+      if(JSON.stringify(db.prepare(schema).all())!==JSON.stringify(this.db.prepare(schema).all())||
+        Number(db.prepare('PRAGMA user_version').get()!.user_version)!==Number(this.db.prepare('PRAGMA user_version').get()!.user_version)||
+        Number(db.prepare('PRAGMA application_id').get()!.application_id)!==Number(this.db.prepare('PRAGMA application_id').get()!.application_id))throw new Error('Backup schema is not compatible with this app version');
+      if(db.prepare('PRAGMA quick_check').get()!.quick_check!=='ok'||db.prepare('PRAGMA foreign_key_check').all().length)throw new Error('Backup database integrity check failed');
+      for(const row of db.prepare('SELECT * FROM observations JOIN posts ON posts.id=observations.post_id').iterate())validateObservation({
+        id:String(row.id),subreddit:String(row.subreddit),permalink:String(row.permalink),title:row.title as string,
+        created:{epochMs:Number(row.created_ms),precisionMs:Number(row.precision_ms)},source:row.source as 'live'|'archive',exportId:row.export_id as string??undefined,
+        observedAt:Number(row.observed_at),body:row.body as string??undefined,availability:row.availability as Availability,
+        media:row.media?JSON.parse(String(row.media)):undefined,attachments:row.attachments?JSON.parse(String(row.attachments)):undefined,outbound:row.outbound as string??undefined});
+      for(const row of db.prepare('SELECT * FROM media_evidence JOIN posts ON posts.id=media_evidence.post_id').iterate())validateObservation({id:String(row.id),subreddit:String(row.subreddit),permalink:String(row.permalink),title:'Media evidence',created:{epochMs:Number(row.created_ms),precisionMs:Number(row.precision_ms)},source:'live',observedAt:Number(row.observed_at),attachments:JSON.parse(String(row.attachments))});
+      for(const row of db.prepare('SELECT * FROM excluded_posts').iterate()){postId(String(row.post_id));subredditName(String(row.subreddit));}
+      for(const row of db.prepare('SELECT id FROM posts').iterate()){
+        const post=this.readPost(db,String(row.id)),expected=new Set((post?.attachments??[]).map(mediaKey));
+        const owned=db.prepare('SELECT key FROM post_media WHERE post_id=?').all(String(row.id)).map(row=>String(row.key));
+        if(owned.length!==expected.size||owned.some(key=>!expected.has(key)))throw new Error('Backup media ownership does not match its post references');
+      }
+      for(const row of db.prepare('SELECT post_id,data FROM thread_snapshots').iterate()){
+        const snapshot=JSON.parse(String(row.data));
+        if(snapshot.postId!==row.post_id||!Array.isArray(snapshot.comments)||typeof snapshot.sample!=='string'||typeof snapshot.sort!=='string'||
+          snapshot.body!==null&&typeof snapshot.body!=='string'||snapshot.comments.some((comment:any)=>!/^t1_[a-z0-9]+$/.test(comment.id)||comment.postId!==row.post_id||typeof comment.body!=='string'))throw new Error('Invalid discussion in backup');
+      }
+      const cap=db.prepare("SELECT value FROM settings WHERE key='maxStoredBytes'").get();if(cap)storageCap(JSON.parse(String(cap.value)));
+      return {posts:Number(db.prepare('SELECT count(*) AS n FROM posts').get()!.n),keys:new Set(db.prepare('SELECT DISTINCT key FROM post_media').all().map(row=>String(row.key)))};
+    }finally{db.close();}
+  }
   setExternalStorageUsage(readBytes:()=>number) { this.externalStorageBytes=readBytes; }
   get storageLimit():number { return this.getSetting<number>('maxStoredBytes') ?? DEFAULT_STORAGE_CAP; }
   setStorageLimit(value:unknown) { this.setSetting('maxStoredBytes',storageCap(value)); }
@@ -271,7 +318,10 @@ export class ReaderStore {
   }
 
   getPost(input: string, source?: 'archive'): StoredPost | null {
-    const row = this.db.prepare(`SELECT p.*, o.title, ${POST_BODY} AS body,${POST_MEDIA} AS media,${POST_ATTACHMENTS} AS attachments,${POST_OUTBOUND} AS outbound,o.availability,
+    return this.readPost(this.db,input,source);
+  }
+  private readPost(db:DatabaseSync,input:string,source?:'archive'):StoredPost|null {
+    const row = db.prepare(`SELECT p.*, o.title, ${POST_BODY} AS body,${POST_MEDIA} AS media,${POST_ATTACHMENTS} AS attachments,${POST_OUTBOUND} AS outbound,o.availability,
       o.source, o.export_id, o.observed_at, o.captured_at,
       (SELECT attachments FROM media_evidence WHERE post_id=p.id) AS discovered_attachments
       FROM posts p JOIN observations o ON o.post_id = p.id
@@ -282,10 +332,10 @@ export class ReaderStore {
     const attachments = availability === 'available' ? postMediaReferences(row.outbound as string|null,JSON.parse(String(row.discovered_attachments ?? row.attachments ?? '[]')) as MediaReference[]) : [];
     return {
       id: String(row.id), subreddit: String(row.subreddit), permalink: String(row.permalink), title: String(row.title),
-      readAt:(this.db.prepare('SELECT read_at FROM read_states WHERE post_id=?').get(String(row.id))?.read_at as number|undefined)??null,
+      readAt:(db.prepare('SELECT read_at FROM read_states WHERE post_id=?').get(String(row.id))?.read_at as number|undefined)??null,
       createdMs: Number(row.created_ms), precisionMs: Number(row.precision_ms),
       body: availability === 'available' ? row.body as string | null : null,
-      bodySync:this.bodySync(String(row.id)),
+      bodySync:(db.prepare('SELECT status,reason FROM body_sync WHERE post_id=?').get(String(row.id)) as StoredPost['bodySync'])??null,
       media: availability === 'available' ? [...new Set<MediaKind>([...JSON.parse(String(row.media ?? '[]')), ...attachments.map(item=>item.kind==='image'?'Image' as const:'Video' as const)])] : [],
       attachments,
       mediaDiscoveryComplete:!isGallery(row.outbound as string|null)||completeCollection('reddit:'+String(row.id),attachments),

@@ -2,7 +2,7 @@
 
 A local web app for reading selected subreddits on demand. Uses its own signed-in Chrome profile, Playwright, structured rendered Classic Reddit HTML, React, and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
 
-Viewport-based read tracking and complete native galleries are implemented. The [next-stage plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records the remaining encrypted backups, search scopes, storage cleanup and launcher. Live-library encryption is deferred until after them.
+Viewport-based read tracking, encrypted backup/restore and complete native galleries are implemented. The [next-stage plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records the remaining search scopes, storage cleanup and launcher. Live-library encryption is deferred until after them.
 
 Read status is local to Collector. A card is marked read after its full visible
 area has been shown for one second while the page is visible and unobscured.
@@ -44,6 +44,17 @@ REDDIT_READER_DATA_DIR="/absolute/path/to/other-clone/.local-data" npm start
 Run only one instance at a time when sharing a data folder. Independently running clones need separate data folders and ports; `PORT` changes the default 3210. Existing data in the previous per-user folder is left in place, with no automatic copying. To keep using the previous macOS location, run `REDDIT_READER_DATA_DIR="$HOME/Library/Application Support/Reddit Reader" npm start`.
 
 The server binds only to `127.0.0.1`, validates Host/Origin and requires a per-launch token for mutations. It is a personal local app, not a hosted multiuser service.
+
+## Backup and restore
+
+Settings provides **Create encrypted backup**, **Download backup** and
+**Validate backup**. Use a passphrase of at least 12 characters and keep it safe.
+Validation leaves the current library intact; choose **Replace library** only
+after reviewing the saved counts, or **Keep current library** to cancel. Backups
+include owned media, preferences, exclusions and read states, while excluding the
+browser profile. Restore keeps that profile and verifies its account on the next
+explicit Sync. Collection stays paused. See [backup format, temporary-space and
+recovery details](BACKUPS.md). The working library remains unencrypted.
 
 ## Persistence
 
