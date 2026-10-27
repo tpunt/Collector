@@ -5,6 +5,8 @@ import { mediaReferences, postMediaReferences,isGallery } from './media-referenc
 import type { MediaReference } from './media-reference.ts';
 import {PostIdentityError} from './sync-errors.ts';
 import {onlineEmbed} from './online-embed.ts';
+import {redditDomAuthor} from './reddit-author.ts';
+import type {Author} from './authors.ts';
 
 export interface RawPost {
   id: string | null; subreddit: string | null; permalink: string | null;
@@ -12,6 +14,7 @@ export interface RawPost {
   self: boolean; pinned: boolean; promoted: boolean; body?: string;
   video: boolean; image: boolean;
   assets?: string[];
+  author?:{name:string;href:string|null};
 }
 export interface Listing {
   account: string;
@@ -38,10 +41,13 @@ export function collectClassicListingDom() {
     const title = el.querySelector('a.title');
     const time = el.querySelector('.tagline time:not(.edited-timestamp)');
     const body = el.querySelector(':scope > .entry .usertext-body .md');
+    const author=el.querySelector(':scope > .entry .tagline .author');
+    const tagline=el.querySelector(':scope > .entry .tagline');
     return {
       id: el.getAttribute('data-fullname'), subreddit: el.getAttribute('data-subreddit'),
       permalink: el.getAttribute('data-permalink') ?? el.querySelector('a.comments')?.getAttribute('href') ?? null,
       title: rendered(title) ? (title.textContent ?? '').trim() : '',
+      author:rendered(author)?{name:(author.textContent??'').trim(),href:author.getAttribute('href')}:rendered(tagline)&&/\bby\s+\[deleted\]/i.test((tagline as HTMLElement).innerText)?{name:'[deleted]',href:null}:undefined,
       datetime: rendered(time) ? time.getAttribute('datetime') : null,
       outbound: el.getAttribute('data-url') ?? title?.getAttribute('href') ?? null,
       self: el.classList.contains('self'), pinned: el.classList.contains('stickied'),
@@ -111,6 +117,7 @@ export async function readListing(page: Page, input: string): Promise<Listing> {
     try {
       if (!created || !row.id || !row.permalink || !row.subreddit || subredditName(row.subreddit) !== subreddit) throw new Error('Incomplete identity/time');
       const observation = validateObservation({ id: row.id, subreddit, title: row.title,
+        author:redditDomAuthor(row.author),
         permalink: row.permalink, created, source: 'live', observedAt: now,
         body: row.body,bodyNeedsFetch:row.self||Boolean(row.body), outbound:row.outbound??undefined, media: classifyMedia(row), attachments:isGallery(row.outbound)?[]:postMediaReferences(row.outbound,mediaReferences([row.outbound, ...row.assets ?? []])) });
       posts.push(observation);
@@ -131,6 +138,7 @@ export interface ThreadSnapshot {
   id: string; postId: string; source: 'live' | 'archive'; capturedAt: number | null; observedAt: number;
   sort: string; body: string | null; availability: Availability; comments: CommentRecord[];
   omitted: number; sample: string; exportId?: string;
+  author?:Author|null;
 }
 
 export function collectClassicThreadDom(expectedId: string) {
@@ -160,9 +168,12 @@ export function collectClassicThreadDom(expectedId: string) {
   const post = matches.length===1 ? matches[0] : fallback;
   const threadPostId=post?.getAttribute('data-fullname') ?? (fallback?expectedId:null);
   const body = post?.querySelector(':scope > .entry .usertext-body .md');
+  const author=post?.querySelector(':scope > .entry .tagline .author');
+  const tagline=post?.querySelector(':scope > .entry .tagline');
   const comments = Array.from(document.querySelectorAll('.commentarea .thing.comment[data-fullname^="t1_"]')).filter(rendered);
   return {
     postId: threadPostId,
+    author:rendered(author??null)?{name:(author!.textContent??'').trim(),href:author!.getAttribute('href')}:rendered(tagline??null)&&/\bby\s+\[deleted\]/i.test((tagline as HTMLElement).innerText)?{name:'[deleted]',href:null}:undefined,
     availability: post?removal(post):null,
     visiblePostIds: posts.map(el=>el.getAttribute('data-fullname')),
     body: rendered(body ?? null) ? (body as HTMLElement).innerText.trim() : body&&body.textContent?.trim()===''&&rendered(body.parentElement)?'':null,
@@ -214,6 +225,7 @@ export async function readThread(page: Page, expectedId: string): Promise<{ snap
     if (url.hostname === 'old.reddit.com' && /\/comments\//.test(url.pathname) && url.searchParams.get('sort') === 'top') topLink = url.href;
   }
   return { attachments:isGallery(dom.assets[0])?undefined:postMediaReferences(dom.assets[0],mediaReferences(dom.assets)), snapshot: { id: crypto.randomUUID(), postId: id, source: 'live', capturedAt: Date.now(), observedAt: Date.now(),
+    author:redditDomAuthor(dom.author),
     sort: dom.sort ?? 'unknown', body: availability === 'available' ? body : null,
     availability, comments, omitted, sample: 'Initially rendered comments, up to 100; unexpanded branches omitted' }, topLink };
 }

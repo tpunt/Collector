@@ -13,11 +13,13 @@ import {StorageSettings} from './StorageSettings.tsx';
 import { MEDIA_FILTERS } from '../src/domain.ts';
 import { GB } from '../src/storage-limit.ts';
 import {feedCursor} from '../src/feed-cursor.ts';
+import {authorKey,authorLabel} from '../src/authors.ts';
+import type {Author} from '../src/authors.ts';
 import type { StorageStatus } from '../src/storage-limit.ts';
 import './style.css';
 
 type Feed = FeedSource & { offline:OfflineMediaCounts; status: 'idle' | 'queued' | 'syncing' | 'stopping' };
-type State = {token:string;canQuit:boolean;sources:string[];feeds:Feed[];targets:HistoryTarget[];storage:StorageStatus;stats:{posts:number;snapshots:number;mediaPosts:number;contentRevision:number;databaseBytes:number};
+type State = {token:string;canQuit:boolean;favourites:{posts:number;users:Author[]};sources:string[];feeds:Feed[];targets:HistoryTarget[];storage:StorageStatus;stats:{posts:number;snapshots:number;mediaPosts:number;contentRevision:number;databaseBytes:number};
   job:{running:boolean;manual:boolean;queued:number;subreddit:string|null;message:string;requests:{released:number;suppressed:number;sessionTotal:number};accessPause:{reason:string;notBefore:number|null}|null};
   media:{pending:number;bytes:number;requests:number;revision:number};import:{state:string;lines:number;accepted:number;omitted:number;bytes:number;reason:string|null}|null;imports:unknown[];archives:(ArchiveFetchState&{offline:OfflineMediaCounts})[];account:string|null};
 type Thread = {post:StoredPost;snapshot:ThreadSnapshot|null};
@@ -28,6 +30,12 @@ const syncLabel=(feed:Feed)=>feed.sync.state==='incomplete'?'Resume':'Sync';
 const syncState=(feed:Feed)=>feed.status==='syncing'?'Syncing':feed.status==='queued'?'Queued':feed.status==='stopping'?'Stopping':
   feed.sync.state==='complete'?'Saved offline':feed.sync.state==='gaps'?'Completed with gaps':feed.sync.state==='incomplete'?'Incomplete':'Not synced';
 const storedSize=(bytes:number)=>bytes>=GB?`${(bytes/GB).toLocaleString(undefined,{maximumFractionDigits:2})} GB`:`${(bytes/1_000_000).toFixed(1)} MB`;
+type Collection='all'|'posts'|'users';
+const hashCollection=():Collection=>location.hash==='#favourites'?'posts':location.hash==='#users'?'users':'all';
+
+function FavouriteButton({active,label,disabled,onClick}:{active:boolean;label:string;disabled:boolean;onClick:()=>void}){
+  return <button className={'favourite-toggle'+(active?' active':'')} title={label} aria-label={label} aria-pressed={active} disabled={disabled} onClick={onClick}><svg width="15" height="15" viewBox="0 0 24 24" fill={active?'currentColor':'none'} stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z"/></svg></button>;
+}
 
 
 function Modal({title,close,children,wide=false}:{title:string;close:()=>void;children:React.ReactNode;wide?:boolean}) {
@@ -55,6 +63,7 @@ function App() {
   const [state,setState]=useState<State|null>(null),[posts,setPosts]=useState<StoredPost[]>([]),[next,setNext]=useState<string|null>(null);
   const postRows=useRef<StoredPost[]>([]),loadedQuery=useRef(''),loadedNext=useRef<string|null>(null),scrollAnchor=useRef<{id:string;top:number}|null>(null);
   const [view,setView]=useState(location.hash==='#feeds'?'feeds':'posts');
+  const [collection,setCollection]=useState<Collection>(hashCollection),[userFilter,setUserFilter]=useState('');
   const [source,setSource]=useState(''),[media,setMedia]=useState(''),[search,setSearch]=useState('');
   const [searchScope,setSearchScope]=useState('both');
   const [readFilter,setReadFilter]=useState('all'),[readBefore,setReadBefore]=useState(Date.now);
@@ -70,7 +79,10 @@ function App() {
   const [archiveMode,setArchiveMode]=useState<'fetch'|'file'>('fetch'),[archiveName,setArchiveName]=useState('');
   const [archiveFrom,setArchiveFrom]=useState(()=>new Date(historyLowerBound(1,Date.now())!).toISOString().slice(0,10)),[archiveTo,setArchiveTo]=useState(()=>new Date().toISOString().slice(0,10));
   const token=useRef(''),feedVersion=useRef(0),threadId=useRef<string|null>(null),pollVersion=useRef(''),stateVersion=useRef(0),currentQuery=useRef('');
+  const favouriteUsers=state?.favourites?.users??[],selectedAuthor=favouriteUsers.find(author=>authorKey(author)===userFilter);
   const params=new URLSearchParams();if(source)params.set('subreddit',source);if(media)params.set('media',media);if(search)params.set('q',search);
+  if(collection!=='all')params.set('favourites',collection);
+  if(collection==='users'&&selectedAuthor){params.set('authorPlatform',selectedAuthor.platform);params.set('authorId',selectedAuthor.id);}
   params.set('read',readFilter);params.set('readBefore',String(readBefore));
   params.set('scope',searchScope);
   if(currentQuery.current!==params.toString()){currentQuery.current=params.toString();feedVersion.current++;}
@@ -79,7 +91,8 @@ function App() {
   const currentFeed=feeds.find(feed=>feed.name===source);
   const archiveActive=state?.archives.find(job=>job.state==='running');
   function openArchives(){setArchiveName(old=>old||source||state?.sources[0]||'');setError('');setModal('import');}
-  function navigate(nextView:string){location.hash=nextView==='feeds'?'feeds':'posts';setView(nextView);}
+  function navigate(nextView:string){location.hash=nextView;setView(nextView==='feeds'?'feeds':'posts');setCollection(nextView==='favourites'?'posts':nextView==='users'?'users':'all');setUserFilter('');}
+  function openFavourites(nextView:'favourites'|'users'){setSource('');navigate(nextView);}
   function filterSource(name:string){setSource(name);navigate('posts');}
   function openSettings(){setStorageGb(String((state?.storage.limitBytes??10*GB)/GB));setStorageSaved(false);setError('');setModal('settings');}
   async function get<T>(path:string):Promise<T>{const response=await fetch(path);const value=await response.json();if(!response.ok)throw new Error(value.error);return value;}
@@ -123,7 +136,10 @@ function App() {
     try{const response=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token.current},body:JSON.stringify(data)});const value=await response.json();if(!response.ok)throw new Error(value.error);if(value.warning)setError(value.warning);await loadState();await loadFeed();return value;}
     catch(e){setError((e as Error).message);return null;}finally{setBusy(false);}
   }
-  useEffect(()=>{void loadState().catch(e=>setError(e.message));const hash=()=>setView(location.hash==='#feeds'?'feeds':'posts');window.addEventListener('hashchange',hash);return()=>window.removeEventListener('hashchange',hash);},[]);
+  useEffect(()=>{void loadState().catch(e=>setError(e.message));const hash=()=>{setView(location.hash==='#feeds'?'feeds':'posts');setCollection(hashCollection());};window.addEventListener('hashchange',hash);return()=>window.removeEventListener('hashchange',hash);},[]);
+  async function togglePostFavourite(post:StoredPost){const result=await action('favourite/post',{id:post.id,context:post.readContext,favourite:!post.favourite});if(result?.post)setThread(old=>old?.post.id===post.id&&old.post.readContext===post.readContext?{...old,post:{...old.post,favourite:result.post.favourite}}:old);}
+  async function toggleUserFavourite(author:Author,active:boolean){const result=await action('favourite/user',{author,favourite:!active});if(result&&active&&userFilter===authorKey(author))setUserFilter('');if(result)setThread(old=>old?.post.author&&authorKey(old.post.author)===authorKey(author)?{...old,post:{...old.post,favouriteUser:!active}}:old);}
+  function authorControls(post:StoredPost){return post.author&&<span className="post-author"><span>{authorLabel(post.author)}</span><FavouriteButton active={post.favouriteUser} label={(post.favouriteUser?'Unfavourite user: ':'Favourite user: ')+authorLabel(post.author)} disabled={busy} onClick={()=>void toggleUserFavourite(post.author!,post.favouriteUser)}/></span>;}
   const markRead=useCallback(async(id:string,read=true)=>{
     const context=postRows.current.find(post=>post.id===id)?.readContext;if(!context)return;
     const version=++readSequence.current;readRequests.current.set(id,version);
@@ -137,8 +153,8 @@ function App() {
     finally{if(readRequests.current.get(id)===version)readRequests.current.delete(id);}
   },[]);
   useReadTracking(!stopped&&view==='posts'&&!modal&&!thread&&!removeFeed&&!clearFeed&&!postToDelete&&Boolean(state),markRead,suppressedReads.current);
-  useEffect(()=>setReadBefore(Date.now()),[source,media,search,searchScope]);
-  useEffect(()=>{const timer=setTimeout(()=>void loadFeed().catch(e=>setError(e.message)),200);return()=>clearTimeout(timer);},[source,media,search,searchScope,readFilter,readBefore]);
+  useEffect(()=>setReadBefore(Date.now()),[source,media,search,searchScope,collection,userFilter]);
+  useEffect(()=>{const timer=setTimeout(()=>void loadFeed().catch(e=>setError(e.message)),200);return()=>clearTimeout(timer);},[source,media,search,searchScope,readFilter,readBefore,collection,userFilter,selectedAuthor?.id,selectedAuthor?.platform]);
   useEffect(()=>{
     let pending=false,disposed=false;
     const timer=setInterval(()=>{
@@ -171,9 +187,9 @@ function App() {
   return <div className="app">
     <aside className="sidebar">
       <a className="brand" href="#posts" onClick={()=>navigate('posts')}><span className="brand-mark" aria-hidden="true">C</span> Collector</a>
-      <nav aria-label="Main navigation"><button className={'nav-item '+(view==='feeds'?'active':'')} onClick={()=>navigate('feeds')}>Feeds <span>{feeds.length}</span></button></nav>
-      <div className="source-nav"><p className="sidebar-label">SUBREDDITS</p><button className={'source-item '+(!source&&view==='posts'?'selected':'')} onClick={()=>filterSource('')}><span>All subreddits</span><span className="source-count">{feeds.reduce((sum,feed)=>sum+feed.postCount,0)}</span></button>
-        {feeds.map(feed=><button className={'source-item '+(source===feed.name&&view==='posts'?'selected':'')} key={feed.name} onClick={()=>filterSource(feed.name)}>
+      <nav aria-label="Main navigation"><button className={'nav-item '+(view==='feeds'?'active':'')} onClick={()=>navigate('feeds')}>Feeds <span>{feeds.length}</span></button><button className={'nav-item '+(view==='posts'&&collection==='posts'?'active':'')} onClick={()=>openFavourites('favourites')}>Favourite posts <span>{state?.favourites?.posts??0}</span></button><button className={'nav-item '+(view==='posts'&&collection==='users'?'active':'')} onClick={()=>openFavourites('users')}>Favourite users <span>{favouriteUsers.length}</span></button></nav>
+      <div className="source-nav"><p className="sidebar-label">SUBREDDITS</p><button className={'source-item '+(!source&&view==='posts'&&collection==='all'?'selected':'')} onClick={()=>filterSource('')}><span>All subreddits</span><span className="source-count">{feeds.reduce((sum,feed)=>sum+feed.postCount,0)}</span></button>
+        {feeds.map(feed=><button className={'source-item '+(source===feed.name&&view==='posts'&&collection==='all'?'selected':'')} key={feed.name} onClick={()=>filterSource(feed.name)}>
           <span>r/{feed.name}</span>{syncing(feed)?<span className={'status-dot '+(feed.status==='syncing'?'pulse':'')} title={feed.status}/>:<span className="source-count">{feed.postCount}</span>}
         </button>)}
       </div>
@@ -186,7 +202,7 @@ function App() {
       </div>
     </aside>
     <main>
-      <header className="page-header"><div><h1>{view==='feeds'?'Feeds':source?'r/'+source:'All subreddits'}</h1><span className="header-meta">{view==='feeds'?`${feeds.length} subscribed feeds`:`${count.toLocaleString()} stored posts`}</span></div>
+      <header className="page-header"><div><h1>{view==='feeds'?'Feeds':collection==='posts'?'Favourite posts':collection==='users'?'Favourite users':source?'r/'+source:'All subreddits'}</h1><span className="header-meta">{view==='feeds'?`${feeds.length} subscribed feeds`:collection==='posts'?`${state?.favourites?.posts??0} favourite ${(state?.favourites?.posts??0)===1?'post':'posts'}`:collection==='users'?`${favouriteUsers.length} favourite ${favouriteUsers.length===1?'user':'users'}`:`${count.toLocaleString()} stored posts`}</span></div>
         <div className="header-actions">{state?.job.manual?<button className="button primary" disabled={busy} onClick={()=>void action('sign-in/finish')}>Finish sign-in</button>:<>
           {activeFeeds.length>0&&<button className="button stop" disabled={busy} onClick={()=>void action('pause')}>Stop all</button>}
           {view==='posts'&&currentFeed?feedSync(currentFeed):<button className="button" disabled={busy||!feeds.length||feeds.every(syncing)} onClick={()=>void action('sync')}>Sync all</button>}
@@ -227,23 +243,25 @@ function App() {
           </article>)}
         </div><p className="feed-page-note" id="feed-history-note">Sync saves recent posts, unfinished history and supported media locally. Expanding the history limit starts a sync; reducing it keeps saved posts. Older archives and stored date ranges may have gaps.</p></>:<div className="empty-state"><h2>No feeds yet</h2><button className="button primary" onClick={()=>{setName('');setMonths(1);setModal('source');}}>Add a feed</button></div>}
       </section>:<>
+        {collection==='users'&&<section className="favourite-users" aria-label="Favourited users"><p>Posts already stored in Collector, across all your favourite users. New posts appear when you sync their subreddits.</p><div className="user-chips"><button className={'user-filter'+(!selectedAuthor?' selected':'')} onClick={()=>setUserFilter('')}>All favourite users</button>{favouriteUsers.map(author=><div className="user-chip" key={authorKey(author)}><button className={'user-filter'+(selectedAuthor&&authorKey(selectedAuthor)===authorKey(author)?' selected':'')} onClick={()=>setUserFilter(authorKey(author))}>{authorLabel(author)}</button><FavouriteButton active label={'Unfavourite user: '+authorLabel(author)} disabled={busy} onClick={()=>void toggleUserFavourite(author,true)}/></div>)}</div></section>}
         <section className="feed-tools" aria-label="Feed filters"><div className="type-tabs">{['',...MEDIA_FILTERS].map(type=><button key={type} className={media===type?'selected':''} onClick={()=>setMedia(type)}>{type||'All posts'}</button>)}</div>
-          <div className="filter-inputs"><select aria-label="Read status" value={readFilter} onChange={e=>{setReadFilter(e.target.value);setReadBefore(Date.now());}}><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select><select aria-label="Filter by subreddit" value={source} onChange={e=>setSource(e.target.value)}><option value="">All subreddits</option>{feeds.map(feed=><option key={feed.name} value={feed.name}>r/{feed.name}</option>)}</select><select aria-label="Search scope" value={searchScope} onChange={e=>setSearchScope(e.target.value)}><option value="both">Title + body</option><option value="title">Title</option><option value="body">Body</option></select><input maxLength={500} title="Literal search of saved post text. Longer terms are faster in large libraries." className="search" aria-label="Search stored posts" placeholder="Search posts…" value={search} onChange={e=>setSearch(e.target.value)}/></div>
+          <div className="filter-inputs"><select aria-label="Read status" value={readFilter} onChange={e=>{setReadFilter(e.target.value);setReadBefore(Date.now());}}><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select><select aria-label="Filter by subreddit" value={source} onChange={e=>setSource(e.target.value)}><option value="">All subreddits</option>{source&&!feeds.some(feed=>feed.name===source)&&<option value={source}>r/{source} (stored)</option>}{feeds.map(feed=><option key={feed.name} value={feed.name}>r/{feed.name}</option>)}</select><select aria-label="Search scope" value={searchScope} onChange={e=>setSearchScope(e.target.value)}><option value="both">Title + body</option><option value="title">Title</option><option value="body">Body</option></select><input maxLength={500} title="Literal search of saved post text. Longer terms are faster in large libraries." className="search" aria-label="Search stored posts" placeholder="Search posts…" value={search} onChange={e=>setSearch(e.target.value)}/></div>
         </section>
         <div className="feed-meta"><span>Newest first · <button onClick={()=>setReadBefore(Date.now())}>Refresh view</button></span>{currentFeed?<span>Last successful sync: {timestamp(currentFeed.sync.lastSuccessAt)} · {syncState(currentFeed)}{currentFeed.offline.total>0&&` · Media ${currentFeed.offline.ready}/${currentFeed.offline.total} offline`}</span>:<button onClick={()=>navigate('feeds')}>Manage feeds &amp; sync status →</button>}</div>
         <div className="feed">{posts.map(post=><article className={"post-card "+(post.readAt!==null?"is-read":"")} data-post-id={post.id} data-read={post.readAt!==null} key={post.id}>
           <div className="post-content"><PostMedia post={post} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===post.subreddit)&&syncing(feeds.find(feed=>feed.name===post.subreddit)!))}>
-            {mediaControls=><><div className="post-meta"><button onClick={()=>filterSource(post.subreddit)}>r/{post.subreddit}</button><time dateTime={new Date(post.createdMs).toISOString()}>{date(post.createdMs)}</time>{post.source==='archive'&&<span className="archive-label">Archive</span>}<div className="badges">{post.media.map(type=><span key={type}>{type}</span>)}{post.availability!=='available'&&<span>{post.availability}</span>}{mediaControls}</div></div>
+            {mediaControls=><><div className="post-meta"><button onClick={()=>collection==='all'?filterSource(post.subreddit):setSource(post.subreddit)}>r/{post.subreddit}</button>{authorControls(post)}<time dateTime={new Date(post.createdMs).toISOString()}>{date(post.createdMs)}</time>{post.source==='archive'&&<span className="archive-label">Archive</span>}<div className="badges">{post.media.map(type=><span key={type}>{type}</span>)}{post.availability!=='available'&&<span>{post.availability}</span>}{mediaControls}</div></div>
             <button className="post-title" onClick={()=>void openThread(post.id)}>{post.title}</button>{media!=='Media'&&post.body&&<p className="post-preview">{post.body.slice(0,200)}</p>}</>}
           </PostMedia>
-          </div><div className="post-actions"><button className="read-toggle" title={post.readAt!==null?"Mark unread":"Mark read"} aria-label={(post.readAt!==null?"Mark unread: ":"Mark read: ")+post.title} onClick={()=>{const read=post.readAt===null;if(!read)suppressedReads.current.add(post.id);else suppressedReads.current.delete(post.id);void markRead(post.id,read).catch(()=>{});}}>{post.readAt!==null?"●":"○"}</button><button className="read-thread" onClick={()=>void openThread(post.id)} aria-label={'Read thread: '+post.title}>↗</button><button className="delete-post danger" title="Delete post" disabled={busy} aria-label={'Delete post: '+post.title} onClick={()=>{setError('');setPostToDelete(post);}}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></svg></button></div>
+          </div><div className="post-actions"><FavouriteButton active={post.favourite} label={(post.favourite?'Unfavourite post: ':'Favourite post: ')+post.title} disabled={busy} onClick={()=>void togglePostFavourite(post)}/><button className="read-toggle" title={post.readAt!==null?"Mark unread":"Mark read"} aria-label={(post.readAt!==null?"Mark unread: ":"Mark read: ")+post.title} onClick={()=>{const read=post.readAt===null;if(!read)suppressedReads.current.add(post.id);else suppressedReads.current.delete(post.id);void markRead(post.id,read).catch(()=>{});}}>{post.readAt!==null?"●":"○"}</button><button className="read-thread" onClick={()=>void openThread(post.id)} aria-label={'Read thread: '+post.title}>↗</button><button className="delete-post danger" title="Delete post" disabled={busy} aria-label={'Delete post: '+post.title} onClick={()=>{setError('');setPostToDelete(post);}}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></svg></button></div>
         </article>)}</div>
-        {!posts.length&&<div className="empty-state"><h2>{feeds.length?'No matching posts':'No feeds yet'}</h2><p>{feeds.length?'Refresh a feed or adjust your filters.':'Add a subreddit to get started.'}</p>{!feeds.length&&<button className="button primary" onClick={()=>navigate('feeds')}>Manage feeds</button>}</div>}
+        {!posts.length&&<div className="empty-state"><h2>{collection==='posts'?'No matching favourite posts':collection==='users'?'No matching posts from favourite users':feeds.length?'No matching posts':'No feeds yet'}</h2><p>{collection==='posts'?'Use the star on a post to keep it here, or adjust your filters.':collection==='users'?'Use the star beside an author’s name to favourite them. Older posts without author details gain them when synced or imported again.':feeds.length?'Refresh a feed or adjust your filters.':'Add a subreddit to get started.'}</p>{collection==='all'&&!feeds.length&&<button className="button primary" onClick={()=>navigate('feeds')}>Manage feeds</button>}</div>}
         {next&&<button className="button load-more" onClick={()=>void loadFeed(true).catch(error=>setError(error.message))}>Load more</button>}
       </>}
     </main>
     {thread&&<div className="drawer-backdrop" onClick={()=>{setThread(null);threadId.current=null;}}><section className="thread-drawer" role="dialog" aria-modal="true" aria-label="Thread details" onClick={e=>e.stopPropagation()}>
       <div className="drawer-top"><span>r/{thread.post.subreddit} · {date(thread.post.createdMs)}</span><button autoFocus aria-label="Close thread" onClick={()=>{setThread(null);threadId.current=null;}}>×</button></div><h2>{thread.post.title}</h2>
+      <div className="thread-author">{authorControls(thread.post)}<FavouriteButton active={thread.post.favourite} label={(thread.post.favourite?'Unfavourite post: ':'Favourite post: ')+thread.post.title} disabled={busy} onClick={()=>void togglePostFavourite(thread.post)}/></div>
       <div className="thread-actions"><button className="button" disabled={busy} onClick={()=>void action('thread',{id:thread.post.id})}>{thread.snapshot?'Re-read discussion':'Read discussion in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setPostToDelete(thread.post);}}>Delete post</button><a href={thread.post.permalink} target="_blank" rel="noreferrer">Reddit ↗</a></div>
       <PostMedia post={thread.post} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===thread.post.subreddit)&&syncing(feeds.find(feed=>feed.name===thread.post.subreddit)!))}>
         {mediaControls=><div className="badges thread-media-badges">{thread.post.media.map(type=><span key={type}>{type}</span>)}{mediaControls}</div>}

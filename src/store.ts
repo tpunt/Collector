@@ -18,6 +18,8 @@ import {normalizeText} from './search.ts';
 import {feedCursor} from './feed-cursor.ts';
 import {ARCHIVE_JOIN,POST_BODY} from './reader-fields.ts';
 import type {CleanupCriteria} from './library-storage.ts';
+import {authorIdentity} from './authors.ts';
+import type {Author} from './authors.ts';
 
 // A listing can omit fields that an archive already saved. Compose the reader
 // view without relabelling archive evidence as a new live observation.
@@ -25,6 +27,10 @@ const ARCHIVE_MEDIA_MATCH="(o.outbound IS NULL OR o.outbound=archived.outbound)"
 const POST_MEDIA=`coalesce(o.media,CASE WHEN ${ARCHIVE_MEDIA_MATCH} THEN archived.media END)`;
 const POST_ATTACHMENTS=`coalesce(o.attachments,CASE WHEN ${ARCHIVE_MEDIA_MATCH} THEN archived.attachments END)`;
 const POST_OUTBOUND='coalesce(o.outbound,archived.outbound)';
+const POST_AUTHOR=`coalesce((SELECT author FROM observation_authors WHERE post_id=p.id AND source_key=o.source_key),
+  (SELECT a.author FROM observation_authors a JOIN observations evidence ON evidence.post_id=a.post_id AND evidence.source_key=a.source_key
+    WHERE a.post_id=p.id AND evidence.source='archive' ORDER BY evidence.observed_at DESC,evidence.source_key DESC LIMIT 1))`;
+const AUTHOR_FAVOURITE=`EXISTS(SELECT 1 FROM favourite_users fu WHERE fu.platform=json_extract(${POST_AUTHOR},'$.platform') AND fu.user_id=json_extract(${POST_AUTHOR},'$.id'))`;
 
 const snapshotContent=(value:ThreadSnapshot)=>JSON.stringify([value.postId,value.source,value.exportId,value.capturedAt,value.sort,value.body,value.availability,
   value.comments.map(comment=>[comment.id,comment.postId,comment.parentId,comment.ancestry,comment.body,comment.availability,comment.createdMs]),value.omitted,value.sample]);
@@ -50,6 +56,9 @@ export interface HistoryTarget {
   boundary: { olderIds: string[]; batches: number; lastSignature: string | null; repeats: number };
 }
 export interface StoredPost {
+  author:Author|null;
+  favourite:boolean;
+  favouriteUser:boolean;
   readContext:string;
   readAt:number|null;
   id: string;
@@ -137,10 +146,11 @@ export class ReaderStore {
   validateBackup(path:string,allowPrevious=false){
     const db=new DatabaseSync(path,{readOnly:true});
     try{
-      const version=Number(db.prepare('PRAGMA user_version').get()!.user_version),previous=allowPrevious&&version===3;
+      const version=Number(db.prepare('PRAGMA user_version').get()!.user_version),previous=allowPrevious&&[3,4].includes(version);
       const schema="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",order=' ORDER BY type,name';
-      if(JSON.stringify(db.prepare(schema+order).all())!==JSON.stringify(this.db.prepare(schema+(previous?" AND name NOT GLOB 'search_*'":'')+order).all())||
-        ![SCHEMA_VERSION,...(previous?[3]:[])].includes(version)||
+      const exclusions=(previous?" AND name NOT IN ('observation_authors','observation_author_identity','favourite_posts','favourite_users')":'')+(previous&&version===3?" AND name NOT GLOB 'search_*'":'');
+      if(JSON.stringify(db.prepare(schema+order).all())!==JSON.stringify(this.db.prepare(schema+exclusions+order).all())||
+        ![SCHEMA_VERSION,...(previous?[3,4]:[])].includes(version)||
         Number(db.prepare('PRAGMA application_id').get()!.application_id)!==Number(this.db.prepare('PRAGMA application_id').get()!.application_id))throw new Error('Backup schema is not compatible with this app version');
       if(db.prepare('PRAGMA quick_check').get()!.quick_check!=='ok'||db.prepare('PRAGMA foreign_key_check').all().length)throw new Error('Backup database integrity check failed');
       for(const row of db.prepare('SELECT * FROM observations JOIN posts ON posts.id=observations.post_id').iterate())validateObservation({
@@ -154,7 +164,7 @@ export class ReaderStore {
       for(const row of db.prepare('SELECT * FROM posts').iterate()){
         const identity=validateObservation({id:String(row.id),subreddit:String(row.subreddit),permalink:String(row.permalink),title:'Stored post',created:{epochMs:Number(row.created_ms),precisionMs:Number(row.precision_ms)},source:'live',observedAt:0});
         if(identity.id!==row.id||identity.subreddit!==row.subreddit||identity.permalink!==row.permalink)throw new Error('Invalid backup post identity');
-        const post=this.readPost(db,String(row.id)),expected=new Set((post?.attachments??[]).map(mediaKey));
+        const post=this.readPost(db,String(row.id),undefined,!previous),expected=new Set((post?.attachments??[]).map(mediaKey));
         const owned=db.prepare('SELECT key FROM post_media WHERE post_id=?').all(String(row.id)).map(row=>String(row.key));
         if(owned.length!==expected.size||owned.some(key=>!expected.has(key)))throw new Error('Backup media ownership does not match its post references');
       }
@@ -164,6 +174,10 @@ export class ReaderStore {
           snapshot.body!==null&&typeof snapshot.body!=='string'||snapshot.comments.some((comment:any)=>!/^t1_[a-z0-9]+$/.test(comment.id)||comment.postId!==row.post_id||typeof comment.body!=='string'))throw new Error('Invalid discussion in backup');
       }
       const cap=db.prepare("SELECT value FROM settings WHERE key='maxStoredBytes'").get();if(cap)storageCap(JSON.parse(String(cap.value)));
+      if(!previous){
+        for(const row of db.prepare('SELECT author FROM observation_authors').iterate()){const author=JSON.parse(String(row.author));if(author!==null)authorIdentity(author);}
+        for(const row of db.prepare('SELECT * FROM favourite_users').iterate())authorIdentity({platform:row.platform,id:row.user_id,name:row.display_name});
+      }
       return {schema:version,posts:Number(db.prepare('SELECT count(*) AS n FROM posts').get()!.n),keys:new Set(db.prepare('SELECT DISTINCT key FROM post_media').all().map(row=>String(row.key)))};
     }finally{db.close();}
   }
@@ -343,9 +357,12 @@ export class ReaderStore {
   getPost(input: string, source?: 'archive'): StoredPost | null {
     return this.readPost(this.db,input,source);
   }
-  private readPost(db:DatabaseSync,input:string,source?:'archive'):StoredPost|null {
+  private readPost(db:DatabaseSync,input:string,source?:'archive',favourites=true):StoredPost|null {
     const row = db.prepare(`SELECT p.*, o.title, ${POST_BODY} AS body,${POST_MEDIA} AS media,${POST_ATTACHMENTS} AS attachments,${POST_OUTBOUND} AS outbound,o.availability,
       o.source, o.export_id, o.observed_at, o.captured_at,
+      ${favourites?POST_AUTHOR:'NULL'} AS author_data,
+      ${favourites?'EXISTS(SELECT 1 FROM favourite_posts WHERE post_id=p.id)':'0'} AS favourite,
+      ${favourites?AUTHOR_FAVOURITE:'0'} AS favourite_user,
       (SELECT attachments FROM media_evidence WHERE post_id=p.id) AS discovered_attachments
       FROM posts p JOIN observations o ON o.post_id = p.id
       ${ARCHIVE_JOIN}
@@ -355,6 +372,8 @@ export class ReaderStore {
     const attachments = availability === 'available' ? postMediaReferences(row.outbound as string|null,JSON.parse(String(row.discovered_attachments ?? row.attachments ?? '[]')) as MediaReference[]) : [];
     return {
       id: String(row.id), subreddit: String(row.subreddit), permalink: String(row.permalink), title: String(row.title),
+      author:availability==='deleted'?null:JSON.parse(String(row.author_data??'null')),
+      favourite:Boolean(row.favourite),favouriteUser:availability!=='deleted'&&Boolean(row.favourite_user),
       readContext:String(db.prepare("SELECT value FROM metadata WHERE key='generation'").get()!.value)+':'+String(JSON.parse(String(db.prepare('SELECT value FROM settings WHERE key=?').get('sourceRevision:'+String(row.subreddit))?.value??'0'))),
       readAt:(db.prepare('SELECT read_at FROM read_states WHERE post_id=?').get(String(row.id))?.read_at as number|undefined)??null,
       createdMs: Number(row.created_ms), precisionMs: Number(row.precision_ms),
@@ -499,7 +518,7 @@ export class ReaderStore {
 
   clearContent(): number {
     const generation=this.transaction(() => {
-      this.db.exec(`DELETE FROM search_text; DELETE FROM read_states; DELETE FROM feed_sync; DELETE FROM archive_fetches; DELETE FROM thread_snapshots; UPDATE feeds SET history_target_id=NULL,requested_ms=NULL;
+      this.db.exec(`DELETE FROM favourite_posts; DELETE FROM search_text; DELETE FROM read_states; DELETE FROM feed_sync; DELETE FROM archive_fetches; DELETE FROM thread_snapshots; UPDATE feeds SET history_target_id=NULL,requested_ms=NULL;
         UPDATE metadata SET value = value + 1 WHERE key = 'generation';
         DELETE FROM comment_states WHERE availability='available';
         DELETE FROM targets; DELETE FROM observations; DELETE FROM media_sync; DELETE FROM media_evidence; DELETE FROM post_media;
@@ -722,10 +741,36 @@ export class ReaderStore {
     else this.db.prepare('DELETE FROM read_states WHERE post_id=?').run(id);
     return this.getPost(id)!;
   }
-  queryFeed(input: { subreddit?: string; media?: MediaFilter; text?: string; scope?:string; read?:string; readBefore?:number; afterMs?: number; beforeMs?: number; cursor?: string; limit?: number } = {}) {
+  favouriteUsers():Author[] {
+    return this.db.prepare('SELECT platform,user_id AS id,display_name AS name FROM favourite_users ORDER BY display_name COLLATE NOCASE,platform,user_id').all().map(row=>authorIdentity(row));
+  }
+  favourites(){return {posts:Number(this.db.prepare('SELECT count(*) AS n FROM favourite_posts fp WHERE EXISTS(SELECT 1 FROM observations WHERE post_id=fp.post_id)').get()!.n),users:this.favouriteUsers()};}
+  setPostFavourite(input:string,favourite:unknown):StoredPost {
+    if(typeof favourite!=='boolean')throw new Error('Invalid favourite status');
+    const id=postId(input);if(!this.getPost(id))throw new Error('Post is no longer stored');
+    this.transaction(()=>{if(favourite)this.db.prepare('INSERT OR IGNORE INTO favourite_posts VALUES (?,?)').run(id,Date.now());else this.db.prepare('DELETE FROM favourite_posts WHERE post_id=?').run(id);this.db.exec("UPDATE metadata SET value=value+1 WHERE key='content_revision'");});
+    return this.getPost(id)!;
+  }
+  setUserFavourite(input:unknown,favourite:unknown):void {
+    const author=authorIdentity(input);if(typeof favourite!=='boolean')throw new Error('Invalid favourite status');
+    this.transaction(()=>{
+      if(favourite)this.db.prepare('INSERT INTO favourite_users VALUES (?,?,?,?) ON CONFLICT(platform,user_id) DO UPDATE SET display_name=excluded.display_name').run(author.platform,author.id,author.name,Date.now());
+      else this.db.prepare('DELETE FROM favourite_users WHERE platform=? AND user_id=?').run(author.platform,author.id);
+      this.db.exec("UPDATE metadata SET value=value+1 WHERE key='content_revision'");
+    });
+  }
+  queryFeed(input: { subreddit?: string; media?: MediaFilter; text?: string; scope?:string; read?:string; readBefore?:number; favourites?:string;authorPlatform?:string;authorId?:string; afterMs?: number; beforeMs?: number; cursor?: string; limit?: number } = {}) {
     const limit = Math.min(100, Math.max(1, input.limit ?? 50));
-    const clauses: string[] = ["EXISTS(SELECT 1 FROM feeds f WHERE f.name=p.subreddit AND f.subscribed=1)"];
+    if(input.favourites&&!['posts','users'].includes(input.favourites))throw new Error('Invalid favourites filter');
+    const clauses: string[] = input.favourites?[]:["EXISTS(SELECT 1 FROM feeds f WHERE f.name=p.subreddit AND f.subscribed=1)"];
     const params: (string | number)[] = [];
+    if(input.favourites==='posts')clauses.push('p.id IN (SELECT post_id FROM favourite_posts)');
+    if(input.favourites==='users')clauses.push(`p.id IN (SELECT a.post_id FROM favourite_users fu JOIN observation_authors a ON json_extract(a.author,'$.platform')=fu.platform AND json_extract(a.author,'$.id')=fu.user_id)
+      AND coalesce(p.live_availability,o.availability)<>'deleted' AND ${AUTHOR_FAVOURITE}`);
+    if(input.authorPlatform!==undefined||input.authorId!==undefined){
+      const author=authorIdentity({platform:input.authorPlatform,id:input.authorId,name:'Filter'});
+      clauses.push(`coalesce(p.live_availability,o.availability)<>'deleted' AND json_extract(${POST_AUTHOR},'$.platform')=? AND json_extract(${POST_AUTHOR},'$.id')=?`);params.push(author.platform,author.id);
+    }
     if (!Number.isInteger(limit)) throw new Error('Invalid feed limit');
     if(input.scope&&!['both','title','body'].includes(input.scope))throw new Error('Invalid search scope');
     if(input.text!==undefined&&(typeof input.text!=='string'||input.text.length>500))throw new Error('Search text must be at most 500 characters');
@@ -810,12 +855,12 @@ export class ReaderStore {
       this.db.prepare("UPDATE metadata SET value=value+1 WHERE key='content_revision'").run();
     });
   }
-  savePostBody(generation:number,input:string,body:string,observedAt=Date.now()) {
+  savePostBody(generation:number,input:string,body:string,observedAt=Date.now(),author?:Author|null) {
     this.contentTransaction(()=>{
       if(generation!==this.generation)throw new StaleGenerationError();
       const post=this.getPost(input);if(!post||post.availability!=='available')return;
       this.writePost(validateObservation({id:post.id,subreddit:post.subreddit,title:post.title,permalink:post.permalink,
-        created:{epochMs:post.createdMs,precisionMs:post.precisionMs},source:'live',observedAt,body,
+        created:{epochMs:post.createdMs,precisionMs:post.precisionMs},source:'live',observedAt,body,author,
         media:post.media,outbound:post.outbound??undefined}));
     });
   }
@@ -825,12 +870,13 @@ export class ReaderStore {
       const post = this.getPost(snapshot.postId);
       if (!post) throw new Error('Post was cleared or is unavailable');
       if (post.availability !== 'available' && snapshot.source === 'archive') throw new Error('Live deletion blocks restoring archive content');
-      if (snapshot.source === 'live' && (snapshot.body !== null || snapshot.availability !== 'available')) {
+      // An author alone cannot prove that a removed post was reinstated.
+      if (snapshot.source === 'live' && (snapshot.body !== null || snapshot.availability !== 'available'||(snapshot.author!==undefined&&post.availability==='available'))) {
         // A discussion body alone does not establish that previously observed
         // media disappeared, including when this is the first live observation.
         this.writePost(validateObservation({ id: post.id, subreddit: post.subreddit, title: post.title, permalink: post.permalink,
           created: { epochMs: post.createdMs, precisionMs: post.precisionMs }, source: 'live', observedAt: snapshot.observedAt,
-          body: snapshot.body ?? undefined, availability: snapshot.availability,
+          body: snapshot.body ?? undefined, availability: snapshot.availability,author:snapshot.author,
           media:post.media,attachments:post.attachments,outbound:post.outbound??undefined }));
       }
       if (snapshot.source === 'live') {
@@ -876,7 +922,7 @@ export class ReaderStore {
   }
   private writeObservation(record: PostObservation): void {
     const key = record.source === 'live' ? 'live' : `archive:${record.exportId}`;
-    const previous = this.db.prepare('SELECT availability FROM observations WHERE post_id = ? AND source_key = ?').get(record.id, key);
+    const previous = this.db.prepare('SELECT availability,observed_at FROM observations WHERE post_id = ? AND source_key = ?').get(record.id, key);
     const tombstone = this.db.prepare('SELECT live_availability FROM posts WHERE id = ?').get(record.id);
     // Missing body/availability in a head card is not evidence that a removed body was restored.
     const availability = record.availability ?? (previous?.availability as Availability | undefined)
@@ -900,6 +946,9 @@ export class ReaderStore {
         retainBody ? record.body ?? null : null,
         retainBody ? record.media ? JSON.stringify(record.media) : null : '[]',
         availability, record.observedAt, record.capturedAt ?? null, retainBody ? record.attachments?.length ? JSON.stringify(record.attachments) : null : '[]',retainBody?record.outbound??null:null);
+    if((record.author!==undefined||availability==='deleted')&&(!previous||record.observedAt>=Number(previous.observed_at))){
+      this.db.prepare('INSERT INTO observation_authors VALUES (?,?,?) ON CONFLICT(post_id,source_key) DO UPDATE SET author=excluded.author').run(record.id,key,JSON.stringify(availability==='deleted'?null:record.author));
+    }
     if (record.source === 'live') {
       const live = this.db.prepare("SELECT availability, observed_at FROM observations WHERE post_id = ? AND source_key = 'live'").get(record.id)!;
       this.db.prepare('UPDATE posts SET live_availability = ?, live_state_at = ? WHERE id = ?')

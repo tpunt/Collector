@@ -24,8 +24,9 @@ traversal, absolute paths, links, extra files or duplicate entries. TAR packagin
 uses `tar-stream`; extraction writes files explicitly into a private staging
 directory rather than handing uploaded paths to a filesystem extractor.
 
-Backups include posts, observations, saved discussions, subscriptions, history
-checkpoints, preferences, deletion exclusions and read states. Unfinished work
+Backups include posts, observations, author evidence, saved discussions,
+subscriptions, history checkpoints, preferences, deletion exclusions, read
+states, favourite posts and favourite users. Unfinished work
 stays unfinished. Browser profiles, cookies and credentials are excluded. The destination storage cap is kept when restoring, rather than replaced by the saved quota. Restore
 clears the saved account binding and access pause, so the destination browser's
 visible account is verified on the next explicit collection. It starts no network
@@ -45,7 +46,7 @@ Restore writes decrypted data only into a private directory. It checks the whole
 age stream, including its authenticated final chunk, file checksums, database
 schema and integrity, post references and media ownership before issuing a
 confirmation ticket. Wrong passwords, tampering, truncation, unsafe entries and
-incompatible libraries leave the current content intact. Published schema-3 backups are validated first, then upgraded only in staging to schema 4; the search index is rebuilt from accepted content. The upgraded size is checked against the current cap. The current storage cap
+incompatible libraries leave the current content intact. Published schema-3 and schema-4 backups are validated first, then upgraded only in staging to schema 5; the search index is rebuilt from accepted content. Older backups start with empty favourites and unknown authors. The upgraded size is checked against the current cap. The current storage cap
 must fit the restored database and media; raise it before validating a larger
 backup. Temporary restore space is additional to the existing library.
 

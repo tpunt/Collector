@@ -5,7 +5,7 @@
 This section records the latest user decisions and takes precedence over older
 planning below. The core offline-content work now includes full post text,
 complete native galleries, archive media metadata and resumable downloads.
-Read tracking, encrypted backup/restore and indexed search scopes and storage management are implemented; the macOS launcher is implemented. Keep the app a compact, on-demand local web reader.
+Read tracking, encrypted backup/restore, indexed search scopes, storage management, post/user favourites and the macOS launcher are implemented. Keep the app a compact, on-demand local web reader.
 
 Request pacing now uses a fresh uniform random 4–6 second delay after response
 readiness, shared by browser, archive and media traffic, including redirects and

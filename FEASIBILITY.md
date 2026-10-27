@@ -603,3 +603,43 @@ encrypted backup/restore, file-import replay, read-response races, retained feed
 windows, ownership changes and existing extraction/history/deletion workflows.
 No confirmed review finding remains unresolved. Very large library performance
 and current third-party website behavior are outside these local test results.
+
+## Post and user favourites — 27 October 2026
+
+Posts and authors have separate star controls in the feed and thread drawer.
+Favourite posts and Favourite users are sidebar views with the existing search,
+read, media, community filters and paging. The user view combines locally stored
+posts across favourite authors and can be narrowed to one username. It includes
+retained content from unsubscribed feeds and subsequent sync/import results;
+favouriting itself never starts collection or follows an account on Reddit.
+The controls use a compact two-column action area on posts and were inspected
+at desktop and mobile widths.
+
+Author identities have platform-scoped keys. Reddit adapters validate rendered
+profile links and archive author names, normalize case for identity and preserve
+display casing. Missing evidence preserves known authors; explicit deleted
+author markers suppress older archive attribution. Author-only discussion data
+cannot reinstate a removed post. Earlier posts without author evidence remain
+unknown until collected again or read through the discussion action. No extra
+website requests are made just to backfill author names.
+
+Schema 5 adds author observation evidence, its identity index and favourite
+post/user tables. Existing libraries receive an additive upgrade. Post stars
+are removed with their collected content; favourite users remain preferences
+until explicitly unfavourited. Both are portable in encrypted backups. Published
+schema-3 and schema-4 backups are validated before being upgraded only in
+staging, with unknown authors and empty favourites. Existing cookies, profiles,
+content, read states and deletion preferences are preserved by library upgrades.
+
+Validation covers restart, older-library upgrades, encrypted backup restore,
+case/provenance/deletion handling, platform isolation, filter/paging composition,
+authenticated mutations and rejection of stale post contexts. Browser checks
+exercise post/user stars, removing a favourite without deleting content,
+cross-subreddit author posts, individual author filters, search, future imports,
+reload, drawer controls and retained unsubscribed content. Temporary local
+libraries and fixtures were used; there were no Reddit/archive/CDN requests and
+the running user app and its data were untouched.
+
+Final checks pass: 178 unit tests, 67 browser/integration tests, TypeScript,
+production build and whitespace validation. The final integration run includes
+the author-only removal regression fix and the compact action layout.

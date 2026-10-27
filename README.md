@@ -2,6 +2,21 @@
 
 A local web app for reading selected subreddits on demand. Uses its own signed-in Chrome profile, Playwright, structured rendered Classic Reddit HTML, React, and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
 
+Star a post to save it in **Favourite posts**, or star the author beside their
+username to add them to **Favourite users**. Both views work offline with the
+usual search, read-status, media and subreddit filters. Favourite users shows
+all locally collected posts by those authors across subreddits; select a username
+to narrow it to one author. Future synced/imported posts by a favourite author
+appear automatically. These actions do not follow accounts or make requests to
+Reddit. Favourite content from removed subscriptions remains visible.
+
+Author names are captured from validated rendered profile links and archive
+records. Existing posts without author details gain them when collected again
+or when their discussion is read. Deleted/unknown authors cannot be starred.
+Favourites survive restart and encrypted backup/restore. Unfavouriting keeps the
+content; deleting or clearing content removes its post favourites. Favourite
+users remain preferences until you unfavourite them, even with no saved posts.
+
 Viewport-based read tracking, encrypted backup/restore, scoped indexed search, storage management and complete native galleries are implemented. The [implementation plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records the completed additions, including the macOS launcher. Live-library encryption remains deferred.
 
 Read status is local to Collector. A card is marked read after its full visible
@@ -91,7 +106,7 @@ the posts back. There is no automatic eviction or history pruning.
 
 ## Persistence
 
-New databases use schema version 4. Published versions receive preserving additive upgrades, including read states and the search index. Existing version-1 libraries receive one additive, transactional upgrade for durable post-text work, preserving content, media, preferences and deletion exclusions. Previously unverified live text is queued for the next explicit sync; startup makes no website requests. Unknown/prototype schemas and application identities are rejected before writes. To start fresh, stop the app, back up and move aside `reader.sqlite` together with any `reader.sqlite-wal` / `reader.sqlite-shm` files and the `media` directory, then restart. Keep `browser-profile` to retain the browser session.
+New databases use schema version 5. Version-four libraries receive an additive upgrade for author evidence and favourites, preserving existing content and preferences. Published versions receive preserving additive upgrades, including read states and the search index. Existing version-1 libraries receive one additive, transactional upgrade for durable post-text work, preserving content, media, preferences and deletion exclusions. Previously unverified live text is queued for the next explicit sync; startup makes no website requests. Unknown/prototype schemas and application identities are rejected before writes. To start fresh, stop the app, back up and move aside `reader.sqlite` together with any `reader.sqlite-wal` / `reader.sqlite-shm` files and the `media` directory, then restart. Keep `browser-profile` to retain the browser session.
 
 Feed subscription, history limit, current history goal and newest-check boundary share one `feeds` row. `feed_sync` records completion separately from individual scan checkpoints. Date bounds define scan scope; there are no obsolete recent/since/all-time target types or first-page refresh timestamps. Post-to-media links determine file ownership across posts and communities, so deletion and Clear preserve shared files without a second ownership index. Post and comment removal evidence, exclusions and live/archive precedence remain enforced.
 

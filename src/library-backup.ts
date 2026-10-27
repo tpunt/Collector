@@ -119,7 +119,7 @@ export class LibraryBackups {
         if(!manifest){
           if(entry.name!=='manifest.json'||entry.size>MAX_MANIFEST)throw new Error('Backup must start with its bounded manifest');
           const chunks:Buffer[]=[];for await(const chunk of stream)chunks.push(Buffer.from(chunk as Uint8Array));manifest=JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          if(manifest?.format!=='Collector'||manifest.version!==1||![3,SCHEMA_VERSION].includes(manifest.schema)||!Array.isArray(manifest.files))throw new Error('Unsupported Collector backup format');
+          if(manifest?.format!=='Collector'||manifest.version!==1||![3,4,SCHEMA_VERSION].includes(manifest.schema)||!Array.isArray(manifest.files))throw new Error('Unsupported Collector backup format');
           const names=new Set<string>();let bytes=0;
           for(const file of manifest.files){if(!fileName.test(file.name)||names.has(file.name)||!Number.isSafeInteger(file.bytes)||file.bytes<0||!/^[a-f0-9]{64}$/.test(file.sha256))throw new Error('Invalid backup file index');names.add(file.name);index.set(file.name,file);bytes+=file.bytes;}
           if(!names.has('reader.sqlite'))throw new Error('Backup database is missing');

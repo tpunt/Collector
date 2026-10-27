@@ -353,7 +353,7 @@ export class ReaderJobs {
             if(work.kind==='body'){
               if(snapshot.availability!=='available'){this.store.markPostUnavailable(work.generation,post.id,snapshot.availability,snapshot.observedAt);this.store.noteSyncGap(post.subreddit);}
               else if(snapshot.body===null)throw new Error('The complete post body was not exposed; Resume to retry');
-              else this.store.savePostBody(work.generation,post.id,snapshot.body,snapshot.observedAt);
+              else this.store.savePostBody(work.generation,post.id,snapshot.body,snapshot.observedAt,snapshot.author);
             }else this.store.saveSnapshot(work.generation, snapshot);
             if(attachments)this.store.saveMediaReferences(work.generation,post.id,attachments);
             await this.mediaSync?.reconcile?.();

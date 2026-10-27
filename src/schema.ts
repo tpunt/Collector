@@ -1,8 +1,22 @@
 import type {DatabaseSync} from 'node:sqlite';
 import {SEARCH_TEXT_SELECT} from './reader-fields.ts';
 
-export const SCHEMA_VERSION=4;
+export const SCHEMA_VERSION=5;
 const APPLICATION_ID=0x52524452;
+const FAVOURITES_SCHEMA=`CREATE TABLE observation_authors (
+  post_id TEXT NOT NULL, source_key TEXT NOT NULL, author TEXT NOT NULL CHECK(json_valid(author)),
+  PRIMARY KEY(post_id,source_key),
+  FOREIGN KEY(post_id,source_key) REFERENCES observations(post_id,source_key) ON DELETE CASCADE
+);
+CREATE INDEX observation_author_identity ON observation_authors(json_extract(author,'$.platform'),json_extract(author,'$.id'),post_id);
+CREATE TABLE favourite_posts (
+  post_id TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+  saved_at INTEGER NOT NULL CHECK(saved_at>=0)
+);
+CREATE TABLE favourite_users (
+  platform TEXT NOT NULL, user_id TEXT NOT NULL, display_name TEXT NOT NULL,
+  saved_at INTEGER NOT NULL CHECK(saved_at>=0), PRIMARY KEY(platform,user_id)
+);`;
 const SEARCH_SCHEMA=`CREATE TABLE search_text (
  post_id TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,title TEXT NOT NULL,body TEXT NOT NULL
 );
@@ -107,6 +121,7 @@ CREATE TABLE excluded_posts (post_id TEXT PRIMARY KEY, subreddit TEXT NOT NULL, 
 ${BODY_SCHEMA}
 ${READ_SCHEMA}
 ${SEARCH_SCHEMA}
+${FAVOURITES_SCHEMA}
 `;
 
 /** Unknown/prototype schemas are rejected. Published versions receive additive,
@@ -115,7 +130,7 @@ export function initializeSchema(db:DatabaseSync):void {
   const version=Number(db.prepare('PRAGMA user_version').get()!.user_version);
   const application=Number(db.prepare('PRAGMA application_id').get()!.application_id);
   const empty=!db.prepare("SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").get();
-  if(!(version===0&&application===0&&empty)&&!([1,2,3,SCHEMA_VERSION].includes(version)&&application===APPLICATION_ID))
+  if(!(version===0&&application===0&&empty)&&!([1,2,3,4,SCHEMA_VERSION].includes(version)&&application===APPLICATION_ID))
     throw new Error(`Unsupported reader database schema (${version}). Back up and move aside reader.sqlite and its WAL/SHM files, then restart to create a fresh database.`);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;');
   if(empty){
@@ -146,6 +161,11 @@ export function initializeSchema(db:DatabaseSync):void {
   if(!empty&&version<4){
     db.exec('BEGIN IMMEDIATE');
     try{db.exec(SEARCH_SCHEMA);rebuildSearch(db);db.exec('PRAGMA user_version=4; COMMIT;');}
+    catch(error){db.exec('ROLLBACK');throw error;}
+  }
+  if(!empty&&version<5){
+    db.exec('BEGIN IMMEDIATE');
+    try{db.exec(FAVOURITES_SCHEMA);db.exec('PRAGMA user_version=5; COMMIT;');}
     catch(error){db.exec('ROLLBACK');throw error;}
   }
 }

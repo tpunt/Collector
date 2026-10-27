@@ -10,6 +10,7 @@ import { classifyMedia } from './extract.ts';
 import type { CommentRecord, ThreadSnapshot } from './extract.ts';
 import { postId, subredditName, validateObservation } from './domain.ts';
 import type { PostObservation, Availability } from './domain.ts';
+import {redditAuthor} from './reddit-author.ts';
 import type { ReaderStore } from './store.ts';
 
 function seconds(value: unknown, required = true): number | undefined {
@@ -29,7 +30,7 @@ export function archivePost(row: Record<string, any>, name: string, exportId: st
   const id = postId(row.id);
   const body = typeof row.selftext === 'string' ? row.selftext : undefined;
   const media = classifyMedia({ self: row.is_self === true, body, outbound: typeof row.url === 'string' ? row.url : null, video: row.is_video === true, image: row.is_gallery === true });
-  return validateObservation({ id, subreddit: name, title: row.title,
+  return validateObservation({ id, subreddit: name, title: row.title,author:redditAuthor(row.author),
     permalink: typeof row.permalink === 'string' ? row.permalink : `/r/${name}/comments/${id.slice(3)}/`,
     created: { epochMs: seconds(row.created_utc)!, precisionMs: 1000 },
     source: 'archive', exportId, observedAt, capturedAt: seconds(row.retrieved_on, false),

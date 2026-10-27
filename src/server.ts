@@ -157,6 +157,14 @@ export function createReaderServer(options: { database?: string; port?: number; 
             if(key){readIntents.delete(key);readIntents.set(key,Number(data.sequence));if(readIntents.size>100_000)readIntents.delete(readIntents.keys().next().value!);}
             json(res,{post:updated});return;
           }
+          case '/api/favourite/post': {
+            const post=store.getPost(postId(String(data.id)));
+            if(!post||data.context!==post.readContext)throw new Error('Post changed; refresh the view and try again');
+            json(res,{post:store.setPostFavourite(post.id,data.favourite)});return;
+          }
+          case '/api/favourite/user': {
+            store.setUserFavourite(data.author,data.favourite);json(res,{favourites:store.favourites()});return;
+          }
           case '/api/settings': {
             store.setStorageLimit(data.maxStoredBytes);
             if(store.storage.full){jobs.pause(STORAGE_CAP_MESSAGE);importer.stop();}
@@ -254,12 +262,13 @@ export function createReaderServer(options: { database?: string; port?: number; 
         res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':'attachment; filename="collector.tar.age"','Content-Length':file.bytes,'Cache-Control':'no-store'});
         await pipeline(createReadStream(file.path),res);return;
       }
-      if (url.pathname === '/api/state') { json(res,{ token, canQuit:Boolean(options.onShutdown), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
+      if (url.pathname === '/api/state') { json(res,{ token, canQuit:Boolean(options.onShutdown), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
         storage:store.storage, import:importer.progress, imports:store.getSetting('imports') ?? [], account:store.getSetting('account') }); return; }
       if (url.pathname === '/api/feed') {
         const media = url.searchParams.get('media') ?? undefined;
         if (media && !MEDIA_FILTERS.includes(media as MediaFilter)) throw new Error('Invalid media filter');
         json(res,store.queryFeed({subreddit:url.searchParams.get('subreddit') || undefined,media:media as MediaFilter | undefined,
+          favourites:url.searchParams.get('favourites')||undefined,authorPlatform:url.searchParams.get('authorPlatform')??undefined,authorId:url.searchParams.get('authorId')??undefined,
           read:url.searchParams.get('read')??undefined,readBefore:url.searchParams.has('readBefore')?Number(url.searchParams.get('readBefore')):undefined,
           text:url.searchParams.get('q')??'',scope:url.searchParams.get('scope')??undefined,afterMs:date(url.searchParams.get('after')),beforeMs:date(url.searchParams.get('before')),
           cursor:url.searchParams.get('cursor') || undefined})); return;

@@ -1,5 +1,7 @@
 import { mediaReference,MAX_MEDIA_REFERENCES } from './media-reference.ts';
 import type { MediaReference } from './media-reference.ts';
+import {authorIdentity} from './authors.ts';
+import type {Author} from './authors.ts';
 export const MEDIA_KINDS = ['Text', 'Image', 'Video', 'Link', 'Unknown'] as const;
 export type MediaKind = typeof MEDIA_KINDS[number];
 export const MEDIA_FILTERS = ['Media', ...MEDIA_KINDS] as const;
@@ -15,6 +17,7 @@ export interface PostObservation {
   id: string;
   subreddit: string;
   title: string;
+  author?:Author|null;
   permalink: string;
   created: CreatedTime;
   source: 'live' | 'archive';
@@ -126,5 +129,6 @@ export function validateObservation(input: PostObservation): PostObservation {
   const availability = marker === '[deleted]' ? 'deleted' : marker === '[removed]' ? 'removed' : input.availability;
   let outbound:string|undefined;
   try{if(input.outbound&&input.outbound.length<=4000){const url=new URL(input.outbound,'https://www.reddit.com');if(['https:','http:'].includes(url.protocol)&&!url.username&&!url.password)outbound=url.href;}}catch{/* Ignore invalid outbound evidence without losing the post. */}
-  return { ...input, id, subreddit, permalink, availability, outbound, media: input.media ? [...new Set(input.media)] : undefined };
+  const author=input.author==null?input.author:authorIdentity(input.author);
+  return { ...input, id, subreddit, permalink, author, availability, outbound, media: input.media ? [...new Set(input.media)] : undefined };
 }
