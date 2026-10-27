@@ -1,4 +1,4 @@
-# Reddit Reader
+# Collector
 
 A local web app for reading selected subreddits on demand. Uses its own signed-in Chrome profile, Playwright, structured rendered Classic Reddit HTML, React, and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
 
