@@ -212,3 +212,45 @@ Live app check: r/python, 1 January 2010, imported four new posts across two arc
 Replaced the responsive faux table with labelled feed cards: identity/counts and status/Refresh in the header, aligned Activity and Stored history facts, readable error notices, and a footer grouping history settings and Clear/Remove controls. Cards use two columns when space allows and stack their details on small screens. Obsolete table/breakpoint rules were removed. Timestamp precision and all collection/deletion behavior are retained.
 
 TypeScript and the production build pass. Fifteen local browser/API integration checks pass, with a focused Feeds check repeated after the final responsive grid change. Desktop (1280 px), mobile (390 px), and the real in-app browser were visually inspected without horizontal overflow. Real Clear/Remove confirmations were opened and cancelled; all 1,036 saved posts remain and session requests stayed at two (unchanged from the prior archive test). Screenshot: /private/tmp/reddit-reader-feeds-redesign.png.
+
+## Live archive recheck and Media filter — 27 October 2026
+
+The exact Python query that returned HTTP 500 during the 25 October exercise now
+returned HTTP 200, with 66 posts for 1 January 2020. A minimal query using plain
+ISO dates and limit=1 also returned HTTP 200. All 66 original records passed the
+app's archive parser. The parameters were compared against the provider's
+[API documentation](https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/README.md),
+which explicitly supports full ISO timestamps, ascending sort, limit=100 and
+subreddit/date bounds. These results do not establish the cause of the earlier
+500s; a transient failure is plausible and a malformed-query defect was not
+reproduced. The unnecessary undocumented meta-app parameter was subsequently
+removed, without claiming that it caused the previous failures.
+
+A separate bounded live check used the actual server/archive/store pipeline
+against r/AskHistorians for 1 January 2020. It fetched three pages, accepted and
+stored 161 posts, reported zero parser omissions, reached its terminal page and
+completed. All returned posts in this trial were text/link content, so no media
+requests were required. The database was closed and reopened to verify saved
+posts and the completed archive checkpoint. This validates these returned
+records and workflow, not every historical post or historical media provider.
+
+The five total external requests in the two checks all went to Arctic Shift;
+no Reddit requests were made. Both checks used the real completion-based
+five-second request queue. The main library and sign-in profile were untouched.
+Request/results evidence and the isolated SQLite database remain under the
+Git-ignored .local-data/qa/2026-10-27/ directory.
+
+The new Media filter combines Image/Video classifications and accepted discovered
+attachments without duplicate posts, excludes text-only posts, and composes with
+subreddit, search and pagination. Body previews are hidden in this mode; titles,
+discussion controls and local file copying remain. The browser fixture checks
+both media kinds, absence of text previews and rejection of invalid API filters.
+
+Validation: TypeScript and the production build pass; 122 unit tests pass with
+two test workers, and all 37 browser/API/network integration tests pass. An
+earlier unit run overlapping the full Chrome suite hit the existing feed-sync
+fixture's four-second settle timeout; no timing limit was changed, and the
+bounded two-worker rerun passed. The new filter was also manually exercised in
+the isolated app: ten media posts across two fixture feeds, five after selecting
+aww, no body previews, and cached local image/video decoding. The app's request
+counter remained zero during reading and its console reported no errors.

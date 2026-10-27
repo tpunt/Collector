@@ -1,5 +1,126 @@
 # Personal Reddit reader — implementation plan
 
+## Current scope and next stage — 27 October 2026
+
+This section records the latest user decisions and takes precedence over older
+planning below. This round implements the combined Media filter and rechecks
+live archive fetching. The additions below are planned, not implemented in this
+round. Keep the app a compact, on-demand local web reader.
+
+### Completed in this round
+
+- Media combines Image and Video posts, including accepted discovered media,
+  without duplicate cards for posts containing both. It hides body previews but
+  retains titles, discussion links and Copy local path. Source/search filters
+  and pagination compose with it; individual Image/Video filters remain.
+- Both the previously failing exact archive request and a minimal documented
+  request returned HTTP 200. The real app pipeline saved 161 AskHistorians posts
+  across three pages, with zero parser omissions and persistence verified after
+  reopening. Five total live archive requests, each paced at least five seconds
+  after the previous response; no Reddit requests.
+- Remove the unnecessary, undocumented meta-app query parameter. Its presence
+  did not reproduce the previous failure; removal is not claimed as a fix for
+  the earlier HTTP 500. Keep only documented search parameters.
+- Historical post coverage and media availability are separate gaps. A broad
+  oldest/newest span does not prove continuous coverage. Interrupted jobs stay
+  unfinished; unavailable media does not imply that the post itself is missing.
+
+### 1. Encrypted backup and restore
+
+- Add explicit backup/export and restore in Settings. Include a consistent
+  database snapshot, owned media, feed/history preferences, deletion exclusions
+  and future read states. Exclude browser cookies/sign-in profiles from the
+  portable library backup; use the destination's sign-in after restoring.
+- Require password encryption using an established authenticated-encryption
+  format and password-based key derivation. Do not invent a cipher or store the
+  passphrase. Select and document the maintained implementation before coding
+  this stage. Stream large backups with bounded memory and disclose any
+  temporary disk space needed for a consistent snapshot.
+- Authenticate and validate the complete backup before replacing live data.
+  Reject wrong passwords, tampering, truncation, unsafe paths and invalid
+  schema/media without changing the current library. Confirm replacement,
+  quiesce collection, stage the restore and retain a rollback copy until success.
+  Restoring must never start collection automatically.
+- Verify encrypted round trips, corruption, large files, interruption, disk/cap
+  failures and preservation of deletion exclusions.
+
+### 2. Viewport-based read tracking
+
+- Add persistent local read/unread status and All / Unread / Read filtering.
+  Reading is local to Collector and does not interact with Reddit's account.
+- Ordinary cards must be fully shown in the viewport while the page is visible
+  and unobscured. A provisional one-second dwell avoids marking a card during a
+  passing scroll. For cards taller than the usable viewport, track visible
+  coverage until every part has been shown; one visible edge is insufficient.
+- Media/layout changes, background tabs, modal overlays and clipped cards must
+  not cause false reads. Keep visible unread results stable until the user
+  refreshes/changes the filter, rather than removing cards under their pointer.
+  Include a manual read/unread override.
+- Verify restart, fast scrolling, tall cards, media resizing, hidden tabs,
+  overlays and filter changes. Store read state independently of observations
+  so later live/archive updates do not reset it.
+
+### 3. Search scopes
+
+- Add Title / Body / Both, defaulting to Both. Body means the saved post body.
+  Compose with subreddit, media, read status and pagination.
+- Search the accepted reader-visible content, including live/archive body
+  fallback. Never search a removed body or expose superseded archive text.
+  Handle literal input, Unicode and phrases predictably. Evaluate an index
+  against realistic library sizes before choosing full-text syntax; ordinary
+  searching must not require a query language.
+- Verify scope-specific matches, provenance, redaction, pagination and large
+  libraries. Preserve filters against delayed responses.
+
+### 4. Storage breakdown and selective cleanup
+
+- Show space by subreddit and media type. Separate shared physical files and
+  global database allocation so totals do not double-count shared media.
+- Preview affected posts/files and estimated reclaimable bytes. Reuse confirmed
+  post deletion and per-feed clearing semantics; preserve shared files while
+  other posts own them, and preserve deletion exclusions.
+- No automatic eviction or history pruning. Media-only eviction needs a
+  separate explicit design: ordinary Sync currently redownloads missing files,
+  so do not add cleanup that immediately downloads everything again.
+- Verify sharing, cancellation, active downloads, capacity, reclaimed space and
+  compaction failure reporting.
+
+### 5. Complete galleries
+
+- Traverse rendered gallery controls deterministically through the same paced
+  browser, without a Reddit API, hidden state or AI extraction.
+- Bind every slide to its post and establish the full ordered set. Persist
+  slide progress, download all supported items and render an offline gallery.
+  A preview or first slide must never count as a complete gallery.
+- Handle repeated controls, unknown totals, mixed media, expired URLs, partial
+  failure and Stop/Resume. Revisit the existing 20-reference safety bound;
+  never silently truncate a larger gallery and mark it complete.
+- Unsupported embedded providers remain labelled links until a provider has a
+  separately verified, supported download path.
+
+### 6. Easier launching
+
+- Add a lightweight macOS launcher that starts the existing local server,
+  opens the browser and offers Quit. Retain the CLI workflow.
+- Detect a matching running instance and port conflicts. Respect per-clone data
+  and overrides. Explain missing runtime/browser/media dependencies without
+  installing anything silently.
+- Quit stops jobs and preserves checkpoints. Verify launch/quit/relaunch,
+  offline use, paths containing spaces and simultaneous isolated clones.
+
+### Deferred: encryption of the live library
+
+Encryption of stored database/media is explicitly deferred until the stages
+above are resolved. Encrypted backups do not imply encrypted live storage.
+Later design must cover unlocking/key lifecycle, SQLite journals, temporary
+files, media playback and explicit conversion of existing data.
+
+Implement and validate stages incrementally; commit and push completed tasks
+under AGENTS.md. Do not discard the current library or add prototype
+compatibility layers as a shortcut.
+
+## Earlier planning and implementation history
+
 Revision 5, reviewed 30 September 2026; implementation status updated 22 October 2026. This replaces the larger desktop/request-orchestration design with the local web-app approach discussed by Codex and Claude Opus 5.5. Both completed a quick review: ready to start the bounded browser/storage feasibility work. Layout behaviour and historical reachability remain empirical checks.
 
 The local React/Node/SQLite app now implements the browser-backed feed, filters, saved history targets, thread snapshots, bounded JSONL/Zstandard import, and offline media. Authenticated Classic Reddit extraction was exercised on two distinct 25-post listing pages and a 37-comment thread. The collector uses JavaScript-disabled rendered HTML and suppresses nonessential resources; CSS establishes rendered visibility. See [evidence](FEASIBILITY.md) and [run instructions](README.md). Historical reach is still bounded empirical evidence, not a completeness claim. The latest requested Opus implementation review could not run because its Claude OAuth session expired; do not treat the older planning reviews as a review of this implementation.

@@ -4,7 +4,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { postId, redditUrl, subredditName, validateObservation } from './domain.ts';
-import type { Availability, MediaKind, PostObservation } from './domain.ts';
+import type { Availability, MediaKind, MediaFilter, PostObservation } from './domain.ts';
 import { historyMonths, historyLowerBound, historyRank } from './history-window.ts';
 import type { HistoryMonths } from './history-window.ts';
 import type { ThreadSnapshot } from './extract.ts';
@@ -582,7 +582,7 @@ export class ReaderStore {
     });
   }
 
-  queryFeed(input: { subreddit?: string; media?: MediaKind; text?: string; afterMs?: number; beforeMs?: number; cursor?: string; limit?: number } = {}) {
+  queryFeed(input: { subreddit?: string; media?: MediaFilter; text?: string; afterMs?: number; beforeMs?: number; cursor?: string; limit?: number } = {}) {
     const limit = Math.min(100, Math.max(1, input.limit ?? 50));
     const clauses: string[] = ["EXISTS(SELECT 1 FROM feeds f WHERE f.name=p.subreddit AND f.subscribed=1)"];
     const params: (string | number)[] = [];
@@ -596,7 +596,14 @@ export class ReaderStore {
       if (!Number.isSafeInteger(cursor.time) || postId(cursor.id) !== cursor.id) throw new Error('Invalid cursor');
       clauses.push('(p.created_ms < ? OR (p.created_ms = ? AND p.id < ?))'); params.push(cursor.time, cursor.time, cursor.id);
     }
-    if (input.media) { clauses.push(`coalesce(p.live_availability, o.availability) = 'available' AND (EXISTS(SELECT 1 FROM json_each(${POST_MEDIA}) WHERE value = ?) OR has_media_reference(${POST_OUTBOUND},coalesce((SELECT attachments FROM media_evidence WHERE post_id=p.id),${POST_ATTACHMENTS}),?))`); params.push(input.media,input.media==='Image'?'image':input.media==='Video'?'video':''); }
+    if (input.media) {
+      const kinds=input.media==='Media'?['Image','Video']: [input.media];
+      const matches=kinds.map(kind=>{
+        params.push(kind,kind==='Image'?'image':kind==='Video'?'video':'');
+        return `(EXISTS(SELECT 1 FROM json_each(${POST_MEDIA}) WHERE value = ?) OR has_media_reference(${POST_OUTBOUND},coalesce((SELECT attachments FROM media_evidence WHERE post_id=p.id),${POST_ATTACHMENTS}),?))`;
+      });
+      clauses.push(`coalesce(p.live_availability, o.availability) = 'available' AND (${matches.join(' OR ')})`);
+    }
     if (input.text) { clauses.push(`instr(lower(o.title || char(10) || CASE WHEN coalesce(p.live_availability,o.availability) = 'available' THEN coalesce(${POST_BODY},'') ELSE '' END), lower(?)) > 0`); params.push(input.text); }
     const ids = this.db.prepare(`SELECT p.id FROM posts p JOIN observations o ON o.rowid =
       (SELECT rowid FROM observations WHERE post_id = p.id ORDER BY (source = 'live') DESC, observed_at DESC, source_key DESC LIMIT 1)

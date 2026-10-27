@@ -2,6 +2,8 @@
 
 A local web app for reading selected subreddits on demand. Uses its own signed-in Chrome profile, Playwright, structured rendered Classic Reddit HTML, React, and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
 
+The [next-stage plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records encrypted backups, viewport-based read tracking, search scopes, storage cleanup, complete galleries and a launcher. These are planned additions; live-library encryption is deferred until after them.
+
 ## Run
 
 Use Node **25.3.0** (`nvm use`). Its built-in SQLite and Zstandard APIs are experimental. Installed Google Chrome is the default browser; Chrome's security sandbox is enabled. Dependencies are locked.
@@ -12,7 +14,7 @@ npm run build
 npm start
 ```
 
-Open **http://127.0.0.1:3210**. The compact dark All subreddits feed filters by subreddit, media type and text. It is the single combined-feed destination in the sidebar. Post selection and AI summarisation have been removed. Open **Feeds** to view subscriptions, stored counts, per-subreddit sync status and the last successful offline sync time. Add a feed there with a history limit: **1 month** (default), 3 months, 6 months, 1 year, 2 years, 3 years, 5 years, or All time. The same setting is editable beside each subscription. Add & sync starts an explicit session. Sync a feed individually or use Sync all; already active/queued feeds are skipped. Nothing scrapes on application startup.
+Open **http://127.0.0.1:3210**. The compact dark All subreddits feed filters by subreddit, media type and text. **Media** combines image and video posts, hides text previews, and retains the post title, discussion and local-path controls. Text-only posts are excluded; **Image** and **Video** remain available separately. It is the single combined-feed destination in the sidebar. Post selection and AI summarisation have been removed. Open **Feeds** to view subscriptions, stored counts, per-subreddit sync status and the last successful offline sync time. Add a feed there with a history limit: **1 month** (default), 3 months, 6 months, 1 year, 2 years, 3 years, 5 years, or All time. The same setting is editable beside each subscription. Add & sync starts an explicit session. Sync a feed individually or use Sync all; already active/queued feeds are skipped. Nothing scrapes on application startup.
 
 **Sync** combines new-post catch-up, unfinished history and supported media downloads. A feed shows **Saved offline** and advances **Last successful sync** only after all page scans in that run finish and every supported media item is validated and stored locally. **Incomplete** means a page or file still needs work; **Resume** checks newer posts and continues the saved checkpoints without downloading cached files again. Unavailable media, omitted extractions and the end of Reddit's listing are reported as **Completed with gaps**, with a separate Last completed timestamp. Neither partial progress nor completion with gaps advances the successful timestamp. This describes the requested sync, not a guarantee of every historical post or comment; discussions are still fetched explicitly when requested.
 
@@ -56,6 +58,8 @@ Reopening a current database pauses interrupted scans, downloads and archive job
 ## Per-feed history
 
 Presets use calendar months in UTC, with month-end clamping (including leap years). **All time means as far back as the browser listing serves**, not a guarantee of every post since creation. Older/deleted/private posts may not be discoverable there, and archive inputs can have gaps too.
+
+Missing historical posts and unavailable media are separate gaps. A source may not expose every old post, archives may not contain it, and unreadable/malformed records are disclosed as omissions. Stopped or interrupted work stays Incomplete until explicitly resumed; a stored oldest/newest timestamp does not establish continuous coverage between those dates. A saved post can also have an unavailable image or video while its text remains readable.
 
 The Feeds page shows the selected limit, total stored posts, oldest and newest observed post dates, live/archive counts, progress and known omissions. These are observations, not proof of contiguous coverage or a percentage of an unknown total. A sparse old archive post never advances the browser checkpoint or closes a live scan.
 

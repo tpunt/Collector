@@ -29,6 +29,7 @@ test('paged fetching retains timestamp ties, deduplicates boundary replay, saves
  try{
   const id=fetcher.start(input);await settled(fetcher);const job=store.archiveFetch(id)!;
   assert.equal(job.state,'done');assert.equal(job.observed,205);assert.equal(job.added,205);assert.equal(store.stats().posts,205);assert.equal(job.omitted,0);assert.equal(job.pages,4);assert.equal(media.flat().length,205);assert.equal(starts.length,4);assert.equal(store.listTargets().length,0);assert(store.getPost(rows[100]!.id));assert(visits[1]!.includes('00%3A01%3A38.999Z'));
+  for(const visit of visits)assert.deepEqual([...new URL(visit).searchParams.keys()].sort(),['after','before','limit','sort','subreddit']);
  }finally{await fetcher.close();store.close();}
 });
 

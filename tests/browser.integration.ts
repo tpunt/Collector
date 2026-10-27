@@ -23,12 +23,17 @@ test('Classic extractor rejects hidden/invalid cards, ignores edit time and reta
 });
 test('web app supports actual feed filtering, thread drawer, history and streaming file upload without website traffic',async()=>{
   const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');
-  const records:PostObservation[]=['Text','Image','Video'].map((media,index)=>({id:'t3_'+['abc','def','ghi'][index],subreddit:'python',title:media+' fixture story',permalink:'/r/python/comments/'+['abc','def','ghi'][index]+'/',created:{epochMs:1700000000000+index*1000,precisionMs:1000},source:'archive',exportId:'fixture',observedAt:1800000000000,body:media==='Text'?'Saved fixture body':undefined,media:[media as 'Text'|'Image'|'Video']}));app.store.importArchiveBatch(app.store.generation,records);
+  const records:PostObservation[]=['Text','Image','Video'].map((media,index)=>({id:'t3_'+['abc','def','ghi'][index],subreddit:'python',title:media+' fixture story',permalink:'/r/python/comments/'+['abc','def','ghi'][index]+'/',created:{epochMs:1700000000000+index*1000,precisionMs:1000},source:'archive',exportId:'fixture',observedAt:1800000000000,body:media==='Text'?'Saved fixture body':'Media caption',media:[media as 'Text'|'Image'|'Video']}));app.store.importArchiveBatch(app.store.generation,records);
   const origin=await app.listen();const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
   try{
     const page=await browser.newPage();const errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(origin);await page.locator('.post-card').first().waitFor();assert.equal(await page.locator('.post-card').count(),3);
     await page.getByRole('button',{name:'Image',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.post-card').length===1);assert.equal(await page.locator('.post-card').count(),1);
+    assert.equal(await page.locator('.post-preview').innerText(),'Media caption');
+    await page.getByRole('button',{name:'Media',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.post-card').length===2);
+    assert.equal(await page.getByRole('button',{name:'Text fixture story',exact:true}).count(),0);assert.equal(await page.locator('.post-preview').count(),0);
+    assert.equal(await page.getByRole('button',{name:'Image fixture story',exact:true}).count(),1);assert.equal(await page.getByRole('button',{name:'Video fixture story',exact:true}).count(),1);
+    assert.equal((await fetch(origin+'/api/feed?media=Media')).status,200);assert.equal((await fetch(origin+'/api/feed?media=invalid')).status,400);
     await page.getByRole('button',{name:'All posts',exact:true}).click();await page.getByRole('button',{name:'Text fixture story',exact:true}).waitFor();await page.getByRole('button',{name:'Text fixture story',exact:true}).click();await page.getByRole('dialog',{name:'Thread reader'}).waitFor();assert(await page.getByText('Saved fixture body',{exact:true}).count());
     await page.getByRole('button',{name:'Close thread'}).click();await page.getByRole('button',{name:/Import an archive/}).click();await page.getByRole('button',{name:'Import a file',exact:true}).click();
     const file=Buffer.from(JSON.stringify({id:'jkl',subreddit:'python',title:'Uploaded archive story',created_utc:1700000004,is_self:true,selftext:'Local file body'})+'\n');

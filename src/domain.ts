@@ -2,6 +2,8 @@ import { mediaReference } from './media-reference.ts';
 import type { MediaReference } from './media-reference.ts';
 export const MEDIA_KINDS = ['Text', 'Image', 'Video', 'Link', 'Unknown'] as const;
 export type MediaKind = typeof MEDIA_KINDS[number];
+export const MEDIA_FILTERS = ['Media', ...MEDIA_KINDS] as const;
+export type MediaFilter = typeof MEDIA_FILTERS[number];
 export type Availability = 'available' | 'deleted' | 'removed';
 
 export interface CreatedTime {

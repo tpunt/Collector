@@ -11,8 +11,8 @@ import type { JobDependencies } from './jobs.ts';
 import { ArchiveImporter } from './archive.ts';
 import { ArchiveFetcher } from './archive-fetch.ts';
 import { historyMonths, historyLowerBound, historyRank } from './history-window.ts';
-import { MEDIA_KINDS, postId, subredditName } from './domain.ts';
-import type { MediaKind } from './domain.ts';
+import { MEDIA_FILTERS, postId, subredditName } from './domain.ts';
+import type { MediaFilter } from './domain.ts';
 import { MediaCache } from './media.ts';
 import type { MediaDependencies } from './media.ts';
 import { RequestQueue } from './request-gate.ts';
@@ -175,8 +175,8 @@ export function createReaderServer(options: { database?: string; port?: number; 
         storage:store.storage, import:importer.progress, imports:store.getSetting('imports') ?? [], account:store.getSetting('account') }); return; }
       if (url.pathname === '/api/feed') {
         const media = url.searchParams.get('media') ?? undefined;
-        if (media && !MEDIA_KINDS.includes(media as MediaKind)) throw new Error('Invalid media filter');
-        json(res,store.queryFeed({subreddit:url.searchParams.get('subreddit') || undefined,media:media as MediaKind | undefined,
+        if (media && !MEDIA_FILTERS.includes(media as MediaFilter)) throw new Error('Invalid media filter');
+        json(res,store.queryFeed({subreddit:url.searchParams.get('subreddit') || undefined,media:media as MediaFilter | undefined,
           text:(url.searchParams.get('q') ?? '').slice(0,500),afterMs:date(url.searchParams.get('after')),beforeMs:date(url.searchParams.get('before')),
           cursor:url.searchParams.get('cursor') || undefined})); return;
       }

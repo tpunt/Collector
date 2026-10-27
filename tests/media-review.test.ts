@@ -2,6 +2,23 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {ReaderStore} from '../src/store.ts';
 import {postMediaReferences,mediaReferences} from '../src/media-reference.ts';
+import type {MediaKind,PostObservation,Availability} from '../src/domain.ts';
+
+test('combined Media filter includes images, videos and discovered attachments with no duplicates, and composes with pagination, source and search',()=>{
+ const store=new ReaderStore(':memory:');try{
+  store.addSubreddit('aww');store.addSubreddit('python');
+  const record=(id:string,media:MediaKind[],subreddit='aww',availability:Availability='available'):PostObservation=>({id,subreddit,title:'Media fixture '+id,body:id==='text'?'text-only sentinel':'Caption '+id,permalink:`/r/${subreddit}/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'combined-filter',observedAt:1800000000000,media,availability});
+  store.importArchiveBatch(store.generation,[record('text',['Text']),record('image',['Image']),record('video',['Video']),record('mixed',['Text','Image','Video']),record('link',['Link']),record('discover',['Unknown']),record('gone',['Image'],'aww','removed'),record('other',['Image'],'python')]);
+  store.saveMediaReferences(store.generation,'discover',[{kind:'video',url:'https://i.imgur.com/discovered.mp4'}]);
+  const ids:string[]=[];let cursor:string|undefined;
+  do{const page=store.queryFeed({media:'Media',limit:2,cursor});ids.push(...page.posts.map(post=>post.id));cursor=page.next??undefined;}while(cursor);
+  assert.deepEqual(ids.sort(),['t3_discover','t3_image','t3_mixed','t3_other','t3_video']);assert.equal(new Set(ids).size,ids.length);
+  assert.equal(store.queryFeed({media:'Media',subreddit:'aww'}).posts.length,4);
+  assert.equal(store.queryFeed({media:'Media',text:'text-only sentinel'}).posts.length,0);
+  assert.deepEqual(store.queryFeed({media:'Media',subreddit:'aww',text:'Caption mixed'}).posts.map(post=>post.id),['t3_mixed']);
+  assert.equal(store.queryFeed({media:'Image',subreddit:'aww'}).posts.length,2);assert.equal(store.queryFeed({media:'Video',subreddit:'aww'}).posts.length,3);
+ }finally{store.close();}
+});
 
 test('native video references reject posters, low-resolution previews and another video’s manifest',()=>{
  const outbound='https://v.redd.it/mainvideo',manifest=outbound+'/DASHPlaylist.mpd';

@@ -137,8 +137,7 @@ export class ArchiveFetcher {
         }
         const url = new URL(ENDPOINT);
         url.search = new URLSearchParams({ subreddit: job.subreddit, after: new Date(Math.max(0, job.cursorMs - 1)).toISOString(),
-          before: new Date(job.beforeMs).toISOString(), sort: 'asc', limit: job.widePage ? 'auto' : String(PAGE_LIMIT),
-          'meta-app': 'reddit-reader' }).toString();
+          before: new Date(job.beforeMs).toISOString(), sort: 'asc', limit: job.widePage ? 'auto' : String(PAGE_LIMIT) }).toString();
         const rows = await this.response(url, signal); job = current();
         const records: PostObservation[] = [], boundary = new Set(job.boundaryIds), ids = new Set<string>();
         let omitted = 0, excluded = 0, observed = 0, last = job.cursorMs, previous = -1;

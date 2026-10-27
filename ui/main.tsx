@@ -7,6 +7,7 @@ import { historyLowerBound } from '../src/history-window.ts';
 import { HISTORY_OPTIONS } from '../src/history-window.ts';
 import type { HistoryMonths } from '../src/history-window.ts';
 import { PostMedia } from './Media.tsx';
+import { MEDIA_FILTERS } from '../src/domain.ts';
 import { GB } from '../src/storage-limit.ts';
 import type { StorageStatus } from '../src/storage-limit.ts';
 import './style.css';
@@ -167,14 +168,14 @@ function App() {
           </article>)}
         </div><p className="feed-page-note" id="feed-history-note">Sync saves recent posts, unfinished history and supported media locally. Expanding the history limit starts a sync; reducing it keeps saved posts. Older archives and stored date ranges may have gaps.</p></>:<div className="empty-state"><h2>No feeds yet</h2><button className="button primary" onClick={()=>{setName('');setMonths(1);setModal('source');}}>Add a feed</button></div>}
       </section>:<>
-        <section className="feed-tools" aria-label="Feed filters"><div className="type-tabs">{['','Text','Image','Video','Link','Unknown'].map(type=><button key={type} className={media===type?'selected':''} onClick={()=>setMedia(type)}>{type||'All posts'}</button>)}</div>
+        <section className="feed-tools" aria-label="Feed filters"><div className="type-tabs">{['',...MEDIA_FILTERS].map(type=><button key={type} className={media===type?'selected':''} onClick={()=>setMedia(type)}>{type||'All posts'}</button>)}</div>
           <div className="filter-inputs"><select aria-label="Filter by subreddit" value={source} onChange={e=>setSource(e.target.value)}><option value="">All subreddits</option>{feeds.map(feed=><option key={feed.name} value={feed.name}>r/{feed.name}</option>)}</select><input className="search" aria-label="Search stored posts" placeholder="Search posts…" value={search} onChange={e=>setSearch(e.target.value)}/></div>
         </section>
         <div className="feed-meta"><span>Newest first</span>{currentFeed?<span>Last successful sync: {timestamp(currentFeed.sync.lastSuccessAt)} · {syncState(currentFeed)}{currentFeed.offline.total>0&&` · Media ${currentFeed.offline.ready}/${currentFeed.offline.total} offline`}</span>:<button onClick={()=>navigate('feeds')}>Manage feeds &amp; sync status →</button>}</div>
         <div className="feed">{posts.map(post=><article className="post-card" key={post.id}>
           <div className="post-content"><PostMedia post={post} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===post.subreddit)&&syncing(feeds.find(feed=>feed.name===post.subreddit)!))}>
             {copyLocalPath=><><div className="post-meta"><button onClick={()=>filterSource(post.subreddit)}>r/{post.subreddit}</button><time dateTime={new Date(post.createdMs).toISOString()}>{date(post.createdMs)}</time>{post.source==='archive'&&<span className="archive-label">Archive</span>}<div className="badges">{post.media.map(type=><span key={type}>{type}</span>)}{post.availability!=='available'&&<span>{post.availability}</span>}{copyLocalPath}</div></div>
-            <button className="post-title" onClick={()=>void openThread(post.id)}>{post.title}</button>{post.body&&<p className="post-preview">{post.body.slice(0,200)}</p>}</>}
+            <button className="post-title" onClick={()=>void openThread(post.id)}>{post.title}</button>{media!=='Media'&&post.body&&<p className="post-preview">{post.body.slice(0,200)}</p>}</>}
           </PostMedia>
           </div><div className="post-actions"><button className="read-thread" onClick={()=>void openThread(post.id)} aria-label={'Read thread: '+post.title}>↗</button><button className="delete-post danger" title="Delete post" disabled={busy} aria-label={'Delete post: '+post.title} onClick={()=>{setError('');setPostToDelete(post);}}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></svg></button></div>
         </article>)}</div>
