@@ -24,6 +24,11 @@ round. Keep the app a compact, on-demand local web reader.
 - Historical post coverage and media availability are separate gaps. A broad
   oldest/newest span does not prove continuous coverage. Interrupted jobs stay
   unfinished; unavailable media does not imply that the post itself is missing.
+- Resume retains unfinished history checkpoints and retries pending/failed
+  downloads, even when the same feed has known unavailable media. Inconclusive
+  discovery and native-player timeouts remain retryable. Posts show orange
+  Not downloaded / Partially downloaded pills with a reason; unsupported
+  embeds retain their visible post and an explicit online original link.
 
 ### 1. Encrypted backup and restore
 

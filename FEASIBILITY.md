@@ -254,3 +254,36 @@ bounded two-worker rerun passed. The new filter was also manually exercised in
 the isolated app: ten media posts across two fixture feeds, five after selecting
 aww, no body previews, and cached local image/video decoding. The app's request
 counter remained zero during reading and its console reported no errors.
+
+## Resumable gaps and offline-media labels — 27 October 2026
+
+Stopped history checkpoints and pending/failed downloads remain Incomplete,
+including when other media in the same feed is unavailable. A new regression
+closes and reopens a real SQLite database after Stop, then verifies that explicit
+Sync checks the newest listing and collects the missing page from the saved Next
+URL before finishing. Known unsupported media cannot mask that unfinished work.
+
+The review found an inconclusive-discovery bug: a native player timeout (or empty
+discovery result) was classified as permanently unavailable. These outcomes now
+remain retryable failures. Tests exercise the actual rendered discovery adapter
+with an accelerated timeout and verify that only later explicit syncs retry an
+empty/transient discovery result until a file is saved. Known unsupported
+providers, incomplete galleries and explicit post-removal evidence retain their
+separate handling.
+
+Feed cards and the thread drawer now show orange Not downloaded / Partially
+downloaded pills, with reasons below the content. Unsupported embeds remain
+visible with an explicit Open original link; no remote player is loaded while
+reading. Local status lookups first show Checking local media, and a failed
+lookup shows Status unknown rather than claiming that a saved file is absent.
+Feeds exposes awaiting-sync, retryable and unavailable counts separately and
+explains Resume for unfinished work.
+
+Validation: 124 unit tests and all 38 local Chrome/API/network integration tests
+pass. The first integration run exposed two fixture expectations that needed
+updating: the newly visible pending count, and empty test post hosts that had no
+rendered size. After fixing the fixtures, the full suite passed. Manual in-app
+browser checks confirmed the orange pill, original link, saved-video local path,
+thread drawer and Incomplete/Resume explanation using the isolated fixture
+library. No external requests were made during this task; the user's library
+and browser profile were untouched.

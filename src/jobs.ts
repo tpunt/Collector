@@ -286,7 +286,7 @@ export class ReaderJobs {
                 await this.closeBrowser();continue;
               }
               this.controller.signal.throwIfAborted();
-              if(!attachments.length)throw new UnsupportedMediaError('This post did not expose supported media files');
+              if(!attachments.length)throw new Error('Media discovery found no download link; sync this feed again to retry');
               this.store.saveMediaReferences(work.generation,post.id,attachments);
               await this.mediaSync?.reconcile?.();
             }

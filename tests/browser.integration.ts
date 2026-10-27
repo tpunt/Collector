@@ -65,7 +65,7 @@ test('feeds page refreshes individually or together, shows progress, stops one f
     const background=await page.evaluate(()=>getComputedStyle(document.documentElement).backgroundColor);assert.equal(background,'rgb(17, 20, 22)');
     await page.getByRole('button',{name:'Sync all',exact:true}).click();await row('aww').getByText('Syncing',{exact:true}).waitFor();await row('python').getByText('Queued',{exact:true}).waitFor();
     await row('python').getByRole('button',{name:'Stop r/python',exact:true}).click();await row('python').getByText('Incomplete',{exact:true}).waitFor();assert.deepEqual(visited,['aww']);
-    finish('aww');await row('aww').getByText('Incomplete',{exact:true}).waitFor();assert.equal(await row('aww').getByText('Media 0/1 offline',{exact:true}).count(),1);assert.equal(await row('aww').getByText('Never',{exact:true}).count(),1);
+    finish('aww');await row('aww').getByText('Incomplete',{exact:true}).waitFor();assert.equal(await row('aww').getByText('Media 0/1 offline · 1 awaiting sync',{exact:true}).count(),1);assert.equal(await row('aww').getByText('Never',{exact:true}).count(),1);
     await row('python').getByRole('button',{name:'Resume r/python',exact:true}).click();await row('python').getByText('Syncing',{exact:true}).waitFor();const deadline=Date.now()+3000;while(app.jobs.feedStatus('python')!=='idle'){if(Date.now()>deadline)throw new Error('Pending history did not finish');if(pending.has('python'))finish('python');await new Promise(resolve=>setTimeout(resolve,5));}await row('python').getByText('Completed with gaps',{exact:true}).waitFor();
     await row('python').getByRole('button',{name:'Remove r/python',exact:true}).click();await page.getByRole('dialog',{name:'Remove r/python?'}).waitFor();await page.getByRole('button',{name:'Keep feed',exact:true}).click();assert.equal(await row('python').count(),1);
     await row('python').getByRole('button',{name:'Remove r/python',exact:true}).click();await page.getByRole('button',{name:'Remove feed',exact:true}).click();await row('python').waitFor({state:'detached'});assert.deepEqual(app.store.followedSources(),['aww']);assert(app.store.getPost('abc'));
@@ -153,7 +153,8 @@ test('inline images and playable video use cached local assets, range responses 
  const origin=await app.listen();const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
   const page=await browser.newPage(),remote:string[]=[];await page.route('**/*',route=>{if(!route.request().url().startsWith(origin))remote.push(route.request().url());return route.continue();});
-  await page.goto(origin);await page.getByText('Media not downloaded · Sync this feed to save it offline',{exact:true}).first().waitFor();assert.equal(downloads,0);assert.equal(await page.getByRole('button',{name:'Load media',exact:true}).count(),0);app.jobs.syncMedia(['aww'],{});await page.waitForFunction(()=>{const image=document.querySelector('.post-media img') as HTMLImageElement|null;const video=document.querySelector('.post-media video') as HTMLVideoElement|null;return image?.naturalWidth===1&&video!==null&&video.readyState>=2;});
+  await page.goto(origin);await page.getByText('Not downloaded',{exact:true}).first().waitFor();await page.getByText('Awaiting sync · Sync this feed to save it offline',{exact:true}).first().waitFor();assert.equal(downloads,0);assert.equal(await page.getByRole('button',{name:'Load media',exact:true}).count(),0);app.jobs.syncMedia(['aww'],{});await page.waitForFunction(()=>{const image=document.querySelector('.post-media img') as HTMLImageElement|null;const video=document.querySelector('.post-media video') as HTMLVideoElement|null;return image?.naturalWidth===1&&video!==null&&video.readyState>=2;});
+  assert.equal(await page.getByText('Not downloaded',{exact:true}).count(),0);
   assert.equal(downloads,4);assert(mediaStarts.slice(1).every((time,index)=>time-mediaStarts[index]!>=20),'Every manifest/video/audio/image HTTP start must be paced');assert.deepEqual(remote,[]);await page.locator('video').evaluate(async(video:HTMLVideoElement)=>{video.muted=true;await video.play();});await page.waitForFunction(()=>(document.querySelector('video') as HTMLVideoElement).currentTime>0);await page.locator('video').evaluate((video:HTMLVideoElement)=>video.pause());
   for(const [id,title] of [['t3_abc','Image inline fixture'],['t3_def','Video inline fixture']]){const file=(await app.media.items(id!))[0]!;assert(file.localPath);assert((await stat(file.localPath)).isFile());const card=page.locator('.post-card').filter({has:page.getByRole('button',{name:title!,exact:true})});const copy=card.locator('.badges').getByRole('button',{name:'Copy local path',exact:true});await copy.waitFor();assert.equal(await copy.getAttribute('title'),file.localPath);assert.equal(await card.locator('details').count(),0);await page.context().grantPermissions(['clipboard-read','clipboard-write'],{origin});await copy.click();assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),file.localPath);}
   assert.equal(await page.locator('.sidebar').getByText('Session requests',{exact:true}).count(),1);assert.equal(await page.locator('main footer').count(),0);
@@ -165,8 +166,9 @@ test('inline images and playable video use cached local assets, range responses 
  }finally{await browser.close();await app.close();}
 });
 
-test('expanded media discovery binds DASH manifests to the post and rejects incomplete galleries',async()=>{
+test('expanded media discovery binds DASH manifests, rejects unsupported media and keeps incomplete discovery retryable',async t=>{
  const {discoverMedia}=await import('../src/media-discovery.ts');const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
+ const {UnsupportedMediaError}=await import('../src/sync-errors.ts');
  try{
   const page=await browser.newPage();await page.route('https://**/*',route=>route.abort());
   await page.setContent(`<div class="thing" data-fullname="t3_abc" data-url="https://v.redd.it/boundmedia"><button class="expando-button collapsed" onclick="this.className='expando-button expanded';this.nextElementSibling.style.display='block'">Expand video</button><div class="expando" style="display:none"><video src="blob:https://old.reddit.com/fixture"></video><video src="https://v.redd.it/boundmedia/CMAF_96.mp4"></video><img hidden src="https://i.redd.it/hidden.jpeg"></div></div>`);
@@ -174,6 +176,14 @@ test('expanded media discovery binds DASH manifests to the post and rejects inco
   assert.deepEqual(video,[{kind:'video',url:'https://v.redd.it/boundmedia/DASHPlaylist.mpd'}]);
   await page.setContent(`<div class="thing" data-fullname="t3_abc" data-url="https://www.reddit.com/gallery/abc"><div class="expando"><img width="200" height="150" src="https://preview.redd.it/gallery.jpeg?width=1080"><img hidden src="https://i.redd.it/hidden.jpeg"></div></div>`);
   await assert.rejects(discoverMedia(page,'abc',()=>[],new AbortController().signal),/Complete gallery downloads/);
+  await page.setContent('<div class="thing" data-fullname="t3_abc" data-url="https://www.youtube.com/watch?v=fixture">Video</div>');
+  await assert.rejects(discoverMedia(page,'abc',()=>[],new AbortController().signal),UnsupportedMediaError);
+  await page.setContent('<div class="thing" data-fullname="t3_abc">Video</div>');
+  await assert.rejects(discoverMedia(page,'abc',()=>[],new AbortController().signal),error=>error instanceof Error&&!(error instanceof UnsupportedMediaError)&&/retry/.test(error.message));
+  await page.setContent('<div class="thing" data-fullname="t3_abc" data-url="https://v.redd.it/boundmedia">Video</div>');
+  const now=Date.now;let elapsed=false;const clock=t.mock.method(Date,'now',()=>now()+(elapsed?45_001:0));
+  try{await assert.rejects(discoverMedia(page,'abc',()=>{elapsed=true;return [];},new AbortController().signal),error=>error instanceof Error&&!(error instanceof UnsupportedMediaError)&&/timeout/.test(error.message));}
+  finally{clock.mock.restore();}
  }finally{await browser.close();}
 });
 

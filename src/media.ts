@@ -96,7 +96,7 @@ export class MediaCache {
       this.store.setMediaSync(this.store.generation,id,'ready',null,session);return null;
     }
     if(!post.attachments.length&&post.outbound&&!['reddit.com','www.reddit.com','old.reddit.com','v.redd.it'].includes(new URL(post.outbound).hostname)){
-      this.store.setMediaSync(this.store.generation,id,'unavailable','This embedded provider does not expose a supported downloadable file',session);return null;
+      this.store.setMediaSync(this.store.generation,id,'unavailable','Offline download is not supported for this embedded provider',session);return null;
     }
     this.store.setMediaSync(this.store.generation,id,'downloading',null,session);
     return {discover:!post.attachments.length||(previous.status==='failed'&&post.attachments.some(item=>/\.mpd(?:\?|$)/i.test(item.url)))};

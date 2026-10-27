@@ -4,16 +4,18 @@ import {mkdtemp,rm,stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {ReaderStore} from '../src/store.ts';
-import {ReaderJobs} from '../src/jobs.ts';
+import {ReaderJobs,type JobDependencies} from '../src/jobs.ts';
 import {MediaCache} from '../src/media.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 import {historyLowerBound} from '../src/history-window.ts';
 import {UnsupportedMediaError} from '../src/sync-errors.ts';
 import type {PostObservation} from '../src/domain.ts';
+import {advanceBoundary} from '../src/history.ts';
+import type {Listing} from '../src/extract.ts';
 
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jS9sAAAAASUVORK5CYII=','base64');
 async function until(condition:()=>boolean){const end=Date.now()+4000;while(!condition()){if(Date.now()>end)throw new Error('Feed sync fixture did not settle');await new Promise(resolve=>setTimeout(resolve,2));}}
-async function setup(options:{images?:number;end?:boolean;unsupported?:boolean;fetch?:typeof fetch;beforeListing?:()=>Promise<void>;ageDays?:number}={}){
+async function setup(options:{images?:number;end?:boolean;unsupported?:boolean;fetch?:typeof fetch;discover?:JobDependencies['discoverMedia'];beforeListing?:()=>Promise<void>;ageDays?:number}={}){
  const directory=await mkdtemp(join(tmpdir(),'reader-unified-sync-')),path=join(directory,'reader.sqlite');
  const store=new ReaderStore(path),now=Date.now(),old=now-(options.ageDays??45)*86400000;
  store.addSource({name:'aww',historyMonths:1,lowerMs:historyLowerBound(1,now)!},now);
@@ -26,7 +28,7 @@ async function setup(options:{images?:number;end?:boolean;unsupported?:boolean;f
  await cache.initialize();
  let opened=false;const counts={released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000};
  jobs=new ReaderJobs(store,{mediaSync:cache,readAccount:async()=> 'fixture_user',browser:{counts,async open(){if(!opened){counts.released=0;opened=true;}},async close(){opened=false;},async manualSignIn(){},async navigate(url){visits.push(url);counts.released++;return{url:()=>url}as any;}},
-  discoverMedia:async()=>{throw new UnsupportedMediaError('Unsupported fixture provider');},readListing:async page=>{
+  discoverMedia:options.discover??(async()=>{throw new UnsupportedMediaError('Unsupported fixture provider');}),readListing:async page=>{
    await options.beforeListing?.();
    const second=page.url().includes('?'),prefix=second?'b':'a';
    const text:PostObservation[]=Array.from({length:5},(_,i)=>({id:`t3_${prefix}${i}`,subreddit:'aww',title:'History proof',permalink:`/r/aww/comments/${prefix}${i}/`,
@@ -64,6 +66,28 @@ test('Stop and Resume preserve saved files and checkpoints while checking for ne
  }finally{await h.close();}
 });
 
+test('an unavailable embed cannot conceal stopped history; restart and resync fetch the saved missing page',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'reader-resumable-history-')),path=join(directory,'reader.sqlite');
+ let store=new ReaderStore(path),jobs:ReaderJobs|undefined;
+ try{
+  const now=Date.now(),old=now-45*86400000,goal=store.addSource({name:'aww',historyMonths:1},now);
+  const post=(id:string):PostObservation=>({id,subreddit:'aww',title:'Saved '+id,permalink:`/r/aww/comments/${id}/`,created:{epochMs:old,precisionMs:1000},source:'live',observedAt:now,media:['Text'],body:'Saved body'});
+  const posts=Array.from({length:5},(_,i)=>post('a'+i)),checkpoint='https://old.reddit.com/r/aww/new/?after=t3_a4';
+  const first:Listing={account:'fixture_user',posts,ordinary:posts.map(p=>({id:'t3_'+p.id,createdMs:old,precisionMs:1000})),unknownTime:false,omissions:0,next:checkpoint,empty:false,signature:'first-page'};
+  const boundary=advanceBoundary(store.getTarget(goal)!,first);assert.equal(boundary.done,false);
+  store.beginFeedSync('aww',[goal]);store.commitBatch({generation:store.generation,targetId:goal,observations:posts,continuation:checkpoint,boundary:boundary.boundary,batchKey:first.signature,fromHead:true});
+  store.importArchiveBatch(store.generation,[{...post('embed'),source:'archive',exportId:'embed-fixture',media:['Video'],outbound:'https://www.youtube.com/watch?v=fixture'}]);
+  store.setMediaSync(store.generation,'embed','unavailable','Offline download is not supported for this embedded provider');
+  store.pauseSource('aww','Stopped by user');assert.equal(store.feedSync('aww').state,'incomplete');assert.equal(store.getPost('missing'),null);
+  store.close();store=new ReaderStore(path);assert.equal(store.feedSync('aww').state,'incomplete');assert.equal(store.getTarget(goal)?.continuation,checkpoint);
+  const visits:string[]=[];
+  jobs=new ReaderJobs(store,{mediaSync:null,browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){visits.push(url);return{url:()=>url}as any;}},readListing:async page=>page.url()===checkpoint?{...first,posts:[post('missing')],ordinary:[{id:'t3_missing',createdMs:old,precisionMs:1000}],signature:'missing-page',next:'https://old.reddit.com/r/aww/new/?after=t3_missing'}:{...first,posts:[],ordinary:[],empty:true,next:null,signature:'fresh-head'}});
+  assert.equal(jobs.state.running,false);assert.equal(visits.length,0);jobs.syncFeeds(['aww']);await until(()=>!jobs!.state.running);
+  assert(visits.includes(checkpoint));assert(visits.some(url=>!new URL(url).search));assert(store.getPost('missing'));assert.equal(store.getTarget(goal)?.status,'done');
+  assert.equal(store.mediaSync('embed')?.status,'unavailable');assert.equal(store.feedSync('aww').state,'gaps');assert.equal(store.offlineMedia('aww').pending,0);assert.equal(store.offlineMedia('aww').failed,0);
+ }finally{await jobs?.close();store.close();await rm(directory,{recursive:true,force:true});}
+});
+
 test('a failed download leaves sync incomplete and retains the previous successful timestamp until explicit retry',async()=>{
  let fail=false;const h=await setup({fetch:async()=>fail?new Response('',{status:503}):new Response(png,{headers:{'Content-Type':'image/png'}})});
  try{
@@ -84,6 +108,23 @@ test('listing exhaustion is completed with gaps rather than proof of full reques
 test('unsupported media is an explained completion gap, never a successful offline save',async()=>{
  const h=await setup({unsupported:true});try{h.jobs.syncFeeds(['aww']);await h.settle();const sync=h.store.feedSync('aww');
   assert.equal(sync.state,'gaps');assert.equal(sync.lastSuccessAt,null);assert.match(sync.reason??'',/unavailable/);assert.equal(h.store.offlineMedia('aww').unavailable,1);assert.equal(h.downloads.length,0);
+ }finally{await h.close();}
+});
+
+test('inconclusive media discovery stays incomplete and retries only on the next explicit sync',async()=>{
+ let discoveries=0;const h=await setup({unsupported:true,discover:async()=>{
+  discoveries++;
+  if(discoveries===1)return [];
+  if(discoveries===2)throw new Error('The video player did not expose a download before the timeout; sync this feed again to retry');
+  return [{kind:'image',url:'https://i.redd.it/discovered.png'}];
+ }});
+ try{
+  for(let attempt=1;attempt<=2;attempt++){
+   h.jobs.syncFeeds(['aww']);await h.settle();
+   assert.equal(discoveries,attempt);assert.equal(h.store.feedSync('aww').state,'incomplete');assert.equal(h.store.feedSync('aww').lastSuccessAt,null);
+   assert.equal(h.store.offlineMedia('aww').failed,1);assert.equal(h.store.offlineMedia('aww').unavailable,0);assert.equal(h.downloads.length,0);assert.equal(h.jobs.state.accessPause,null);
+  }
+  h.jobs.syncFeeds(['aww']);await h.settle();assert.equal(discoveries,3);assert.equal(h.downloads.length,1);assert.equal(h.store.feedSync('aww').state,'complete');assert.equal(h.store.offlineMedia('aww').ready,1);
  }finally{await h.close();}
 });
 

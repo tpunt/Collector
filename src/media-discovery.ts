@@ -29,14 +29,17 @@ export async function discoverMedia(page: Page, expectedId: string, candidates:(
     if(isGallery(dom.outbound))throw new UnsupportedMediaError('Complete gallery downloads are not supported by the current Reddit layout');
     const direct=postMediaReferences(dom.outbound,mediaReferences([dom.outbound,...dom.images,...dom.videos]));
     if(direct.length)return direct;
-    let base:URL;try{base=new URL(dom.outbound??'');}catch{throw new UnsupportedMediaError('No supported media link on this page');}
+    let base:URL;try{base=new URL(dom.outbound??'');}catch{throw new Error('Media discovery found no download link; sync this feed again to retry');}
     if(base.hostname==='v.redd.it'){
       const prefix=`https://v.redd.it/${base.pathname.split('/').filter(Boolean)[0]}/`;
       const observed=mediaReferences(candidates().filter(url=>url.startsWith(prefix)));
       const manifest=observed.find(item=>/\.mpd(?:\?|$)/i.test(item.url));
       if(manifest)return [manifest];
-    }else throw new UnsupportedMediaError('This embedded media provider is not supported. Open the post on Reddit.');
+    }else if(['reddit.com','www.reddit.com','old.reddit.com'].includes(base.hostname)){
+      throw new Error('Media discovery found no download link; sync this feed again to retry');
+    }else throw new UnsupportedMediaError('Offline download is not supported for this embedded provider');
     await delay(250,undefined,{signal});
   }
-  throw new UnsupportedMediaError('The player did not expose a supported media file. Open the post on Reddit.');
+  // A player that did not finish loading is inconclusive, not permanent unavailability.
+  throw new Error('The video player did not expose a download before the timeout; sync this feed again to retry');
 }

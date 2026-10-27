@@ -3,11 +3,13 @@ import type {StoredPost,MediaSyncState} from '../src/store.ts';
 import type {MediaItem} from '../src/media.ts';
 
 /** Reading the feed only reads local status/files. Sync owns every remote download. */
-export function PostMedia({post,syncing,revision,children}:{post:StoredPost;syncing:boolean;revision:number;children?:(copyLocalPath:React.ReactNode)=>React.ReactNode}) {
+export function PostMedia({post,syncing,revision,children}:{post:StoredPost;syncing:boolean;revision:number;children?:(controls:React.ReactNode)=>React.ReactNode}) {
   const ref=useRef<HTMLDivElement>(null);
-  const [visible,setVisible]=useState(false),[items,setItems]=useState<MediaItem[]>([]),[error,setError]=useState(''),[sync,setSync]=useState<MediaSyncState|null>(null);
+  const [visible,setVisible]=useState(false),[items,setItems]=useState<MediaItem[]>([]),[error,setError]=useState<{key:string;message:string}|null>(null),[sync,setSync]=useState<MediaSyncState|null>(null);
+  const [loadedKey,setLoadedKey]=useState('');
   const [copyStatus,setCopyStatus]=useState('Copy local path');
   const signature=post.attachments?.map(item=>item.url).join('|')??'';
+  const lookupKey=post.id+'|'+signature;
   const hasMedia=post.availability==='available'&&post.media.some(kind=>kind==='Image'||kind==='Video');
   async function copyPaths(paths:string[]) {
     try{await navigator.clipboard.writeText(paths.join('\n'));setCopyStatus('Copied');}
@@ -28,19 +30,28 @@ export function PostMedia({post,syncing,revision,children}:{post:StoredPost;sync
     async function poll(){
       try{
         const response=await fetch('/api/media/'+post.id),value:{items:MediaItem[];sync:MediaSyncState|null}=await response.json();
-        if(!response.ok)throw new Error('Could not load local media status');if(disposed)return;setItems(value.items);setSync(value.sync);setError('');
-      }catch(e){if(!disposed)setError((e as Error).message);}
+        if(!response.ok)throw new Error('Could not load local media status');if(disposed)return;setItems(value.items);setSync(value.sync);setLoadedKey(lookupKey);setError(null);
+      }catch(e){if(!disposed)setError({key:lookupKey,message:(e as Error).message});}
       if(!disposed&&syncing)timer=setTimeout(()=>void poll(),1000);
     }
     void poll();return()=>{disposed=true;clearTimeout(timer);};
   },[visible,hasMedia,syncing,post.id,signature,revision]);
-  const ready=hasMedia?items.filter(item=>item.state==='ready'):[];
+  const checked=loadedKey===lookupKey,localError=error?.key===lookupKey?error.message:'';
+  const ready=hasMedia&&checked?items.filter(item=>item.state==='ready'):[];
+  const notDownloaded=hasMedia&&checked&&!localError&&(ready.length<Math.max(items.length,1)||sync?.status==='unavailable'||sync?.status==='failed');
+  const note=localError||(!checked?'Checking local media…':sync?.status==='downloading'?'Downloading media during sync…':
+    sync?.status==='unavailable'?(sync.reason??'This media cannot be saved offline'):
+    sync?.status==='failed'?`Download failed · Sync this feed again to retry. ${sync.reason??''}`:
+    syncing?'Media queued for this sync':'Awaiting sync · Sync this feed to save it offline');
   const paths=ready.flatMap(item=>item.localPath?[item.localPath]:[]);
+  let original:string|null=null;
+  if(notDownloaded&&!post.attachments.length&&post.outbound){
+    try{const url=new URL(post.outbound);if(url.protocol==='https:'&&!url.username&&!url.password)original=url.href;}catch{/* Invalid external links are not rendered. */}
+  }
   const copyLocalPath=paths.length>0?<button type="button" className="copy-local-path" title={paths.join('\n')} aria-live="polite" onClick={()=>void copyPaths(paths)}>{copyStatus}</button>:null;
-  return <>{children?.(copyLocalPath)}{hasMedia&&<div className="post-media" ref={ref}>
+  const controls=<>{notDownloaded&&<span className="media-offline-status" role="status" title={note}>{ready.length?'Partially downloaded':'Not downloaded'}</span>}{localError&&hasMedia&&<span className="media-status-unknown" title={localError}>Status unknown</span>}{copyLocalPath}</>;
+  return <>{children?.(controls)}{hasMedia&&<div className="post-media" ref={ref}>
     {ready.length>0&&<div className={'media-items '+(ready.length>1?'gallery':'')}>{ready.map((item,index)=>item.kind==='image'?<a href={item.url!} target="_blank" rel="noreferrer" key={item.key}><img src={item.url!} alt={ready.length>1?`${post.title} — image ${index+1}`:post.title} loading="lazy"/></a>:<video key={item.key} src={item.url!} controls preload="metadata" playsInline aria-label={post.title}/>)}</div>}
-    {(ready.length<Math.max(items.length,1)||sync?.status==='unavailable'||sync?.status==='failed')&&<p className="media-note" role="status">{error||(
-      sync?.status==='downloading'?'Downloading media during sync…':sync?.status==='unavailable'?`Media unavailable: ${sync.reason}`:
-      sync?.status==='failed'?`Media sync failed: ${sync.reason}`:syncing?'Media queued for this sync':'Media not downloaded · Sync this feed to save it offline')}</p>}
+    {(!checked||localError||notDownloaded)&&<p className="media-note">{note}{original&&<a href={original} target="_blank" rel="noreferrer" title="Requires internet; this media is not stored locally">Open original ↗</a>}</p>}
   </div>}</>;
 }
