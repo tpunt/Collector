@@ -1,4 +1,4 @@
-# Personal Reddit reader — implementation plan
+# Collector — implementation plan
 
 ## Current scope and next stage — 27 October 2026
 
@@ -6,6 +6,19 @@ This section records the latest user decisions and takes precedence over older
 planning below. This round implements the combined Media filter and rechecks
 live archive fetching. The additions below are planned, not implemented in this
 round. Keep the app a compact, on-demand local web reader.
+
+### Future content sources
+
+Reddit is the first platform; additional platforms may follow. Shared features
+such as offline media status, read tracking, search, cleanup and encrypted backups
+should operate on collected content without embedding Reddit-specific rules.
+Collection boundaries own each platform's extraction, authentication, paging,
+availability evidence, media discovery and pacing. Expose capabilities rather
+than assuming every feed is a subreddit or offers Reddit's history/discussion
+model. Platform identity must remain separate from live/archive provenance;
+future feed/item IDs, credentials and checkpoints must be scoped accordingly.
+Introduce abstractions incrementally when needed, without adding another
+integration or a generic plugin framework in this round.
 
 ### Completed in this round
 
