@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile,writeFile,rm,stat} from 'node:fs/promises';
+import {mkdtemp,readFile,writeFile,rm,stat,rename,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {claimInstance,InstanceBusyError,readInstance} from '../src/instance.ts';
@@ -20,4 +20,11 @@ test('launcher validates runtime and explicit ports before serving',()=>{
  for(const version of ['25.3.0','25.9.1','26.0.0'])assert.doesNotThrow(()=>assertRuntime(version));
  assert.deepEqual(launchPort(undefined),{port:3210,fallback:true});assert.deepEqual(launchPort('3211'),{port:3211,fallback:false});
  for(const value of ['0','65536','abc','-1','2.5'])assert.throws(()=>launchPort(value),/PORT/);
+});
+
+
+test('a moved library replaces valid stale paths after acquiring its OS lock',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'collector-moved-')),old=join(directory,'old'),moved=join(directory,'moved');await(await import('node:fs/promises')).mkdir(old);
+ const original=claimInstance(join(old,'reader.sqlite'),old)!;const record={...original.record};original.release();await writeFile(join(old,'.collector-instance.json'),JSON.stringify(record));await rename(old,moved);
+ try{const lease=claimInstance(join(moved,'reader.sqlite'),moved)!;assert.notEqual(lease.record.id,record.id);assert.equal(lease.record.database,join(await realpath(moved),'reader.sqlite'));lease.release();assert.equal(readInstance(join(moved,'reader.sqlite')),null);}finally{await rm(directory,{recursive:true,force:true});}
 });

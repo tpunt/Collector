@@ -9,16 +9,16 @@ import {DatabaseSync} from 'node:sqlite';
 
 test('reading requires a dwell for every part; scrolling and layout changes cannot fill unseen coverage',()=>{
   const seen=new VisibleCoverage();
-  assert.equal(seen.sample(1600,600,0,700,0),false);
-  assert.equal(seen.sample(1600,600,300,1000,500),false);
-  assert.equal(seen.sample(1600,600,900,1600,900),false);
-  assert.equal(seen.sample(1600,600,900,1600,1900),false);
-  seen.resetDwell();assert.equal(seen.sample(1600,600,0,700,2000),false);
-  assert.equal(seen.sample(1600,600,0,700,3000),false);
-  assert.equal(seen.sample(1600,600,650,1350,3100),false);
-  assert.equal(seen.sample(1600,600,650,1350,4100),true);
-  assert.equal(seen.sample(1800,600,650,1350,4200),false);
-  assert.equal(seen.sample(1800,600,650,1350,5200),false);
+  assert.equal(seen.sample(1600,600,0,700,0,800),false);
+  assert.equal(seen.sample(1600,600,300,1000,500,800),false);
+  assert.equal(seen.sample(1600,600,900,1600,900,800),false);
+  assert.equal(seen.sample(1600,600,900,1600,1900,800),false);
+  seen.resetDwell();assert.equal(seen.sample(1600,600,0,700,2000,800),false);
+  assert.equal(seen.sample(1600,600,0,700,3000,800),false);
+  assert.equal(seen.sample(1600,600,650,1350,3100,800),false);
+  assert.equal(seen.sample(1600,600,650,1350,4100,800),true);
+  assert.equal(seen.sample(1800,600,650,1350,4200,800),false);
+  assert.equal(seen.sample(1800,600,650,1350,5200,800),false);
 });
 
 test('read status survives refresh/import/restart, composes with pagination and is deleted with content',async()=>{
@@ -39,4 +39,13 @@ test('read status survives refresh/import/restart, composes with pagination and 
     store.setRead('read1',true);store.deletePost('read1');assert.equal(store.queryFeed({read:'read'}).posts.length,0);
     store.setRead('read0',true);store.clearSubreddit('python');assert.equal(store.queryFeed({read:'read'}).posts.length,0);
   }finally{store.close();await rm(directory,{recursive:true,force:true});}
+});
+
+
+test('cards that fit the viewport require one complete view; resize resets tall-card coverage',()=>{
+ const seen=new VisibleCoverage();
+ for(const [top,bottom,time] of [[0,300,0],[0,300,1100],[200,500,1200],[200,500,2300]])assert.equal(seen.sample(500,600,top!,bottom!,time!,800),false);
+ assert.equal(seen.sample(500,600,0,500,2400,800),false);assert.equal(seen.sample(500,600,0,500,3500,800),true);
+ const resized=new VisibleCoverage();assert.equal(resized.sample(1600,600,0,800,0,800),false);assert.equal(resized.sample(1600,600,0,800,1100,800),false);
+ assert.equal(resized.sample(1600,600,800,1600,1200,900),false);assert.equal(resized.sample(1600,600,800,1600,2300,900),false);
 });

@@ -47,3 +47,46 @@ for(const kind of ['thread','media'] as const)test(`a late ${kind} account read 
   assert.equal(store.getSetting('account'),null);store.bindAccount('new_user');
  }finally{release('old_user');await jobs.close();await importer.close();store.close();}
 });
+
+test('rewinding the same capped archive file reuses observations and makes progress after increasing the cap',async()=>{
+ const {store,importer}=fixture();store.setStorageLimit(2_000_000);
+ const data=Buffer.from(Array.from({length:500},(_,index)=>JSON.stringify({...post,id:index.toString(36),title:'History '+index,selftext:'x'.repeat(4096),created_utc:1600000000+index})).join('\n'));
+ const options={subreddit:'python',filename:'same-history.jsonl',size:data.length,modified:1};
+ try{
+  const first=await importer.run(Readable.from([data]),options),before=store.stats().posts;assert.equal(first.state,'paused');assert(before>0&&before<500);assert(first.exportId);
+  store.setStorageLimit(2_600_000);const second=await importer.run(Readable.from(Array.from({length:Math.ceil(data.length/4096)},(_,index)=>data.subarray(index*4096,(index+1)*4096))),options);
+  assert.notEqual(second.id,first.id);assert.equal(second.exportId,first.exportId);assert.equal(second.fingerprint,first.fingerprint);assert(store.stats().posts>before,'Replay must reach new posts instead of filling the cap with earlier observations');
+  assert.equal((store as any).db.prepare("SELECT count(*) AS n FROM observations WHERE post_id='t3_0'").get().n,1);
+ }finally{await importer.close();store.close();}
+});
+
+test('file fingerprints detect changed prefixes despite identical file metadata, and clearing removes their bookkeeping',async()=>{
+ const {store,importer}=fixture();const options={subreddit:'python',filename:'same.jsonl',modified:1};
+ try{
+  const a=Buffer.from(JSON.stringify({...post,selftext:'AAAA'})),b=Buffer.from(JSON.stringify({...post,selftext:'BBBB'}));assert.equal(a.length,b.length);
+  const first=await importer.run(Readable.from([a]),{...options,size:a.length}),second=await importer.run(Readable.from([b]),{...options,size:b.length});assert.notEqual(first.exportId,second.exportId);assert.deepEqual((store as any).db.prepare("SELECT body FROM observations WHERE post_id='t3_abc' ORDER BY body").all().map((row:any)=>row.body),['AAAA','BBBB']);
+  const replay=await importer.run(Readable.from([b]),{...options,size:b.length});assert.equal(replay.exportId,second.exportId);assert.equal((store as any).db.prepare("SELECT count(*) AS n FROM observations WHERE post_id='t3_abc'").get().n,2);
+  store.clearSubreddit('python');assert.equal((store as any).db.prepare("SELECT count(*) AS n FROM settings WHERE key GLOB 'fileImport:*'").get().n,0);
+ }finally{await importer.close();store.close();}
+});
+
+test('recent pre-fingerprint partial imports retain their existing source identity when resumed',async()=>{
+ const {store,importer}=fixture(),data=Buffer.from(JSON.stringify(post)),legacy='00000000-0000-4000-8000-000000000001';
+ try{
+  store.importArchiveBatch(store.generation,[{id:'abc',subreddit:'python',title:post.title,body:post.selftext,permalink:'/r/python/comments/abc/',created:{epochMs:post.created_utc*1000,precisionMs:1000},source:'archive',exportId:legacy,observedAt:1,media:['Text']}]);
+  store.setSetting('imports',[{id:legacy,subreddit:'python',filename:'legacy.jsonl',size:data.length,modified:1,state:'paused',accepted:1}]);
+  const partial=await importer.run(Readable.from([data.subarray(0,7)]),{subreddit:'python',filename:'legacy.jsonl',size:data.length,modified:1});assert.equal(partial.accepted,0);assert.equal(partial.fingerprint,undefined);
+  const result=await importer.run(Readable.from([data]),{subreddit:'python',filename:'legacy.jsonl',size:data.length,modified:1});assert.equal(result.exportId,legacy);assert.equal((store as any).db.prepare('SELECT count(*) AS n FROM observations').get().n,1);
+ }finally{await importer.close();store.close();}
+});
+
+test('resuming a capped comment archive reuses completed samples instead of blocking the remaining posts',async()=>{
+ const {store,importer}=fixture();
+ try{
+  const posts=Buffer.from([post,{...post,id:'def'}].map(row=>JSON.stringify(row)).join('\n'));await importer.run(Readable.from([posts]),{subreddit:'python',filename:'posts.jsonl',size:posts.length,modified:1});
+  const comments=Buffer.from(['abc','def'].map((id,index)=>JSON.stringify({id:'comment'+index,subreddit:'python',link_id:'t3_'+id,parent_id:'t3_'+id,body:'x'.repeat(400_000),created_utc:1600000001})).join('\n'));
+  const options={subreddit:'python',filename:'comments.jsonl',size:comments.length,modified:1,postIds:['abc','def']};store.setStorageLimit(1_000_000);
+  const first=await importer.run(Readable.from([comments]),options);assert.equal(first.state,'paused');assert.equal(store.stats().snapshots,1);
+  store.setStorageLimit(1_200_000);const resumed=await importer.run(Readable.from([comments]),options);assert.equal(resumed.state,'done');assert.equal(store.stats().snapshots,2);assert.equal(store.latestSnapshot('abc')!.comments.length,1);assert.equal(store.latestSnapshot('def')!.comments.length,1);
+ }finally{await importer.close();store.close();}
+});

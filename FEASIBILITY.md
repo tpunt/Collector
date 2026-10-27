@@ -538,3 +538,68 @@ Live-library encryption remains deferred. Backups are encrypted; the working
 SQLite database, media and temporary restore/snapshot staging are not encrypted
 by Collector. Source availability and the agreed online-provider exceptions
 remain as documented in OFFLINE_AUDIT.md.
+
+## Recent-change and general reviews — 27 October 2026
+
+Codex reviewed the changes since the first published revision, then reviewed the
+whole codebase after the first set of fixes. Claude CLI independently completed
+the same two stages using Opus 5.5 (`claude-opus-5-5`) at xhigh effort. A short
+Claude verification pass checked the subsequent import, feed and media fixes.
+Claude read sanitized copies of tracked source, tests and documentation with
+read-only tools; it had no runtime data, browser profile, credentials or Git
+metadata, and did not execute tests or make collection requests. Both full Claude
+passes reported no Critical or High findings. Its findings were triaged and
+verified against the implementation; the local regressions below provide the
+runtime evidence.
+
+Confirmed issues fixed:
+
+- Startup now observes media-cache initialization errors, preserves their cause
+  through shutdown and releases ownership. Valid stale discovery records survive
+  moved/copied libraries; the OS lock still prevents concurrent owners. Read-only
+  inspectors are allowed, probe paths remain tied to the requested library, and
+  terminal hangup closes both entry points. Slow-start messages no longer tell
+  users to quit a still-starting process.
+- Restore validation respects cancellation after upload, and cleans staging
+  without publishing a confirmation ticket. Restore preserves the destination
+  storage cap and compacts the old database allocation, reporting compaction
+  warnings. Backup, restore and storage maintenance pause collection with the
+  relevant reason rather than claiming the application stopped.
+- Short posts require an uninterrupted full viewport view; tall posts retain
+  accumulated coverage. Finished broken images and clipped lazy gallery images
+  no longer block reads. Client response ordering, server intent sequences and
+  library/source context prevent late reads from undoing newer manual choices
+  or crossing a clear/restore. Feed refreshes preserve confirmed read changes
+  that completed while a response was in flight.
+- Background feed updates retain the loaded time/ID window and visible scroll
+  position instead of discarding pages after the first 50 posts. Older history
+  added outside that window remains accessible through Load more. The thread
+  drawer uses the current saved post body while retaining older sampled comments.
+- Replaying a stopped or capacity-limited file import retains stable observation
+  provenance, and identical archived discussion samples are reused. Increasing
+  capacity can then reach remaining records. Identity is bounded to metadata
+  and the first 64 KiB, not a full-file checksum; the README describes that
+  limitation. New attempts stopped before identification cannot masquerade as
+  legacy imports that actually accepted records. Clear removes the identity
+  mappings for the affected content.
+- Explicit Resume rediscovers expired ordinary image URLs as well as gallery
+  and manifest URLs, preserving that requirement through interruption/restart.
+  Reconciliation aborts downloads whose original post no longer owns the asset,
+  even if another post still owns it. An explicit Imgur removed-image redirect
+  is treated as unavailable rather than saved as the post's image.
+
+Transient access/server failures remain resumable. Repeated 403 or 5xx responses
+are not sufficient evidence that content is permanently missing, and cannot
+advance an archive past an unfinished media checkpoint. The removed-image
+redirect and expired-URL cases were verified with local fixtures; external host
+behavior was not rechecked live. No Reddit, archive-service or CDN requests were
+made during this review. Tests use temporary libraries; the running user app and
+its library were untouched.
+
+Final validation passes: 171 unit tests, 64 browser/integration tests, TypeScript
+checking and the production build. The browser suite ran separately with two
+workers, including real localhost HTTP pacing, launcher child processes,
+encrypted backup/restore, file-import replay, read-response races, retained feed
+windows, ownership changes and existing extraction/history/deletion workflows.
+No confirmed review finding remains unresolved. Very large library performance
+and current third-party website behavior are outside these local test results.

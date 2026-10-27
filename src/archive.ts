@@ -1,6 +1,6 @@
 import { mediaReferences,mediaReference,postMediaReferences,MAX_MEDIA_REFERENCES } from './media-reference.ts';
 import type {MediaReference} from './media-reference.ts';
-import { randomUUID } from 'node:crypto';
+import { randomUUID,createHash } from 'node:crypto';
 import { setImmediate as yieldNow } from 'node:timers/promises';
 import { Readable, Transform } from 'node:stream';
 import { createZstdDecompress, constants } from 'node:zlib';
@@ -56,7 +56,7 @@ function archiveMedia(row:Record<string,any>,id:string):MediaReference[]{
  return postMediaReferences(row.url,mediaReferences([typeof row.url==='string'?row.url:null,typeof video?.dash_url==='string'?video.dash_url:null,video?.is_gif===true&&typeof video.fallback_url==='string'?video.fallback_url:null]));
 }
 
-export interface ImportProgress { id: string; filename: string; state: 'running' | 'done' | 'paused'; lines: number; accepted: number; added: number; omitted: number; filtered: number; bytes: number; reason: string | null }
+export interface ImportProgress { id: string; filename: string; state: 'running' | 'done' | 'paused'; lines: number; accepted: number; added: number; omitted: number; filtered: number; bytes: number; reason: string | null;fingerprint?:string;exportId?:string }
 export class ArchiveImporter {
   private store: ReaderStore;
   private abort: AbortController | null = null;
@@ -95,10 +95,24 @@ export class ArchiveImporter {
       if (batch.length) { progress.added += this.store.importArchiveBatch(generation, batch); batch = []; }
       await yieldNow();
     };
+    // Stable file provenance prevents a rewind from storing another full copy
+    // of every earlier observation. Progress ids remain unique per attempt.
+    const prefix:Buffer[]=[];let prefixBytes=0,exportId:string|undefined;
+    const identify=()=>{
+      const fingerprint=createHash('sha256').update(JSON.stringify(['reddit',name,options.filename,options.size,options.modified])).update(Buffer.concat(prefix)).digest('hex');
+      const previous=this.store.getSetting<(ImportProgress&{subreddit:string;size:number;modified:number})[]>('imports')??[];
+      const legacy=previous.find(item=>item&&item.subreddit===name&&item.filename===options.filename&&item.size===options.size&&item.modified===options.modified&&item.fingerprint===undefined&&item.state==='paused'&&item.accepted>0);
+      exportId=this.store.fileImportSource(generation,name,fingerprint,legacy?.id);progress.fingerprint=fingerprint;progress.exportId=exportId;
+    };
     const meter = new Transform({ transform(chunk: Buffer, _encoding, callback) {
       progress.bytes += chunk.length;
-      callback(progress.bytes > options.size ? new Error('Input size changed or exceeds declared size') : null, chunk);
-    } });
+      if(progress.bytes>options.size){callback(new Error('Input size changed or exceeds declared size'));return;}
+      if(exportId){callback(null,chunk);return;}
+      const remaining=Math.min(64*1024,options.size)-prefixBytes;
+      if(chunk.length<remaining){prefix.push(Buffer.from(chunk));prefixBytes+=chunk.length;callback();return;}
+      const held=[...prefix];prefix.push(Buffer.from(chunk.subarray(0,remaining)));prefixBytes+=remaining;
+      try{identify();prefix.length=0;for(const buffer of held)this.push(buffer);callback(null,chunk);}catch(error){callback(error as Error);}
+    },flush(callback){callback(progress.bytes===options.size?null:new Error('Input was truncated or changed'));} });
     const decoded = /\.zst$/i.test(options.filename) ? createZstdDecompress({ params: { [constants.ZSTD_d_windowLogMax]: 27 } }) : new Transform({ transform(chunk, _encoding, callback) { callback(null, chunk); } });
     // Pipeline forwards truncation/decompression errors and bounds backpressure.
     let pipelineError: unknown;
@@ -135,7 +149,7 @@ export class ArchiveImporter {
             sampleCharacters-=last.body.length;omitComment(parentPost);
           }
           samples.set(parentPost, sample); progress.accepted++;
-        } else { const post=archivePost(row,name,id,startedAt);if(this.store.isPostExcluded(post.id)){progress.filtered++;return;}batch.push(post); progress.accepted++; }
+        } else { const post=archivePost(row,name,exportId!,startedAt);if(this.store.isPostExcluded(post.id)){progress.filtered++;return;}batch.push(post); progress.accepted++; }
       } catch { progress.omitted++; }
     };
     try {
@@ -169,7 +183,7 @@ export class ArchiveImporter {
         }
         const comments = [...selectedComments.values()].map(comment => ({ ...comment,
           ancestry: comment.parentId === postId || (comment.parentId && selectedComments.has(comment.parentId)) ? 'known' as const : 'unresolved' as const }));
-        const snapshot: ThreadSnapshot = { id: randomUUID(), postId, source: 'archive', exportId: id, capturedAt: null, observedAt: startedAt,
+        const snapshot: ThreadSnapshot = { id: randomUUID(), postId, source: 'archive', exportId: exportId!, capturedAt: null, observedAt: startedAt,
           sort: 'chronological', body: post.body, availability: post.availability, comments, omitted: Math.max(0, sample.size - comments.length)+(sampleOmissions.get(postId)??0),
           sample: 'Earliest 100 of up to 300 retained comments, with retained ancestors; four-million-character import sample limit; file may be incomplete, capture time unknown' };
         this.store.saveSnapshot(generation, snapshot);

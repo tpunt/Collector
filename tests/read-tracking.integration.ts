@@ -27,3 +27,31 @@ test('viewport reads respect overlays and hidden tabs; overrides and unread resu
     await page.reload();await page.getByLabel('Read status',{exact:true}).selectOption('read');await page.waitForTimeout(350);assert.equal(await page.locator('.post-card').count(),2);
   }finally{await browser.close();await app.close();}
 });
+
+test('broken images and clipped lazy gallery slides do not block automatic reads',async()=>{
+ const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,['broken','gallery'].map((id,index)=>({id,subreddit:'python',title:id+' image fixture',body:'Stored text',permalink:`/r/python/comments/${id}/`,created:{epochMs:1700000000000-index,precisionMs:1000},source:'archive',exportId:'image-read',observedAt:1800000000000,media:['Text']})));
+ const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
+ try{
+  const page=await browser.newPage({viewport:{width:1200,height:900},bypassCSP:true});await page.addInitScript(()=>Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'}));
+  await page.route('**/broken-image.png',route=>route.fulfill({contentType:'image/png',body:'Not an image'}));await page.route('**/never-load.png',()=>new Promise(()=>{}));
+  await page.goto(origin);await page.locator('.post-card').nth(1).waitFor();
+  await page.evaluate(()=>{
+   const broken=document.createElement('img');broken.src='/broken-image.png';broken.width=60;broken.height=60;document.querySelector('[data-post-id="t3_broken"] .post-content')!.append(broken);
+   const gallery=document.createElement('div');gallery.style.cssText='width:200px;height:60px;overflow:hidden;display:flex';const spacer=document.createElement('div');spacer.style.cssText='min-width:300px;height:60px';gallery.append(spacer);
+   const pending=document.createElement('img');pending.loading='lazy';pending.src='/never-load.png';pending.style.cssText='min-width:100px;height:60px';gallery.append(pending);document.querySelector('[data-post-id="t3_gallery"] .post-content')!.append(gallery);
+  });
+  await page.waitForFunction(()=>{const image=document.querySelector<HTMLImageElement>('img[src="/broken-image.png"]');return image?.complete&&image.naturalWidth===0;});
+  await page.evaluate(()=>Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'visible'}));
+  await page.getByRole('button',{name:'Mark unread: broken image fixture',exact:true}).waitFor();await page.getByRole('button',{name:'Mark unread: gallery image fixture',exact:true}).waitFor();assert.notEqual(app.store.getPost('broken')!.readAt,null);assert.notEqual(app.store.getPost('gallery')!.readAt,null);
+ }finally{await browser.close();await app.close();}
+});
+
+test('a delayed automatic read response cannot overwrite a later manual unread choice',async()=>{
+ const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,[{id:'race',subreddit:'python',title:'Read response fixture',body:'Saved text',permalink:'/r/python/comments/race/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'read-response',observedAt:1800000000000,media:['Text']}]);
+ const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;}),began=new Promise<void>(resolve=>{entered=resolve;});let first=true;
+ try{
+  const page=await browser.newPage();await page.route('**/api/read',async route=>{if(!first){await route.continue();return;}first=false;const response=await route.fetch();entered();await gate;await route.fulfill({response});});await page.goto(origin);await began;
+  await page.getByRole('button',{name:'Mark read: Read response fixture',exact:true}).click();await page.getByRole('button',{name:'Mark unread: Read response fixture',exact:true}).click();await page.getByRole('button',{name:'Mark read: Read response fixture',exact:true}).waitFor();assert.equal(app.store.getPost('race')!.readAt,null);
+  release();await page.waitForTimeout(300);assert.equal(await page.getByRole('button',{name:'Mark read: Read response fixture',exact:true}).count(),1);assert.equal(app.store.getPost('race')!.readAt,null);
+ }finally{release();await browser.close();await app.close();}
+});

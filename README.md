@@ -50,7 +50,7 @@ REDDIT_READER_DATA_DIR="/absolute/path/to/other-clone/.local-data" npm start
 
 Only one running app may own a data folder; an instance lease enforces this for both launch methods. Sharing with a different checkout requires quitting its current instance first. Independently running clones use their own data folders. The launcher tries port 3210, then an available local port if it is busy; it opens the actual address. An explicit `PORT` uses only that port and reports conflicts. `npm start` keeps its explicit-port behavior and requires the prior build. Existing data in the previous per-user folder is left in place, with no automatic copying. To keep using the previous macOS location, run `REDDIT_READER_DATA_DIR="$HOME/Library/Application Support/Reddit Reader" npm start`.
 
-The data folder also contains `.collector-lock.sqlite` and a private instance record for process coordination. Leave them in place while Collector may be running; stale ownership is recovered after a crash. Library backups exclude these files.
+The data folder also contains `.collector-lock.sqlite` and a private instance record for process coordination. Leave them in place while Collector may be running; stale ownership is recovered after a crash or a move/copy of the library. Read-only database inspectors do not count as another writer. Library backups exclude these files.
 
 The server binds only to `127.0.0.1`, validates Host/Origin and requires a per-launch token for mutations. It is a personal local app, not a hosted multiuser service.
 
@@ -69,7 +69,7 @@ Settings provides **Create encrypted backup**, **Download backup** and
 Validation leaves the current library intact; choose **Replace library** only
 after reviewing the saved counts, or **Keep current library** to cancel. Backups
 include owned media, preferences, exclusions and read states, while excluding the
-browser profile. Restore keeps that profile and verifies its account on the next
+browser profile. Restore keeps the current storage cap and that profile and verifies its account on the next
 explicit Sync. Collection stays paused. See [backup format, temporary-space and
 recovery details](BACKUPS.md). The working library remains unencrypted.
 
@@ -107,6 +107,15 @@ Reopening a current database pauses interrupted scans, downloads and archive job
 - Extraction reads only the main listing's posts and its Next control; sidebar and recently viewed lists are ignored. A native-video poster never substitutes for its video file. Startup verifies already-saved media against local file metadata; missing files become pending for the next explicit sync. Removed and superseded attachments release their file ownership; unowned files are reclaimed during collection and on startup, while shared files remain available. Reading a discussion preserves known media when the page supplies only text; removal markers still hide the media.
 - Website exhaustion means the end Reddit served, not complete historical coverage. The oldest collected date and omissions are visible in Collection history. Imported and live posts share the dated feed but retain provenance.
 - Threads save up to 100 initially rendered comments with parent relationships and the actual server-selected sort (observed `best`), not hidden dropdown links. No collapsed/more-comment expansion. Read time, source, sort and known omissions are displayed. A missing post body does not imply the discussion was read. Moderator-removed posts that lack an ID attribute require a matching thread URL, a unique visible post and an explicit removal marker; their comments remain readable while removed text and media stay hidden.
+
+File imports retain a stable source identity using the community, filename,
+size, modification time and a SHA-256 hash of the first 64 KiB. Replaying the
+same file updates earlier observations rather than storing duplicate bodies,
+and reuses identical saved comment samples, so raising the cap can reach new
+records. This is a bounded identity check,
+not a whole-file checksum: files changed later while preserving that prefix and
+all metadata are treated as the same source. Recent legacy partial imports can
+reuse their previous source id. Clear removes the file bookkeeping with content.
 
 ## Per-feed history
 

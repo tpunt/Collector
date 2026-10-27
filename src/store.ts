@@ -15,6 +15,7 @@ import {mediaKey} from './media-key.ts';
 import { DEFAULT_STORAGE_CAP, storageCap, StorageLimitError } from './storage-limit.ts';
 import type { StorageStatus } from './storage-limit.ts';
 import {normalizeText} from './search.ts';
+import {feedCursor} from './feed-cursor.ts';
 import {ARCHIVE_JOIN,POST_BODY} from './reader-fields.ts';
 import type {CleanupCriteria} from './library-storage.ts';
 
@@ -24,6 +25,9 @@ const ARCHIVE_MEDIA_MATCH="(o.outbound IS NULL OR o.outbound=archived.outbound)"
 const POST_MEDIA=`coalesce(o.media,CASE WHEN ${ARCHIVE_MEDIA_MATCH} THEN archived.media END)`;
 const POST_ATTACHMENTS=`coalesce(o.attachments,CASE WHEN ${ARCHIVE_MEDIA_MATCH} THEN archived.attachments END)`;
 const POST_OUTBOUND='coalesce(o.outbound,archived.outbound)';
+
+const snapshotContent=(value:ThreadSnapshot)=>JSON.stringify([value.postId,value.source,value.exportId,value.capturedAt,value.sort,value.body,value.availability,
+  value.comments.map(comment=>[comment.id,comment.postId,comment.parentId,comment.ancestry,comment.body,comment.availability,comment.createdMs]),value.omitted,value.sample]);
 
 export class StaleGenerationError extends Error {
   constructor() { super('Content was cleared; discard this late result'); }
@@ -46,6 +50,7 @@ export interface HistoryTarget {
   boundary: { olderIds: string[]; batches: number; lastSignature: string | null; repeats: number };
 }
 export interface StoredPost {
+  readContext:string;
   readAt:number|null;
   id: string;
   subreddit: string;
@@ -111,7 +116,7 @@ export class ReaderStore {
   async snapshot(path:string){await backup(this.db,path);}
   /** Called only with a fully authenticated, schema-validated staged backup. */
   replaceFrom(path:string,portable=true){
-    const generation=this.generation,revision=this.contentRevision;
+    const generation=this.generation,revision=this.contentRevision,limit=this.storageLimit;
     this.db.prepare('ATTACH DATABASE ? AS restored').run(path);
     try{
       this.transaction(()=>{
@@ -123,10 +128,11 @@ export class ReaderStore {
         rebuildSearch(this.db);
         this.db.prepare("UPDATE metadata SET value=? WHERE key='generation'").run(Math.max(generation,this.generation)+1);
         this.db.prepare("UPDATE metadata SET value=? WHERE key='content_revision'").run(revision+1);
-        if(portable)this.db.exec("DELETE FROM settings WHERE key IN ('account','accessPause')");
+        if(portable){this.db.exec("DELETE FROM settings WHERE key IN ('account','accessPause')");this.setStorageLimit(limit);}
       });
       recoverInterruptedWork(this.db);
     }finally{this.db.exec('DETACH DATABASE restored');}
+    if(portable)this.compactContent('Library restored');
   }
   validateBackup(path:string,allowPrevious=false){
     const db=new DatabaseSync(path,{readOnly:true});
@@ -280,6 +286,17 @@ export class ReaderStore {
     });
   }
 
+  fileImportSource(generation:number,input:string,fingerprint:string,legacy?:string):string {
+    const name=subredditName(input);if(!/^[a-f0-9]{64}$/.test(fingerprint))throw new Error('Invalid file identity');
+    return this.contentTransaction(()=>{
+      if(generation!==this.generation)throw new StaleGenerationError();
+      const key='fileImport:'+fingerprint,existing=this.getSetting<{subreddit:string;exportId:string}>(key);
+      if(existing?.subreddit===name&&typeof existing.exportId==='string'&&existing.exportId.length<=200)return existing.exportId;
+      const exportId=legacy&&/^[a-f0-9-]{36}$/.test(legacy)?legacy:'file:'+fingerprint;
+      this.setSetting(key,{subreddit:name,exportId});return exportId;
+    });
+  }
+
   /** Storage boundary for a future file importer; never moves a live checkpoint. */
   importArchiveBatch(generation: number, records: PostObservation[]): number {
     return this.contentTransaction(() => {
@@ -338,6 +355,7 @@ export class ReaderStore {
     const attachments = availability === 'available' ? postMediaReferences(row.outbound as string|null,JSON.parse(String(row.discovered_attachments ?? row.attachments ?? '[]')) as MediaReference[]) : [];
     return {
       id: String(row.id), subreddit: String(row.subreddit), permalink: String(row.permalink), title: String(row.title),
+      readContext:String(db.prepare("SELECT value FROM metadata WHERE key='generation'").get()!.value)+':'+String(JSON.parse(String(db.prepare('SELECT value FROM settings WHERE key=?').get('sourceRevision:'+String(row.subreddit))?.value??'0'))),
       readAt:(db.prepare('SELECT read_at FROM read_states WHERE post_id=?').get(String(row.id))?.read_at as number|undefined)??null,
       createdMs: Number(row.created_ms), precisionMs: Number(row.precision_ms),
       body: availability === 'available' ? row.body as string | null : null,
@@ -485,7 +503,7 @@ export class ReaderStore {
         UPDATE metadata SET value = value + 1 WHERE key = 'generation';
         DELETE FROM comment_states WHERE availability='available';
         DELETE FROM targets; DELETE FROM observations; DELETE FROM media_sync; DELETE FROM media_evidence; DELETE FROM post_media;
-        DELETE FROM settings WHERE key='account';
+        DELETE FROM settings WHERE key='account' OR key GLOB 'fileImport:*';
         DELETE FROM posts WHERE live_availability IS NULL OR live_availability = 'available';`);
       // Followed namespaces are retained. Keep only identity/time/deletion state for removed posts,
       // so a subsequent old archive import cannot restore cleared, known-deleted content.
@@ -497,7 +515,7 @@ export class ReaderStore {
 
   sourceRevision(input:string):number {return this.getSetting<number>('sourceRevision:'+subredditName(input))??0;}
   ownedMediaKeys(input:string):string[] {return this.db.prepare('SELECT DISTINCT m.key FROM post_media m JOIN posts p ON p.id=m.post_id WHERE p.subreddit=?').all(subredditName(input)).map(row=>String(row.key));}
-  hasMediaOwner(key:string):boolean {return Boolean(this.db.prepare('SELECT 1 FROM post_media WHERE key=? LIMIT 1').get(key));}
+  hasMediaOwner(key:string,owner?:string):boolean {return Boolean(owner?this.db.prepare('SELECT 1 FROM post_media WHERE key=? AND post_id=?').get(key,postId(owner)):this.db.prepare('SELECT 1 FROM post_media WHERE key=? LIMIT 1').get(key));}
   mediaOwners(key:string):{postId:string;feed:string}[]{return this.db.prepare('SELECT p.id AS postId,p.subreddit AS feed FROM post_media m JOIN posts p ON p.id=m.post_id WHERE m.key=? ORDER BY p.id').all(key) as unknown as {postId:string;feed:string}[];}
   storageFeeds(){return this.db.prepare(`SELECT f.name AS feed,f.subscribed,count(p.id) AS posts FROM feeds f LEFT JOIN posts p ON p.subreddit=f.name AND EXISTS(SELECT 1 FROM observations WHERE post_id=p.id) GROUP BY f.name ORDER BY f.name`).all().map(row=>({feed:String(row.feed),subscribed:Boolean(row.subscribed),posts:Number(row.posts)}));}
   cleanupIds(criteria:CleanupCriteria):string[]{
@@ -549,6 +567,7 @@ export class ReaderStore {
     const name=subredditName(input);this.requireSubreddit(name);
     this.transaction(()=>{
       this.setSetting('sourceRevision:'+name,this.sourceRevision(name)+1);
+      this.db.prepare("DELETE FROM settings WHERE key GLOB 'fileImport:*' AND json_extract(value,'$.subreddit')=?").run(name);
       this.db.prepare('DELETE FROM archive_fetches WHERE subreddit=?').run(name);
       this.db.prepare('DELETE FROM feed_sync WHERE subreddit=?').run(name);
       this.db.prepare('DELETE FROM comment_states WHERE post_id IN (SELECT id FROM posts WHERE subreddit=?)').run(name);
@@ -757,7 +776,7 @@ export class ReaderStore {
     const hasMore = result.length > limit;
     const posts = result.slice(0, limit);
     const last = posts.at(-1);
-    return { posts, next: hasMore && last ? Buffer.from(JSON.stringify({ time: last.createdMs, id: last.id })).toString('base64url') : null };
+    return { posts, next: hasMore && last ? feedCursor(last) : null };
   }
   stats() {
     return { posts: Number(this.db.prepare('SELECT count(*) AS n FROM posts WHERE EXISTS(SELECT 1 FROM observations WHERE post_id = posts.id)').get()!.n),
@@ -833,6 +852,14 @@ export class ReaderStore {
         const state = this.db.prepare('SELECT availability FROM comment_states WHERE id = ?').get(comment.id);
         return state && state.availability !== 'available' ? { ...comment, body: '', availability: state.availability as Availability } : comment;
       }) };
+      if(safe.source==='archive'&&safe.exportId){
+        const signature=snapshotContent(safe);
+        for(const row of this.db.prepare("SELECT id,data FROM thread_snapshots WHERE post_id=? AND source='archive' AND json_extract(data,'$.exportId')=?").iterate(safe.postId,safe.exportId)){
+          if(snapshotContent(JSON.parse(String(row.data)))!==signature)continue;
+          const reused={...safe,id:String(row.id)};
+          this.db.prepare('UPDATE thread_snapshots SET observed_at=?,data=? WHERE id=?').run(safe.observedAt,JSON.stringify(reused),String(row.id));return;
+        }
+      }
       this.db.prepare('INSERT INTO thread_snapshots VALUES (?, ?, ?, ?, ?)').run(snapshot.id, snapshot.postId, snapshot.observedAt, snapshot.source, JSON.stringify(safe));
     });
   }

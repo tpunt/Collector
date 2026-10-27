@@ -1,9 +1,9 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm,readFile,mkdir,writeFile,stat} from 'node:fs/promises';
+import {mkdtemp,rm,readFile,mkdir,writeFile,stat,readdir} from 'node:fs/promises';
 import {createReadStream} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join,basename} from 'node:path';
 import {Readable} from 'node:stream';
 import tar from 'tar-stream';
 import {Encrypter} from 'age-encryption';
@@ -111,5 +111,27 @@ test('published version-three backups upgrade only in staging and restore with a
   const encryption=new Encrypter();encryption.setPassphrase(secret);encryption.setScryptWorkFactor(10);const bytes=await encryption.encrypt(Readable.toWeb(Readable.from(pack)) as ReadableStream<Uint8Array>);
   const preview=await h.backups.prepare(Readable.fromWeb(bytes as any),secret);assert.equal(h.store.getSetting('account'),'fixture_user');await h.backups.restore(preview.id);
   assert.equal(h.store.queryFeed({text:'sentinel',scope:'body'}).posts[0]!.id,'t3_abc');assert.notEqual(h.store.getPost('abc')!.readAt,null);assert.equal(h.store.getSetting('account'),null);
+ }finally{await h.close();}
+});
+
+test('restore validation can be cancelled after upload finishes without publishing a ticket',async()=>{
+ const h=await setup();
+ try{
+  const backup=await h.backups.create(secret),controller=new AbortController(),validate=h.store.validateBackup.bind(h.store);
+  h.store.validateBackup=(...args)=>{const result=validate(...args);controller.abort();return result;};
+  await assert.rejects(h.backups.prepare(createReadStream(h.backups.download(backup.id).path),secret,controller.signal),{name:'AbortError'});
+  assert.equal(h.store.stats().posts,1);assert.equal(h.store.getSetting('account'),'fixture_user');assert.equal((await h.media.items('abc'))[0]!.state,'ready');
+  assert.deepEqual(await readdir(h.work),[basename(h.backups.download(backup.id).directory)]);
+ }finally{await h.close();}
+});
+
+test('portable restore keeps the destination cap and reclaims the previous database allocation',async()=>{
+ const h=await setup();
+ try{
+  h.store.setStorageLimit(1_000_000);const backup=await h.backups.create(secret);
+  h.store.setStorageLimit(100_000_000);h.store.importArchiveBatch(h.store.generation,Array.from({length:80},(_,index)=>({...post('large'+index),body:'x'.repeat(64_000),media:['Text' as const],attachments:[]})));
+  const destinationCap=16_000_000;assert(h.store.storage.usedBytes>destinationCap);h.store.setStorageLimit(destinationCap);
+  const staged=await h.backups.prepare(createReadStream(h.backups.download(backup.id).path),secret);await h.backups.restore(staged.id);
+  assert.equal(h.store.storageLimit,destinationCap);assert.equal(h.store.storage.full,false);assert.equal(h.store.stats().posts,1);assert.equal((await h.media.items('abc'))[0]!.state,'ready');assert.equal(h.store.compactionWarning,null);
  }finally{await h.close();}
 });

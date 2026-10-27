@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { StoredPost, HistoryTarget, FeedSource, OfflineMediaCounts } from '../src/store.ts';
 import type { ThreadSnapshot } from '../src/extract.ts';
@@ -12,6 +12,7 @@ import {BackupSettings} from './BackupSettings.tsx';
 import {StorageSettings} from './StorageSettings.tsx';
 import { MEDIA_FILTERS } from '../src/domain.ts';
 import { GB } from '../src/storage-limit.ts';
+import {feedCursor} from '../src/feed-cursor.ts';
 import type { StorageStatus } from '../src/storage-limit.ts';
 import './style.css';
 
@@ -52,11 +53,13 @@ function Modal({title,close,children,wide=false}:{title:string;close:()=>void;ch
 function App() {
   const [stopped,setStopped]=useState(false),stoppedRef=useRef(false);
   const [state,setState]=useState<State|null>(null),[posts,setPosts]=useState<StoredPost[]>([]),[next,setNext]=useState<string|null>(null);
+  const postRows=useRef<StoredPost[]>([]),loadedQuery=useRef(''),loadedNext=useRef<string|null>(null),scrollAnchor=useRef<{id:string;top:number}|null>(null);
   const [view,setView]=useState(location.hash==='#feeds'?'feeds':'posts');
   const [source,setSource]=useState(''),[media,setMedia]=useState(''),[search,setSearch]=useState('');
   const [searchScope,setSearchScope]=useState('both');
   const [readFilter,setReadFilter]=useState('all'),[readBefore,setReadBefore]=useState(Date.now);
-  const suppressedReads=useRef(new Set<string>());
+  const suppressedReads=useRef(new Set<string>()),readRequests=useRef(new Map<string,number>()),readSequence=useRef(0),readChanges=useRef(0),readResults=useRef(new Map<string,{version:number;context:string;readAt:number|null}>());
+  const [readClient]=useState(()=>crypto.randomUUID());
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[modal,setModal]=useState<'source'|'history'|'import'|'clear'|'settings'|'storage'|null>(null),[removeFeed,setRemoveFeed]=useState<string|null>(null);
   const [clearFeed,setClearFeed]=useState<string|null>(null);
   const [postToDelete,setPostToDelete]=useState<Pick<StoredPost,'id'|'title'|'subreddit'>|null>(null);
@@ -88,7 +91,33 @@ function App() {
     const contentChanged=revision!==pollVersion.current;pollVersion.current=revision;
     token.current=value.token;setState(value);return{...value,contentChanged};
   }
-  async function loadFeed(append=false){const version=++feedVersion.current,key=currentQuery.current,q=new URLSearchParams(key);if(append&&next)q.set('cursor',next);const result=await get<{posts:StoredPost[];next:string|null}>('/api/feed?'+q);if(!stoppedRef.current&&version===feedVersion.current&&key===currentQuery.current){setPosts(old=>append?[...old,...result.posts.filter(post=>!old.some(item=>item.id===post.id))]:result.posts);setNext(result.next);}}
+  function showPosts(rows:StoredPost[]){postRows.current=rows;setPosts(rows);}
+  async function loadFeed(append=false){
+    const version=++feedVersion.current,key=currentQuery.current,same=loadedQuery.current===key,confirmedReads=readChanges.current;
+    const more=append&&same&&postRows.current.length>0;
+    if(more&&!loadedNext.current)return;
+    const oldest=!more&&same?postRows.current.at(-1):null;
+    let cursor=more?loadedNext.current:null,after:string|null=null,rows:StoredPost[]=[];
+    const visited=new Set<string>(),atOrPast=(a:StoredPost,b:StoredPost)=>a.createdMs<b.createdMs||(a.createdMs===b.createdMs&&a.id<=b.id);
+    do{
+      const q=new URLSearchParams(key);if(cursor)q.set('cursor',cursor);
+      const result=await get<{posts:StoredPost[];next:string|null}>('/api/feed?'+q);
+      if(stoppedRef.current||version!==feedVersion.current||key!==currentQuery.current)return;
+      rows.push(...result.posts);after=result.next;
+      if(oldest&&result.posts.length&&atOrPast(result.posts.at(-1)!,oldest)){
+        const retained=rows.filter(post=>atOrPast(oldest,post));
+        if(retained.length){const older=retained.length<rows.length||Boolean(after);rows=retained;after=older?feedCursor(rows.at(-1)!):null;}
+        break;
+      }
+      if(after&&visited.has(after))throw new Error('The feed changed while loading. Refresh view and try again.');
+      if(after)visited.add(after);cursor=after;
+    }while(!more&&oldest&&after);
+    if(same&&!more){const visible=[...document.querySelectorAll<HTMLElement>('.post-card[data-post-id]')].find(card=>{const box=card.getBoundingClientRect();return box.bottom>0&&box.top<innerHeight;});if(visible)scrollAnchor.current={id:visible.dataset.postId!,top:visible.getBoundingClientRect().top};}
+    rows=rows.map(post=>{const read=readResults.current.get(post.id);return read&&read.version>confirmedReads&&read.context===post.readContext?{...post,readAt:read.readAt}:post;});
+    const unique=new Map((more?[...postRows.current,...rows]:rows).map(post=>[post.id,post]));
+    showPosts([...unique.values()]);readResults.current.clear();loadedQuery.current=key;loadedNext.current=after;setNext(after);
+  }
+  useLayoutEffect(()=>{const anchor=scrollAnchor.current;scrollAnchor.current=null;if(!anchor)return;const card=[...document.querySelectorAll<HTMLElement>('.post-card[data-post-id]')].find(card=>card.dataset.postId===anchor.id);if(card)window.scrollBy(0,card.getBoundingClientRect().top-anchor.top);},[posts]);
   async function action(path:string,data:unknown={}){
     setError('');setBusy(true);
     try{const response=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token.current},body:JSON.stringify(data)});const value=await response.json();if(!response.ok)throw new Error(value.error);if(value.warning)setError(value.warning);await loadState();await loadFeed();return value;}
@@ -96,10 +125,16 @@ function App() {
   }
   useEffect(()=>{void loadState().catch(e=>setError(e.message));const hash=()=>setView(location.hash==='#feeds'?'feeds':'posts');window.addEventListener('hashchange',hash);return()=>window.removeEventListener('hashchange',hash);},[]);
   const markRead=useCallback(async(id:string,read=true)=>{
-    const response=await fetch('/api/read',{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token.current},body:JSON.stringify({id,read})});
-    const value=await response.json();if(!response.ok){setError(value.error);throw new Error(value.error);}
-    setPosts(old=>old.map(post=>post.id===id?{...post,readAt:value.post.readAt}:post));
-    setThread(old=>old?.post.id===id?{...old,post:{...old.post,readAt:value.post.readAt}}:old);
+    const context=postRows.current.find(post=>post.id===id)?.readContext;if(!context)return;
+    const version=++readSequence.current;readRequests.current.set(id,version);
+    try{
+      const response=await fetch('/api/read',{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token.current},body:JSON.stringify({id,read,client:readClient,sequence:version,context})});
+      const value=await response.json();if(stoppedRef.current||readRequests.current.get(id)!==version)return;if(!response.ok)throw new Error(value.error);
+      readResults.current.set(id,{version:++readChanges.current,context,readAt:value.post.readAt});
+      showPosts(postRows.current.map(post=>post.id===id&&post.readContext===context?{...post,readAt:value.post.readAt}:post));
+      setThread(old=>old?.post.id===id&&old.post.readContext===context?{...old,post:{...old.post,readAt:value.post.readAt}}:old);
+    }catch(error){if(!stoppedRef.current&&readRequests.current.get(id)===version)setError((error as Error).message);throw error;}
+    finally{if(readRequests.current.get(id)===version)readRequests.current.delete(id);}
   },[]);
   useReadTracking(!stopped&&view==='posts'&&!modal&&!thread&&!removeFeed&&!clearFeed&&!postToDelete&&Boolean(state),markRead,suppressedReads.current);
   useEffect(()=>setReadBefore(Date.now()),[source,media,search,searchScope]);
@@ -204,7 +239,7 @@ function App() {
           </div><div className="post-actions"><button className="read-toggle" title={post.readAt!==null?"Mark unread":"Mark read"} aria-label={(post.readAt!==null?"Mark unread: ":"Mark read: ")+post.title} onClick={()=>{const read=post.readAt===null;if(!read)suppressedReads.current.add(post.id);else suppressedReads.current.delete(post.id);void markRead(post.id,read).catch(()=>{});}}>{post.readAt!==null?"●":"○"}</button><button className="read-thread" onClick={()=>void openThread(post.id)} aria-label={'Read thread: '+post.title}>↗</button><button className="delete-post danger" title="Delete post" disabled={busy} aria-label={'Delete post: '+post.title} onClick={()=>{setError('');setPostToDelete(post);}}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></svg></button></div>
         </article>)}</div>
         {!posts.length&&<div className="empty-state"><h2>{feeds.length?'No matching posts':'No feeds yet'}</h2><p>{feeds.length?'Refresh a feed or adjust your filters.':'Add a subreddit to get started.'}</p>{!feeds.length&&<button className="button primary" onClick={()=>navigate('feeds')}>Manage feeds</button>}</div>}
-        {next&&<button className="button load-more" onClick={()=>void loadFeed(true)}>Load more</button>}
+        {next&&<button className="button load-more" onClick={()=>void loadFeed(true).catch(error=>setError(error.message))}>Load more</button>}
       </>}
     </main>
     {thread&&<div className="drawer-backdrop" onClick={()=>{setThread(null);threadId.current=null;}}><section className="thread-drawer" role="dialog" aria-modal="true" aria-label="Thread reader" onClick={e=>e.stopPropagation()}>
@@ -213,7 +248,7 @@ function App() {
       <PostMedia post={thread.post} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===thread.post.subreddit)&&syncing(feeds.find(feed=>feed.name===thread.post.subreddit)!))}>
         {mediaControls=><div className="badges thread-media-badges">{thread.post.media.map(type=><span key={type}>{type}</span>)}{mediaControls}</div>}
       </PostMedia>
-      <div className="prose">{thread.snapshot?.body??thread.post.body??(thread.post.availability!=='available'?'Post '+thread.post.availability+'.':thread.post.media.includes('Text')?'Post body has not been read.':'')}</div>
+      <div className="prose">{thread.post.body??thread.snapshot?.body??(thread.post.availability!=='available'?'Post '+thread.post.availability+'.':thread.post.media.includes('Text')?'Post body has not been read.':'')}</div>
       {thread.snapshot?<><div className="sample-note"><strong>{thread.snapshot.comments.length} sampled comments · {thread.snapshot.source} · sort: {thread.snapshot.sort}</strong><p>{thread.snapshot.sample}. Read {timestamp(thread.snapshot.observedAt)}.</p><p>{thread.snapshot.omitted} known omissions. Capture time: {timestamp(thread.snapshot.capturedAt)}.</p></div>
         <div className="comments">{thread.snapshot.comments.map(comment=><article key={comment.id} className="comment"><div>{comment.id} {comment.ancestry==='unresolved'?'· parent unavailable':comment.parentId?.startsWith('t1_')?'· reply to '+comment.parentId:'· top-level'}</div><p>{comment.availability==='available'?comment.body:'['+comment.availability+']'}</p></article>)}</div>
       </>:<p className="sample-note">Read discussion saves up to 100 initially rendered comments. Collapsed and unloaded branches are omitted.</p>}
@@ -246,7 +281,7 @@ function App() {
           <button className="button primary" disabled={busy||Boolean(archiveActive)||importBusy||state?.import?.state==='running'}>Fetch archive</button>
         </form>}
         {archiveMode==='file'&&<><p className="muted">Import an existing JSONL / NDJSON export, including .zst. Files are streamed in batches and pause at your storage cap.</p><label>Community<select value={importSource||state?.sources[0]||''} onChange={e=>setImportSource(e.target.value)}>{state?.sources.map(item=><option key={item}>{item}</option>)}</select></label><label>Comment post IDs (optional)<input placeholder="e.g. t3_abc, t3_def" value={importPostIds} onChange={e=>setImportPostIds(e.target.value)}/></label><p className="muted">For comment archives, enter up to 10 post IDs from Reddit links. Import their posts first. Leave blank for post archives.</p><label>Archive file<input type="file" accept=".jsonl,.ndjson,.zst" onChange={e=>setUpload(e.target.files?.[0]??null)}/></label>
-        <p className="muted">Reimport interrupted files from the beginning; posts deduplicate.</p><button className="button primary" disabled={!upload||!feeds.length||importBusy||Boolean(archiveActive)} onClick={()=>void importFile()}>{importBusy?'Importing…':'Import file'}</button>{importBusy&&<button className="button stop" onClick={()=>void action('import/stop')}>Stop import</button>}{state?.import&&<div className="sample-note">{state.import.state} · {state.import.lines.toLocaleString()} lines · {state.import.accepted.toLocaleString()} accepted · {state.import.omitted} omitted<p>{state.import.reason}</p></div>}</>}
+        <p className="muted">Reimport the same file from the beginning to resume; earlier observations are reused.</p><button className="button primary" disabled={!upload||!feeds.length||importBusy||Boolean(archiveActive)} onClick={()=>void importFile()}>{importBusy?'Importing…':'Import file'}</button>{importBusy&&<button className="button stop" onClick={()=>void action('import/stop')}>Stop import</button>}{state?.import&&<div className="sample-note">{state.import.state} · {state.import.lines.toLocaleString()} lines · {state.import.accepted.toLocaleString()} accepted · {state.import.omitted} omitted<p>{state.import.reason}</p></div>}</>}
         {Boolean(state?.archives.length)&&<section className="archive-progress" aria-label="Archive fetches"><h3>Archive fetches</h3>{state!.archives.map(job=><article className="archive-job" key={job.id}>
           <div className="archive-job-heading"><strong>r/{job.subreddit}</strong><span className="badge">{job.state==='running'?(job.phase==='media'?'Saving media':'Fetching'):job.state==='done'?'Finished':'Paused'}</span></div>
           <p>{job.afterMs?new Date(job.afterMs).toISOString().slice(0,10):'All available history'} → {new Date(job.beforeMs-1).toISOString().slice(0,10)}</p>

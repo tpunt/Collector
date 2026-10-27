@@ -239,7 +239,7 @@ export class ReaderJobs {
     catch (error) { this.pause(error instanceof Error ? error.message : 'Sign-in failed'); throw error; }
   }
   async finishSignIn() { this.pause('Sign-in browser closed. Resume collection to verify the saved account.'); await this.closeBrowser(); }
-  async close() { this.pause('Application stopped; explicit Resume required'); await this.closeBrowser();await this.pumpDone; }
+  async close(reason='Application stopped; explicit Resume required') { this.pause(reason); await this.closeBrowser();await this.pumpDone; }
   private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();this.pumpDone=this.pump(); } }
   private async pump() {
     const startingRequests = this.totalRequests();
@@ -302,6 +302,7 @@ export class ReaderJobs {
               this.controller.signal.throwIfAborted();
               if(!attachments.length)throw new Error('Media discovery found no download link; sync this feed again to retry');
               this.store.saveMediaReferences(work.generation,post.id,attachments);
+              this.store.setMediaSync(work.generation,post.id,'downloading',null,workSession);
               await this.mediaSync?.reconcile?.();
             }
             await this.closeBrowser();this.controller.signal.throwIfAborted();
@@ -376,7 +377,7 @@ export class ReaderJobs {
             }
           }
         } finally {
-          if(work.kind==='media'&&this.store.mediaSync(work.postId)?.status==='downloading')this.store.setMediaSync(work.generation,work.postId,'pending','Sync interrupted; Resume to finish saving this feed',workSession);
+          if(work.kind==='media'&&this.store.mediaSync(work.postId)?.status==='downloading'){const reason=this.store.mediaSync(work.postId)?.reason;this.store.setMediaSync(work.generation,work.postId,'pending',reason?.startsWith('Media URL expired')?reason:'Sync interrupted; Resume to finish saving this feed',workSession);}
           if(work.kind==='body'&&this.store.bodySync(work.postId)?.status==='fetching')this.store.setBodySync(work.generation,work.postId,'pending','Sync interrupted; Resume to finish saving post text');
           this.stoppedWork.delete(work.id);
           this.active=null;this.finishFeeds();

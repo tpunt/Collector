@@ -52,11 +52,12 @@ export function createReaderServer(options: { database?: string; port?: number; 
   let origin = '';
   let cleaningContent=false;
   let replacement:Promise<void>|null=null;
+  const readIntents=new Map<string,number>();
   const cleanupPlans=new Map<string,{ids:string[];criteria:CleanupCriteria;revision:number;mediaRevision:number;expires:number}>();
   const cleanupPaths=new Set(['/api/remove','/api/clear-source','/api/delete-post','/api/clear','/api/backup/create','/api/restore/commit','/api/storage/preview','/api/storage/delete','/api/storage/compact']);
   const stopPaths=new Set(['/api/pause','/api/import/stop','/api/archive/stop','/api/sign-in/finish']);
   const assertCleanupIdle=(path:string)=>{if(cleaningContent&&!stopPaths.has(path))throw new Error('Content cleanup is still in progress. Try again when it finishes.');};
-  const quiesce=async()=>{await archive.close();await importer.close();await jobs.close();await media.close();};
+  const quiesce=async(reason:string)=>{await archive.close(reason);await importer.close();await jobs.close(reason);await media.close();};
   const json = (res: ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value)); };
   const body = async (req: IncomingMessage) => {
     let content = ''; for await (const chunk of req) { content += chunk; if (content.length > 32_000) throw new Error('Request too large'); }
@@ -86,9 +87,9 @@ export function createReaderServer(options: { database?: string; port?: number; 
         if (supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { json(res,{error:'Invalid local request token'},403); return; }
         assertCleanupIdle(url.pathname);
         if(url.pathname==='/api/restore/prepare'){
-          cleaningContent=true;
-          try{json(res,await backups.prepare(req,decodeURIComponent(String(req.headers['x-backup-passphrase']??''))));}
-          finally{cleaningContent=false;}
+          cleaningContent=true;const controller=new AbortController(),cancel=()=>controller.abort();res.once('close',cancel);
+          try{json(res,await backups.prepare(req,decodeURIComponent(String(req.headers['x-backup-passphrase']??'')),controller.signal));}
+          finally{res.removeListener('close',cancel);cleaningContent=false;}
           return;
         }
         if (url.pathname === '/api/import') {
@@ -116,18 +117,18 @@ export function createReaderServer(options: { database?: string; port?: number; 
           }
           case '/api/storage/preview': {
             const criteria=cleanupCriteria(data);if(criteria.feed&&!store.storageFeeds().some(feed=>feed.feed===criteria.feed))throw new Error('Choose a stored feed');
-            await quiesce();const inventory=await media.inventory();
+            await quiesce('Paused for cleanup preview; Resume to continue');const inventory=await media.inventory();
             const {ids,...preview}=cleanupPreview(store,inventory,criteria),id=randomUUID();cleanupPlans.clear();
             cleanupPlans.set(id,{ids,criteria,revision:store.contentRevision,mediaRevision:media.status.revision,expires:Date.now()+10*60_000});
             json(res,{...preview,id});return;
           }
           case '/api/storage/discard': cleanupPlans.delete(String(data.id));json(res,{ok:true});return;
-          case '/api/storage/compact': await quiesce();await media.reconcile();store.compactStorage();json(res,{warning:store.compactionWarning});return;
+          case '/api/storage/compact': await quiesce('Paused to reclaim storage; Resume to continue');await media.reconcile();store.compactStorage();json(res,{warning:store.compactionWarning});return;
           case '/api/storage/delete': {
             if(data.confirm!==true)throw new Error('Confirm deleting the previewed posts first');
             const id=String(data.id),plan=cleanupPlans.get(id);
             if(!plan||plan.expires<Date.now())throw new Error('Cleanup preview expired; preview again');
-            await quiesce();await media.inventory();
+            await quiesce('Paused for storage cleanup; Resume to continue');await media.inventory();
             if(plan.revision!==store.contentRevision||plan.mediaRevision!==media.status.revision||JSON.stringify(plan.ids)!==JSON.stringify(store.cleanupIds(plan.criteria)))throw new Error('The library changed; preview cleanup again');
             cleanupPlans.delete(id);const keys=store.deletePosts(plan.ids);let warning=store.compactionWarning;
             try{await media.clearPosts(plan.ids,keys);}catch{warning=[warning,'Posts deleted, but some files could not be removed. Restart to retry file cleanup.'].filter(Boolean).join(' ');}
@@ -135,15 +136,27 @@ export function createReaderServer(options: { database?: string; port?: number; 
           }
           case '/api/backup/create': {
             const controller=new AbortController(),cancel=()=>controller.abort();res.once('close',cancel);
-            try{await quiesce();json(res,await backups.create(data.passphrase,controller.signal));}
+            try{await quiesce('Paused to create a backup; Resume to continue');json(res,await backups.create(data.passphrase,controller.signal));}
             finally{res.removeListener('close',cancel);}return;
           }
           case '/api/restore/commit': {
-            if(data.confirm!==true)throw new Error('Confirm library replacement first');await quiesce();replacement=backups.restore(String(data.id));
-            try{await replacement;await importer.clear();cleanupPlans.clear();json(res,{ok:true});}finally{replacement=null;}return;
+            if(data.confirm!==true)throw new Error('Confirm library replacement first');await quiesce('Paused to restore a backup; Resume to continue');replacement=backups.restore(String(data.id));
+            try{await replacement;await importer.clear();cleanupPlans.clear();json(res,{ok:true,warning:store.compactionWarning});}finally{replacement=null;}return;
           }
           case '/api/restore/discard': await backups.discard(String(data.id));json(res,{ok:true});return;
-          case '/api/read': json(res,{post:store.setRead(String(data.id),data.read as boolean)});return;
+          case '/api/read': {
+            const id=postId(String(data.id)),post=store.getPost(id);
+            if(data.context!==undefined&&data.context!==post?.readContext)throw new Error('Post changed while reading; refresh the view and try again');
+            let key:string|undefined;
+            if(data.client!==undefined||data.sequence!==undefined){
+              if(typeof data.client!=='string'||!/^[a-f0-9-]{36}$/i.test(data.client)||!Number.isSafeInteger(data.sequence)||Number(data.sequence)<1)throw new Error('Invalid read intent');
+              key=data.client+':'+id;
+              if((readIntents.get(key)??0)>=Number(data.sequence)){json(res,{post});return;}
+            }
+            const updated=store.setRead(id,data.read as boolean);
+            if(key){readIntents.delete(key);readIntents.set(key,Number(data.sequence));if(readIntents.size>100_000)readIntents.delete(readIntents.keys().next().value!);}
+            json(res,{post:updated});return;
+          }
           case '/api/settings': {
             store.setStorageLimit(data.maxStoredBytes);
             if(store.storage.full){jobs.pause(STORAGE_CAP_MESSAGE);importer.stop();}
@@ -296,5 +309,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const stop=()=>closing??=app.close();
   const app=createReaderServer({onShutdown:stop});
   try{console.log(`Collector: ${await app.listen()}`);}catch(error){await stop();throw error;}
-  process.on('SIGINT',()=>void stop()); process.on('SIGTERM',()=>void stop());
+  process.on('SIGINT',()=>void stop()); process.on('SIGTERM',()=>void stop());process.on('SIGHUP',()=>void stop());
 }

@@ -136,3 +136,13 @@ test('storage settings reject invalid caps, preserve content when lowered, and b
   const deadline=Date.now()+3000;while(app.jobs.state.running){if(Date.now()>deadline)throw Error('Storage fixture did not finish');await new Promise(resolve=>setTimeout(resolve,5));}assert(visits>0);assert.equal(app.store.stats().posts,2);
  }finally{await app.close();}
 });
+
+test('read intent order survives delayed requests and old read contexts cannot cross a scoped clear',async()=>{
+ const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');const row={id:'order',subreddit:'python',title:'Read order',body:'Saved text',permalink:'/r/python/comments/order/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'read-order',observedAt:1800000000000,media:['Text' as const]};app.store.importArchiveBatch(app.store.generation,[row]);
+ const origin=await app.listen(),{token}=await(await fetch(origin+'/api/state')).json(),client='00000000-0000-4000-8000-000000000001';
+ const read=(sequence:number,value:boolean,context:string)=>fetch(origin+'/api/read',{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token},body:JSON.stringify({id:'order',read:value,client,sequence,context})});
+ try{
+  const context=app.store.getPost('order')!.readContext;assert.equal((await read(2,false,context)).status,200);assert.equal((await read(1,true,context)).status,200);assert.equal(app.store.getPost('order')!.readAt,null);
+  app.store.clearSubreddit('python');app.store.importArchiveBatch(app.store.generation,[row]);assert.notEqual(app.store.getPost('order')!.readContext,context);assert.equal((await read(3,true,context)).status,400);assert.equal(app.store.getPost('order')!.readAt,null);assert.equal((await read(4,true,app.store.getPost('order')!.readContext)).status,200);assert.notEqual(app.store.getPost('order')!.readAt,null);
+ }finally{await app.close();}
+});

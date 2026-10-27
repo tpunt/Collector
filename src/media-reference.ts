@@ -49,3 +49,8 @@ export function postMediaReferences(outbound:string|null|undefined,references:Me
       &&(url.href===owner.href||/\.mpd$/i.test(url.pathname));
   });
 }
+
+/** A provider's explicit deletion image cannot establish an offline copy. */
+export function isRemovedMediaPlaceholder(input:string):boolean {
+  try{const url=new URL(input);return url.hostname==='i.imgur.com'&&url.pathname.toLowerCase()==='/removed.png';}catch{return false;}
+}

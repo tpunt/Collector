@@ -2,7 +2,7 @@
 
 Settings offers **Create encrypted backup**, a normal browser download, and
 **Validate backup** followed by **Replace library** or **Keep current library**.
-No replacement occurs during validation. Downloads and validated restore tickets
+No replacement occurs during validation. Cancel stops validation, including after the upload has finished. Downloads and validated restore tickets
 expire after ten minutes. Passwords are used in memory and are never saved in
 settings, files, URLs or logs. Keep the passphrase: the app cannot recover it.
 
@@ -26,7 +26,7 @@ directory rather than handing uploaded paths to a filesystem extractor.
 
 Backups include posts, observations, saved discussions, subscriptions, history
 checkpoints, preferences, deletion exclusions and read states. Unfinished work
-stays unfinished. Browser profiles, cookies and credentials are excluded. Restore
+stays unfinished. Browser profiles, cookies and credentials are excluded. The destination storage cap is kept when restoring, rather than replaced by the saved quota. Restore
 clears the saved account binding and access pause, so the destination browser's
 visible account is verified on the next explicit collection. It starts no network
 work. Media not already downloaded remains unfinished or unavailable.
@@ -53,7 +53,7 @@ Confirmed replacement pauses all collection and takes a rollback database
 snapshot. The previous media directory stays available until the replacement
 database transaction and cache reload succeed. A durable recovery marker records
 the operation; startup rolls an interrupted, unacknowledged replacement back
-before opening SQLite. Successful replacement removes the rollback copy. A failed
+before opening SQLite. Successful replacement compacts the previous database allocation and removes the rollback copy. Compaction failure is reported as a warning; restored content is retained. A failed
 rollback blocks library access and retains recovery material for the next
 startup. This handles application interruption; it is not a filesystem-wide
 power-loss atomicity guarantee. Browser profiles remain in place throughout.

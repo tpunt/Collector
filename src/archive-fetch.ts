@@ -68,7 +68,7 @@ export class ArchiveFetcher {
     if (source && this.active?.subreddit !== source) return;
     this.pause(reason, source); await this.completion;
   }
-  async close() { await this.stop(undefined, 'Application stopped; Resume to continue'); }
+  async close(reason='Application stopped; Resume to continue') { await this.stop(undefined,reason); }
   private launch(id: string) {
     this.deps.onRunStart?.();
     this.activeId = id; this.controller = new AbortController();

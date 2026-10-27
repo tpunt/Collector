@@ -137,3 +137,31 @@ test('a denied signed manifest pauses globally and explicit Continue rediscovers
   }finally{await restarted.close();}
  }finally{if(!closed)await h.close();await rm(directory,{recursive:true,force:true});}
 });
+
+test('a denied ordinary image is rediscovered only on explicit Resume, including after restart',async()=>{
+ const record=image(100),h=await setup({records:[record],fetch:async()=>new Response('',{status:403})});const directory=h.directory;let closed=false;
+ try{
+  h.jobs.targets([h.target()]);await settle(h.jobs);assert.equal(h.requests.length,1);assert.match(h.jobs.state.accessPause?.reason??'',/403/);assert.equal(h.store.mediaSync(record.id)?.status,'failed');await h.close();closed=true;
+  let began!:()=>void;const discoveryStarted=new Promise<void>(resolve=>{began=resolve;});
+  const interrupted=await setup({directory,discover:async(_page:any,_id:string,_candidates:()=>string[],signal:AbortSignal)=>{began();return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new Error('Discovery stopped')),{once:true}));}});
+  try{interrupted.jobs.syncMedia(['aww'],{resume:true});await discoveryStarted;await interrupted.jobs.stopSource('aww');await settle(interrupted.jobs);assert.match(interrupted.store.mediaSync(record.id)?.reason??'',/^Media URL expired/);assert.equal(interrupted.requests.length,0);}finally{await interrupted.close();}
+  let discoveries=0;const restarted=await setup({directory,discover:async()=>{discoveries++;return[{kind:'image',url:'https://i.redd.it/fresh-image.png'}];}});
+  try{assert.equal(restarted.requests.length,0);restarted.jobs.syncMedia(['aww'],{resume:true});await settle(restarted.jobs);assert.equal(discoveries,1);assert.deepEqual(restarted.requests,['https://i.redd.it/fresh-image.png']);assert.equal(restarted.store.mediaSync(record.id)?.status,'ready');assert.equal(restarted.visits.length,1);}finally{await restarted.close();}
+ }finally{if(!closed)await h.close();await rm(directory,{recursive:true,force:true});}
+});
+
+test('reconciliation promptly aborts obsolete downloads even when another post still owns the old URL',async()=>{
+ let started!:()=>void,aborted=0;const began=new Promise<void>(resolve=>{started=resolve;}),a=image(100),b={...image(101),attachments:a.attachments};
+ const h=await setup({fetch:async(url,init)=>{if(String(url).includes('offline100')){started();return new Promise<Response>((_resolve,reject)=>init?.signal?.addEventListener('abort',()=>{aborted++;reject(new Error('Obsolete file aborted'));},{once:true}));}return new Response(png,{headers:{'Content-Type':'image/png'}});}});
+ let saving:Promise<void>|undefined;
+ try{
+  h.store.importArchiveBatch(h.store.generation,[a,b].map(row=>({...row,source:'archive',exportId:'orphan-reconcile'})));saving=h.cache.syncPost(a.id,'first',10,new AbortController().signal);await began;
+  h.store.saveMediaReferences(h.store.generation,a.id,[{kind:'image',url:'https://i.redd.it/replacement.png'}]);await Promise.race([h.cache.reconcile(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('Reconciliation waited for an obsolete request')),500))]);
+  await saving;assert.equal(aborted,1);assert.equal((await h.cache.items(a.id))[0]!.state,'ready');assert.equal(h.store.hasMediaOwner((await h.cache.items(b.id))[0]!.key),true);
+ }finally{await h.cache.close();await saving?.catch(()=>{});await h.close();await rm(h.directory,{recursive:true,force:true});}
+});
+
+test('an explicit removed-media redirect is unavailable rather than a saved placeholder',async()=>{
+ let calls=0;const h=await setup({records:[{...image(100),attachments:[{kind:'image',url:'https://i.imgur.com/old-image.jpg'}]}],fetch:async()=>{calls++;return calls===1?new Response('',{status:302,headers:{Location:'https://i.imgur.com/removed.png'}}):new Response(png,{headers:{'Content-Type':'image/png'}});}});
+ try{h.jobs.targets([h.target()]);await settle(h.jobs);assert.equal(calls,1);assert.equal(h.store.mediaSync(image(100).id)?.status,'unavailable');assert.equal(h.cache.status.bytes,0);}finally{await h.close();await rm(h.directory,{recursive:true,force:true});}
+});

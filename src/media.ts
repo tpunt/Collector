@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { ServerResponse } from 'node:http';
 import type { ReaderStore } from './store.ts';
 import type { MediaReference } from './media-reference.ts';
-import { isGallery,completeCollection,mediaReference } from './media-reference.ts';
+import { isGallery,completeCollection,mediaReference,isRemovedMediaPlaceholder } from './media-reference.ts';
 import { RequestQueue } from './request-gate.ts';
 import { AccessError } from './browser.ts';
 import { retryAfter } from './limiter.ts';
@@ -42,6 +42,8 @@ export class MediaCache {
     this.store = store; this.options = options; this.budget = options.maxRequests ?? 40;
     this.store.setExternalStorageUsage(()=>this.bytes+this.metadataBytes);
     this.ready = this.load();
+    // Observe eager I/O failures until the owner awaits initialize/close.
+    void this.ready.catch(()=>{});
   }
   private async load() {
     await mkdir(this.options.directory, {recursive:true, mode:0o700});
@@ -125,7 +127,7 @@ export class MediaCache {
     const revision=`${this.store.generation}:${this.store.contentRevision}`;
     if(this.reconciledRevision===revision)return;
     const keys=[...new Set([...this.diskFiles.keys()].map(name=>name.replace(/\.json$/,'')))].filter(key=>!this.store.hasMediaOwner(key));
-    const cleanup=this.clearMatching(task=>!this.store.hasMediaOwner(mediaKey(task.reference)),key=>keys.some(asset=>key.endsWith(':'+asset)),keys);
+    const cleanup=this.clearMatching(task=>!this.store.hasMediaOwner(mediaKey(task.reference),task.postId),key=>keys.some(asset=>key.endsWith(':'+asset)),keys);
     this.pruning=cleanup;
     try{await cleanup;this.reconciledRevision=revision;}finally{if(this.pruning===cleanup)this.pruning=null;}
   }
@@ -133,19 +135,19 @@ export class MediaCache {
   preparePost(id:string,session:string):{discover:boolean}|null {
     const post=this.store.getPost(id),previous=this.store.mediaSync(id);
     if(!post||post.availability!=='available'||!previous)return null;
-    const gallery=isGallery(post.outbound);
+    const gallery=isGallery(post.outbound),rediscover=Boolean(previous.reason?.startsWith('Media URL expired'));
     if(previous.status==='unavailable'&&!(gallery&&previous.reason?.startsWith('Complete gallery downloads')))return null;
-    if(gallery&&(!completeCollection('reddit:'+post.id,post.attachments)||previous.status==='failed'&&previous.reason?.startsWith('Media URL expired'))){
-      this.store.setMediaSync(this.store.generation,id,'downloading',null,session);return {discover:true};
-    }
-    if(post.attachments.length&&post.attachments.every(item=>this.cached.has(mediaKey(item)))){
+    if(post.attachments.length&&post.attachments.every(item=>this.cached.has(mediaKey(item)))&&(!gallery||completeCollection('reddit:'+post.id,post.attachments))){
       this.store.setMediaSync(this.store.generation,id,'ready',null,session);return null;
+    }
+    if(gallery&&(!completeCollection('reddit:'+post.id,post.attachments)||rediscover)){
+      this.store.setMediaSync(this.store.generation,id,'downloading',rediscover?previous.reason:null,session);return {discover:true};
     }
     if(!post.attachments.length&&post.outbound&&!['reddit.com','www.reddit.com','old.reddit.com','v.redd.it'].includes(new URL(post.outbound).hostname)){
       this.store.setMediaSync(this.store.generation,id,'unavailable','Offline download is not supported for this embedded provider',session);return null;
     }
-    this.store.setMediaSync(this.store.generation,id,'downloading',null,session);
-    return {discover:!post.attachments.length||(previous.status==='failed'&&post.attachments.some(item=>/\.mpd(?:\?|$)/i.test(item.url)))};
+    this.store.setMediaSync(this.store.generation,id,'downloading',rediscover?previous.reason:null,session);
+    return {discover:!post.attachments.length||rediscover};
   }
   async syncPost(id:string,session:string,allowance:number,signal:AbortSignal) {
     signal.throwIfAborted();
@@ -211,7 +213,7 @@ export class MediaCache {
         this.states.set(taskKey,{subreddit:post.subreddit,state:'loading'});
         await this.download(task,key);
       },task.controller.signal).catch(error => {
-        if(this.store.generation===task.generation&&this.store.sourceRevision(task.subreddit)===task.revision&&!this.store.isPostExcluded(task.postId))
+        if(this.tasks.get(taskKey)===task&&this.store.generation===task.generation&&this.store.sourceRevision(task.subreddit)===task.revision&&this.store.hasMediaOwner(key,task.postId))
           this.states.set(taskKey,{subreddit:post.subreddit,state:'error',permanent:!task.controller.signal.aborted&&error instanceof UnsupportedMediaError,pause:error instanceof SyncLimitError,message:task.controller.signal.aborted?'Media loading stopped.':error instanceof Error?error.message:'Media download failed.'});
       }).finally(()=>{signal?.removeEventListener('abort',abort);if(this.tasks.get(taskKey)===task)this.tasks.delete(taskKey);this.pending.delete(pending);});
       this.pending.add(pending);
@@ -229,6 +231,7 @@ export class MediaCache {
   private async response(task:Task,url:string,accept:string) {
     const visited=new Set<string>();
     while(true){
+      if(isRemovedMediaPlaceholder(url))throw new UnsupportedMediaError('Media was removed by its host');
       if(visited.has(url)||visited.size>=5)throw new Error('Media redirect did not reach a file; Resume to retry');
       visited.add(url);
       this.assertCurrent(task);
@@ -325,9 +328,10 @@ export class MediaCache {
     const tasks=[...this.tasks.entries()].filter(([,task])=>matches(task));
     // An aborted queued task has never touched disk. Do not make Clear wait for
     // another subreddit's in-flight request ahead of it in the shared queue.
-    for(const [key,task] of tasks)if(!task.started)this.tasks.delete(key);
+    const cancelled=new Set(tasks.map(([key])=>key));
+    for(const [key,task] of tasks){task.controller.abort();if(!task.started)this.tasks.delete(key);}
     await Promise.all(tasks.filter(([,task])=>task.started).map(([,task])=>task.pending));
-    for(const [key,state] of this.states)if(matchesState(key,state))this.states.delete(key);
+    for(const [key,state] of this.states)if(cancelled.has(key)||matchesState(key,state))this.states.delete(key);
     for(const key of keys){
       if(this.store.hasMediaOwner(key))continue;
       this.cached.delete(key);

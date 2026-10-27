@@ -57,3 +57,29 @@ test('an OS lock excludes other processes and a crash releases it without manual
  const child=spawn(process.execPath,['--input-type=module','-e',`import {claimInstance} from ${JSON.stringify(new URL('../src/instance.ts',import.meta.url).href)};claimInstance(process.argv[1],process.argv[2]);console.log('ready');setInterval(()=>{},1000);`,database,root],{stdio:['ignore','pipe','pipe']});
  try{await once(child.stdout!,'data');assert.throws(()=>createReaderServer({database,port:0}),/already open/);child.kill('SIGKILL');await once(child,'exit');assert(readInstance(database),'The crashed process leaves its discovery record');const app=await launchCollector({...local,directory,port:0});try{assert.equal(app.reused,false);assert.equal(readInstance(database)?.pid,process.pid);}finally{await app.stop();}}finally{if(child.exitCode===null&&child.signalCode===null){child.kill();await once(child,'exit');}await rm(directory,{recursive:true,force:true});}
 });
+
+test('cache initialization failures are handled before building and release library ownership',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'collector-start-failure-'));await(await import('node:fs/promises')).writeFile(join(directory,'media'),'not a directory');
+ const child=spawn(process.execPath,['--input-type=module','-e',`import {launchCollector} from ${JSON.stringify(new URL('../src/launcher.ts',import.meta.url).href)};try{await launchCollector({directory:process.argv[1],port:0,build:async()=>{console.log('BUILD_STARTED');await new Promise(resolve=>setTimeout(resolve,200));},openBrowser:async()=>{}})}catch(error){console.log('HANDLED: '+error.message);}`,directory],{stdio:['ignore','pipe','pipe']});
+ let output='',errors='';child.stdout!.on('data',chunk=>{output+=chunk;});child.stderr!.on('data',chunk=>{errors+=chunk;});
+ try{await once(child,'exit');assert.equal(child.exitCode,0,errors);assert.match(output,/HANDLED:.*EEXIST/);assert(!output.includes('BUILD_STARTED'));assert.equal(readInstance(join(directory,'reader.sqlite')),null);}finally{if(child.exitCode===null&&child.signalCode===null){child.kill();await once(child,'exit');}await rm(directory,{recursive:true,force:true});}
+});
+
+test('copied discovery metadata cannot reopen the original library instead of the requested copy',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'collector-copy-'));let first:Awaited<ReturnType<typeof launchCollector>>|undefined,second:typeof first;
+ try{
+  first=await launchCollector({...local,directory:join(directory,'original'),port:0});const record=readInstance(join(directory,'original','reader.sqlite'))!;await mkdir(join(directory,'copy'));await(await import('node:fs/promises')).writeFile(join(directory,'copy','.collector-instance.json'),JSON.stringify(record));
+  second=await launchCollector({...local,directory:join(directory,'copy'),port:0});assert.equal(second.reused,false);assert.notEqual(second.origin,first.origin);assert.equal(readInstance(join(directory,'original','reader.sqlite'))!.id,record.id);assert.notEqual(readInstance(join(directory,'copy','reader.sqlite'))!.id,record.id);
+ }finally{await first?.stop();await second?.stop();await rm(directory,{recursive:true,force:true});}
+});
+
+test('closing a terminal via SIGHUP gracefully shuts down the CLI and releases its library',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'collector-hangup-')),child=spawn(process.execPath,['src/server.ts'],{cwd:root,env:{...process.env,REDDIT_READER_DATA_DIR:directory,PORT:'0'},stdio:['ignore','pipe','pipe']});let output='',errors='';child.stdout!.on('data',chunk=>{output+=chunk;});child.stderr!.on('data',chunk=>{errors+=chunk;});
+ try{await waitFor(()=>output.includes('Collector: http://127.0.0.1:'));child.kill('SIGHUP');await once(child,'exit');assert.equal(child.exitCode,0,errors);assert.equal(readInstance(join(directory,'reader.sqlite')),null);}finally{if(child.exitCode===null&&child.signalCode===null){child.kill();await once(child,'exit');}await rm(directory,{recursive:true,force:true});}
+});
+
+test('read-only database inspectors do not count as another writer', {skip:process.platform!=='darwin'},async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'collector-reader-')),database=join(directory,'reader.sqlite'),earlier=createReaderServer({database,port:0});await earlier.close();
+ const child=spawn(process.execPath,['-e','require("node:fs").openSync(process.argv[1],"r");console.log("ready");setInterval(()=>{},1000);',database],{stdio:['ignore','pipe','pipe']});let app:ReturnType<typeof createReaderServer>|undefined;
+ try{await once(child.stdout!,'data');app=createReaderServer({database,port:0});const origin=await app.listen();const state=await(await fetch(origin+'/api/state')).json();assert.equal(state.job.requests.sessionTotal,0);}finally{await app?.close();child.kill();await once(child,'exit');await rm(directory,{recursive:true,force:true});}
+});

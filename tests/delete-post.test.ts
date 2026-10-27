@@ -67,7 +67,7 @@ test('deleting queued media does not wait for or abort another post download in 
 
 test('archive import filters deleted posts and comments, including a post buffered before deletion',async()=>{
  const store=new ReaderStore(':memory:');store.addSubreddit('python');store.importArchiveBatch(store.generation,[record('abc')]);const importer=new ArchiveImporter(store);
- const first=JSON.stringify({id:'abc',subreddit:'python',title:'Spam',created_utc:1700000000,is_self:true,selftext:'Spam body'})+'\n',rest=[{id:'abc',subreddit:'python',title:'Spam again',created_utc:1700000000},{id:'def',subreddit:'python',title:'Keep',created_utc:1700000000},{id:'comment',link_id:'t3_abc',parent_id:'t3_abc',subreddit:'python',created_utc:1700000000,body:'Deleted comment'}].map(row=>JSON.stringify(row)).join('\n');
+ const first=JSON.stringify({id:'abc',subreddit:'python',title:'Spam',created_utc:1700000000,is_self:true,selftext:'Spam body'})+'\n'+' '.repeat(64*1024),rest=[{id:'abc',subreddit:'python',title:'Spam again',created_utc:1700000000},{id:'def',subreddit:'python',title:'Keep',created_utc:1700000000},{id:'comment',link_id:'t3_abc',parent_id:'t3_abc',subreddit:'python',created_utc:1700000000,body:'Deleted comment'}].map(row=>JSON.stringify(row)).join('\n');
  const input=new Readable({read(){}});
  try{
   const run=importer.run(input,{subreddit:'python',filename:'posts.jsonl',size:Buffer.byteLength(first+rest),modified:1,postIds:['abc']});input.push(first);const deadline=Date.now()+1000;while(!importer.progress?.lines){if(Date.now()>deadline)throw new Error('Import did not buffer first record');await new Promise(resolve=>setTimeout(resolve,2));}

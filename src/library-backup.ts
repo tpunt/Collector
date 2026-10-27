@@ -89,13 +89,15 @@ export class LibraryBackups {
     }catch(error){await rm(directory,{recursive:true,force:true});throw error;}
   });}
   download(id:string){const file=this.downloads.get(id);if(!file||file.expires<Date.now())throw new Error('Backup download expired; create another backup');return file;}
-  async prepare(input:Readable,passphrase:unknown):Promise<BackupPreview>{return this.task(async()=>{
-    const secret=password(passphrase),directory=await this.stage();await mkdir(join(directory,'media'),{mode:0o700});
+  async prepare(input:Readable,passphrase:unknown,clientSignal?:AbortSignal):Promise<BackupPreview>{return this.task(async()=>{
+    const signal=clientSignal?AbortSignal.any([clientSignal,this.controller.signal]):this.controller.signal;signal.throwIfAborted();
+    const secret=password(passphrase),directory=await this.stage();
     const source=Readable.from(input.iterator({destroyOnReturn:false}));
     let guard:Transform|undefined,decoded:Readable|undefined,parser:ReturnType<typeof tar.extract>|undefined;
     let forwarded:Promise<void>|undefined,unpacked:Promise<void>|undefined;
     const entries=new Set<Promise<void>>();
     try{
+      await mkdir(join(directory,'media'),{mode:0o700});signal.throwIfAborted();
       let header=Buffer.alloc(0),checked=false,uploaded=0;
       guard=new Transform({transform:(chunk:Buffer,_encoding,callback)=>{
         uploaded+=chunk.length;if(uploaded>this.store.storageLimit*1.1+MAX_MANIFEST*16)return callback(new Error('Backup exceeds the current storage cap; increase it before restoring'));
@@ -108,7 +110,7 @@ export class LibraryBackups {
       },flush:callback=>callback(checked?undefined:new Error('Incomplete age header'))});
       // Attach forwarding before KDF/header processing. Never leave an input
       // error or client disconnect without a consumer/rejection handler.
-      forwarded=pipeline(source,guard,{signal:this.controller.signal});void forwarded.catch(()=>{});
+      forwarded=pipeline(source,guard,{signal});void forwarded.catch(()=>{});
       const decryptor=new Decrypter();decryptor.addPassphrase(secret);
       const plain=await decryptor.decrypt(Readable.toWeb(guard) as ReadableStream<Uint8Array>);
       const extract=tar.extract();parser=extract;let manifest:Manifest|undefined;const accepted=new Set<string>(),index=new Map<string,BackupFile>();
@@ -126,15 +128,16 @@ export class LibraryBackups {
         }else{
           const file=index.get(entry.name);
           if(!file||accepted.has(entry.name)||entry.size!==file.bytes)throw new Error('Unexpected, duplicate or incorrectly sized backup file');
-          const target=join(directory,file.name);await pipeline(stream,createWriteStream(target,{flags:'wx',mode:0o600}));
-          if(await digest(target)!==file.sha256)throw new Error('Backup file checksum failed');accepted.add(entry.name);
+          const target=join(directory,file.name);await pipeline(stream,createWriteStream(target,{flags:'wx',mode:0o600}),{signal});
+          if(await digest(target,signal)!==file.sha256)throw new Error('Backup file checksum failed');accepted.add(entry.name);
         }
       })();entries.add(task);void task.then(()=>next(),error=>extract.destroy(error as Error)).finally(()=>entries.delete(task));});
-      decoded=nodeStream(plain);unpacked=pipeline(decoded,extract,{signal:this.controller.signal});
+      decoded=nodeStream(plain);unpacked=pipeline(decoded,extract,{signal});
       await Promise.all([forwarded,unpacked]);
       // Both the archive and age's authenticated final chunk must finish before
       // staged content can become visible or receive a confirmation ticket.
       if(!manifest||accepted.size!==manifest.files.length)throw new Error('Backup is incomplete');
+      signal.throwIfAborted();
       const validated=this.store.validateBackup(join(directory,'reader.sqlite'),true);
       if(validated.schema!==manifest.schema)throw new Error('Backup database version does not match its manifest');
       if(validated.schema!==SCHEMA_VERSION){
@@ -143,7 +146,9 @@ export class LibraryBackups {
         const upgraded=new ReaderStore(join(directory,'reader.sqlite'));upgraded.close();
         this.store.validateBackup(join(directory,'reader.sqlite'));
       }
+      signal.throwIfAborted();
       for(const file of manifest.files.filter(file=>file.name.startsWith('media/'))){
+        signal.throwIfAborted();
         if(!file.name.endsWith('.json')&&file.bytes===0)throw new Error('Backup contains an empty media file');
         const key=basename(file.name).replace(/\.json$/,'');
         if(!validated.keys.has(key)||!accepted.has('media/'+key)||!accepted.has('media/'+key+'.json'))throw new Error('Backup media ownership or metadata is incomplete');
@@ -155,8 +160,9 @@ export class LibraryBackups {
       }
       const bytes=manifest.files.filter(file=>file.name!=='reader.sqlite').reduce((sum,file)=>sum+file.bytes,0)+(await stat(join(directory,'reader.sqlite'))).size;
       if(bytes>this.store.storageLimit)throw new Error('Upgraded backup exceeds the current storage cap; increase it before restoring');
+      signal.throwIfAborted();
       const value={id:randomUUID(),directory,expires:Date.now()+10*60_000,posts:validated.posts,files:manifest.files.filter(file=>file.name.startsWith('media/')&&!file.name.endsWith('.json')).length,bytes};
-      for(const old of this.prepared.values())await rm(old.directory,{recursive:true,force:true});this.prepared.clear();this.prepared.set(value.id,value);
+      for(const old of this.prepared.values())await rm(old.directory,{recursive:true,force:true});this.prepared.clear();signal.throwIfAborted();this.prepared.set(value.id,value);
       return{id:value.id,posts:value.posts,files:value.files,bytes:value.bytes};
     }catch(error){
       source.destroy();guard?.destroy();decoded?.destroy();parser?.destroy();

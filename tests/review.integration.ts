@@ -1,4 +1,7 @@
+import '../src/browser-path.ts';
 import {test} from 'node:test';
+import {chromium} from 'playwright';
+import {browserLaunchOptions} from '../src/browser-options.ts';
 import assert from 'node:assert/strict';
 import {Readable} from 'node:stream';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -43,4 +46,12 @@ test('collection cannot restart while Clear is still removing media; reads remai
   const during=await post('archive/start',{subreddit:'python',from:'2020-01-01',to:'2020-01-01'});assert.equal(during.status,400);assert.equal(archiveCalls,0);
   release();assert.equal((await clearing).status,200);assert.equal(app.store.archiveFetches().length,0);
  }finally{release();await clearing;await app.close();}
+});
+
+test('thread reader shows the newest saved post body alongside an older discussion snapshot',async()=>{
+ const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,[{id:'edit',subreddit:'python',title:'Edited post fixture',body:'Original body',permalink:'/r/python/comments/edit/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'edited',observedAt:1800000000000,media:['Text']}]);
+ app.store.saveSnapshot(app.store.generation,{id:'old-discussion',postId:'t3_edit',source:'live',observedAt:1800000000001,capturedAt:1800000000001,sort:'best',body:'Previous discussion body',availability:'available',comments:[{id:'t1_saved',postId:'t3_edit',parentId:'t3_edit',ancestry:'known',body:'An older saved comment',availability:'available',createdMs:1700000000001}],omitted:0,sample:'Saved fixture discussion'});
+ app.store.savePostBody(app.store.generation,'edit','Latest full post text',1800000000002);
+ const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
+ try{const page=await browser.newPage();await page.route('**/*',route=>route.request().url().startsWith(origin)?route.continue():route.abort());await page.goto(origin);await page.getByRole('button',{name:'Edited post fixture',exact:true}).click();const dialog=page.getByRole('dialog',{name:'Thread reader',exact:true});assert.equal(await dialog.locator('.prose').innerText(),'Latest full post text');assert.equal(await dialog.getByText('An older saved comment',{exact:true}).count(),1);assert.equal(app.jobs.state.requests.sessionTotal,0);}finally{await browser.close();await app.close();}
 });
