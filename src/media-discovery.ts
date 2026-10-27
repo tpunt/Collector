@@ -5,6 +5,7 @@ import {postId} from './domain.ts';
 import {setTimeout as delay} from 'node:timers/promises';
 import { UnsupportedMediaError,PostUnavailableError,PostIdentityError } from './sync-errors.ts';
 import {collectClassicThreadDom} from './extract.ts';
+import {discoverGallery} from './gallery.ts';
 
 /** Use the real expand control. Blob playback needs the player's observed CDN file requests;
  * those are suppressed by the gate and later downloaded through the shared paced queue.
@@ -26,7 +27,7 @@ export async function discoverMedia(page: Page, expectedId: string, candidates:(
         images:Array.from(el.querySelectorAll('.expando img,.media-preview img')).filter(shown).map(node=>node.getAttribute('src')),
         videos:Array.from(el.querySelectorAll('.expando video')).filter(shown).map(node=>node.getAttribute('src'))};
     });
-    if(isGallery(dom.outbound))throw new UnsupportedMediaError('Complete gallery downloads are not supported by the current Reddit layout');
+    if(isGallery(dom.outbound))return discoverGallery(page,id,signal);
     const direct=postMediaReferences(dom.outbound,mediaReferences([dom.outbound,...dom.images,...dom.videos]));
     if(direct.length)return direct;
     let base:URL;try{base=new URL(dom.outbound??'');}catch{throw new Error('Media discovery found no download link; sync this feed again to retry');}

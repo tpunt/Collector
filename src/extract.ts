@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import { absoluteTime, canonicalPostUrl, postId, redditUrl, subredditName, validateObservation } from './domain.ts';
 import type { MediaKind, PostObservation, Availability } from './domain.ts';
-import { mediaReferences, postMediaReferences } from './media-reference.ts';
+import { mediaReferences, postMediaReferences,isGallery } from './media-reference.ts';
 import type { MediaReference } from './media-reference.ts';
 import {PostIdentityError} from './sync-errors.ts';
 import {onlineEmbed} from './online-embed.ts';
@@ -49,8 +49,8 @@ export function collectClassicListingDom() {
       body: rendered(body) ? (body as HTMLElement).innerText.trim() : undefined,
       video: Array.from(el.querySelectorAll('video')).some(rendered),
       image: Array.from(el.querySelectorAll('.expando img, .media-preview img')).some(rendered),
-      assets: Array.from(el.querySelectorAll('.expando img, .media-preview img, video')).filter(rendered)
-        .flatMap(node => [node.getAttribute('src'), node.tagName === 'VIDEO' ? node.querySelector('source')?.getAttribute('src') : null])
+      assets: Array.from(el.querySelectorAll('.expando img, .media-preview img, .usertext-body img, video')).filter(rendered)
+        .flatMap(node => [node.closest('a')?.getAttribute('href')??node.getAttribute('src'), node.tagName === 'VIDEO' ? node.querySelector('source')?.getAttribute('src') : null])
         .filter((url): url is string => Boolean(url)),
     };
   });
@@ -112,7 +112,7 @@ export async function readListing(page: Page, input: string): Promise<Listing> {
       if (!created || !row.id || !row.permalink || !row.subreddit || subredditName(row.subreddit) !== subreddit) throw new Error('Incomplete identity/time');
       const observation = validateObservation({ id: row.id, subreddit, title: row.title,
         permalink: row.permalink, created, source: 'live', observedAt: now,
-        body: row.body, outbound:row.outbound??undefined, media: classifyMedia(row), attachments: postMediaReferences(row.outbound,mediaReferences([row.outbound, ...row.assets ?? []])) });
+        body: row.body,bodyNeedsFetch:row.self||Boolean(row.body), outbound:row.outbound??undefined, media: classifyMedia(row), attachments:isGallery(row.outbound)?[]:postMediaReferences(row.outbound,mediaReferences([row.outbound, ...row.assets ?? []])) });
       posts.push(observation);
       if (!row.pinned) ordinary.push({ id: observation.id, createdMs: created.epochMs, precisionMs: created.precisionMs });
     } catch { omissions++; }
@@ -165,9 +165,10 @@ export function collectClassicThreadDom(expectedId: string) {
     postId: threadPostId,
     availability: post?removal(post):null,
     visiblePostIds: posts.map(el=>el.getAttribute('data-fullname')),
-    body: rendered(body ?? null) ? (body as HTMLElement).innerText.trim() : null,
-    assets: [post?.getAttribute('data-url'), ...Array.from(post?.querySelectorAll('a.title, .expando img, .media-preview img, video, .usertext-body a') ?? []).filter(rendered)
-      .flatMap(node => [node.getAttribute('href'), node.getAttribute('src'), node.tagName === 'VIDEO' ? node.querySelector('source')?.getAttribute('src') : null])],
+    body: rendered(body ?? null) ? (body as HTMLElement).innerText.trim() : body&&body.textContent?.trim()===''&&rendered(body.parentElement)?'':null,
+    bodyLinks:Array.from(body?.querySelectorAll('a[href]')??[]).filter(rendered).map(node=>({label:(node.textContent??'').trim(),href:node.getAttribute('href')})),
+    assets: [post?.getAttribute('data-url'), ...Array.from(post?.querySelectorAll('a.title, .expando img, .media-preview img, video, .usertext-body a, .usertext-body img') ?? []).filter(rendered)
+      .flatMap(node => [node.getAttribute('href'), node.closest('a')?.getAttribute('href')??node.getAttribute('src'), node.tagName === 'VIDEO' ? node.querySelector('source')?.getAttribute('src') : null])],
     sort: document.querySelector('.commentarea .dropdown.lightdrop .selected')?.textContent?.trim().toLowerCase() ?? null,
     sorts: Array.from(document.querySelectorAll('.commentarea .drop-choices a')).filter(rendered).map(el => ({ text: el.textContent?.trim().toLowerCase(), href: el.getAttribute('href') })),
     comments: comments.slice(0, 100).map(el => {
@@ -200,13 +201,19 @@ export async function readThread(page: Page, expectedId: string): Promise<{ snap
   }
   const marker = dom.body?.trim();
   const availability = dom.availability ?? (marker === '[deleted]' ? 'deleted' : marker === '[removed]' ? 'removed' : 'available');
+  let body=dom.body;
+  if(body!==null&&availability==='available'){
+    const links=new Map<string,string>();
+    for(const link of dom.bodyLinks??[]){try{const url=new URL(link.href??'',page.url());if(['https:','http:'].includes(url.protocol)&&!url.username&&!url.password&&!body.includes(url.href))links.set(url.href,link.label);}catch{/* Invalid links are not executable content. */}}
+    if(links.size)body+='\n\nLinks:\n'+[...links].map(([url,label])=>label&&label!==url?`${label}: ${url}`:url).join('\n');
+  }
   const top = dom.sorts.find(sort => sort.text === 'top')?.href;
   let topLink: string | null = null;
   if (top) {
     const url = redditUrl(top);
     if (url.hostname === 'old.reddit.com' && /\/comments\//.test(url.pathname) && url.searchParams.get('sort') === 'top') topLink = url.href;
   }
-  return { attachments:postMediaReferences(dom.assets[0],mediaReferences(dom.assets)), snapshot: { id: crypto.randomUUID(), postId: id, source: 'live', capturedAt: Date.now(), observedAt: Date.now(),
-    sort: dom.sort ?? 'unknown', body: availability === 'available' ? dom.body : null,
+  return { attachments:isGallery(dom.assets[0])?undefined:postMediaReferences(dom.assets[0],mediaReferences(dom.assets)), snapshot: { id: crypto.randomUUID(), postId: id, source: 'live', capturedAt: Date.now(), observedAt: Date.now(),
+    sort: dom.sort ?? 'unknown', body: availability === 'available' ? body : null,
     availability, comments, omitted, sample: 'Initially rendered comments, up to 100; unexpanded branches omitted' }, topLink };
 }

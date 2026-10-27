@@ -101,9 +101,25 @@ test('loss of connectivity pauses the sync after one failure instead of trying e
 });
 
 test('a single rendered gallery slide never counts as a complete offline gallery',async()=>{
- const h=await setup({records:[{...image(100),outbound:'https://www.reddit.com/gallery/2s'},image(101)]});
- try{h.jobs.targets([h.target()]);await settle(h.jobs);assert.equal(h.requests.length,1);assert.equal(h.store.offlineMedia('aww').ready,1);assert.equal(h.store.offlineMedia('aww').unavailable,1);assert.match(h.store.mediaSync('t3_2s')?.reason??'',/Complete gallery/);assert.equal(h.visits.length,1);}
+ const h=await setup({records:[{...image(100),outbound:'https://www.reddit.com/gallery/2s'},image(101)],discover:async()=>{throw new Error('Gallery slide did not finish loading; Resume to retry');}});
+ try{h.jobs.targets([h.target()]);await settle(h.jobs);assert.equal(h.requests.length,1);assert.equal(h.store.offlineMedia('aww').ready,1);assert.equal(h.store.offlineMedia('aww').failed,1);assert.equal(h.store.offlineMedia('aww').unavailable,0);assert.match(h.store.mediaSync('t3_2s')?.reason??'',/Gallery slide/);assert.equal(h.visits.length,2);}
  finally{await h.close();await rm(h.directory,{recursive:true,force:true});}
+});
+
+test('a formerly unsupported gallery resumes after Stop and restart without rediscovering or redownloading saved slides',async()=>{
+ const record={...image(100),outbound:'https://www.reddit.com/gallery/2s'},references=[0,1].map(index=>({kind:'image' as const,url:`https://i.redd.it/slide${index}.png`,collection:{id:'reddit:t3_2s',index,total:2}}));
+ let started=false;const h=await setup({discover:async()=>references,fetch:async(url,init)=>{
+  if(String(url).includes('slide1')){started=true;return new Promise<Response>((_resolve,reject)=>init?.signal?.addEventListener('abort',()=>reject(new Error('Stopped gallery fixture')),{once:true}));}
+  return new Response(png,{headers:{'Content-Type':'image/png'}});
+ }});const directory=h.directory;let closed=false;
+ try{
+  h.store.importArchiveBatch(h.store.generation,[{...record,source:'archive',exportId:'old-gallery'}]);h.store.setMediaSync(h.store.generation,record.id,'unavailable','Complete gallery downloads are not supported by the current Reddit layout');
+  h.jobs.syncMedia(['aww']);while(!started)await new Promise(resolve=>setTimeout(resolve,2));assert.equal((await h.cache.items(record.id)).filter(item=>item.state==='ready').length,1);assert.equal(h.store.getPost(record.id)?.attachments.length,2);
+  await h.jobs.stopSource('aww');await settle(h.jobs);await h.close();closed=true;
+  const restarted=await setup({directory,discover:async()=>assert.fail('The complete saved gallery list must survive restart')});
+  try{assert.equal(restarted.requests.length,0);restarted.jobs.syncMedia(['aww'],{resume:true});await settle(restarted.jobs);assert.equal(restarted.requests.length,1);assert(restarted.requests[0]?.includes('slide1'));assert.equal((await restarted.cache.items(record.id)).filter(item=>item.state==='ready').length,2);assert.equal(restarted.store.mediaSync(record.id)?.status,'ready');}
+  finally{await restarted.close();}
+ }finally{if(!closed)await h.close();await rm(directory,{recursive:true,force:true});}
 });
 
 test('a denied signed manifest pauses globally and explicit Continue rediscovers it, including after restart',async()=>{

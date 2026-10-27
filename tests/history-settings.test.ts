@@ -13,7 +13,7 @@ import { advanceBoundary } from '../src/history.ts';
 const now=Date.parse('2026-10-22T12:00:00Z');
 async function settled(jobs:ReaderJobs){const deadline=Date.now()+2000;while(jobs.state.running){if(Date.now()>deadline)throw new Error('Fixture history did not settle');await new Promise(resolve=>setTimeout(resolve,2));}}
 function page(date:string,prefix:string,next:string|null,n=5):Listing{
- const posts=Array.from({length:n},(_,index)=>({id:`t3_${prefix}${index}`,subreddit:'python',title:'History fixture '+prefix+index,permalink:`/r/python/comments/${prefix}${index}/`,created:{epochMs:Date.parse(date)-index*1000,precisionMs:1000},source:'live' as const,observedAt:now,media:['Text' as const]}));
+ const posts=Array.from({length:n},(_,index)=>({id:`t3_${prefix}${index}`,subreddit:'python',title:'History fixture '+prefix+index,permalink:`/r/python/comments/${prefix}${index}/`,created:{epochMs:Date.parse(date)-index*1000,precisionMs:1000},source:'live' as const,observedAt:now,body:'History fixture body',media:['Text' as const]}));
  return{account:'fixture_user',posts,ordinary:posts.map(post=>({id:post.id,createdMs:post.created.epochMs,precisionMs:1000})),unknownTime:false,omissions:0,next,empty:n===0,signature:posts.map(post=>post.id).join(',')};
 }
 const url=(id:string)=>`https://old.reddit.com/r/python/new/?after=t3_${id}`;

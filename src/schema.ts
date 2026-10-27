@@ -1,7 +1,12 @@
 import type {DatabaseSync} from 'node:sqlite';
 
-export const SCHEMA_VERSION=1;
+export const SCHEMA_VERSION=2;
 const APPLICATION_ID=0x52524452;
+const BODY_SCHEMA=`CREATE TABLE body_sync (
+  post_id TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK(status IN ('pending','fetching','ready','failed')),
+  reason TEXT
+); CREATE INDEX body_sync_status ON body_sync(status);`;
 
 const SCHEMA=`
 CREATE TABLE metadata (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
@@ -84,20 +89,37 @@ CREATE TABLE post_media (
 );
 CREATE INDEX media_owner_post ON post_media(post_id);
 CREATE TABLE excluded_posts (post_id TEXT PRIMARY KEY, subreddit TEXT NOT NULL, deleted_at INTEGER NOT NULL);
+${BODY_SCHEMA}
 `;
 
-/** Only this schema is supported. An existing incompatible database is never upgraded or rewritten. */
+/** Unknown/prototype schemas are rejected. Version one has one additive,
+ * transactional body-work upgrade; existing content and preferences are kept. */
 export function initializeSchema(db:DatabaseSync):void {
   const version=Number(db.prepare('PRAGMA user_version').get()!.user_version);
   const application=Number(db.prepare('PRAGMA application_id').get()!.application_id);
   const empty=!db.prepare("SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").get();
-  if(!(version===0&&application===0&&empty)&&!(version===SCHEMA_VERSION&&application===APPLICATION_ID))
+  if(!(version===0&&application===0&&empty)&&!([1,SCHEMA_VERSION].includes(version)&&application===APPLICATION_ID))
     throw new Error(`Unsupported reader database schema (${version}). Back up and move aside reader.sqlite and its WAL/SHM files, then restart to create a fresh database.`);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;');
   if(empty){
     db.exec('BEGIN IMMEDIATE');
     try{db.exec(SCHEMA);db.exec(`PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`);}
     catch(error){db.exec('ROLLBACK');throw error;}
+  }else if(version===1){
+    // One additive upgrade preserves existing libraries; prototype schemas are
+    // still rejected. The next explicit sync verifies previously unsaved text.
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      db.exec(BODY_SCHEMA);
+      db.exec(`INSERT INTO body_sync(post_id,status)
+        SELECT p.id,CASE WHEN o.source='archive' AND o.body IS NOT NULL THEN 'ready' ELSE 'pending' END
+        FROM posts p JOIN observations o ON o.post_id=p.id
+        WHERE coalesce(p.live_availability,o.availability)='available' AND EXISTS(SELECT 1 FROM json_each(o.media) WHERE value='Text')
+        AND o.rowid=(SELECT rowid FROM observations WHERE post_id=p.id ORDER BY (source='live') DESC,observed_at DESC,source_key DESC LIMIT 1);
+        UPDATE feed_sync SET state='incomplete',last_success_ms=NULL,reason='Post text needs verification; Sync to finish saving this feed'
+          WHERE EXISTS(SELECT 1 FROM body_sync b JOIN posts p ON p.id=b.post_id WHERE p.subreddit=feed_sync.subreddit AND b.status<>'ready');
+        PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`);
+    }catch(error){db.exec('ROLLBACK');throw error;}
   }
 }
 
@@ -106,6 +128,7 @@ export function recoverInterruptedWork(db:DatabaseSync):void {
   db.exec(`BEGIN IMMEDIATE;
     UPDATE targets SET status='paused',reason='Application restarted; Resume to continue' WHERE status='queued';
     UPDATE media_sync SET status='pending',reason='Sync interrupted; Resume to finish saving this feed' WHERE status='downloading';
+    UPDATE body_sync SET status='pending',reason='Sync interrupted; Resume to finish saving post text' WHERE status='fetching';
     UPDATE feed_sync SET state='incomplete',reason='Application restarted; Resume to finish saving this feed' WHERE state='running';
     UPDATE archive_fetches SET data=json_set(data,'$.state','paused','$.reason','Application restarted; Resume to continue') WHERE json_extract(data,'$.state')='running';
     COMMIT;`);

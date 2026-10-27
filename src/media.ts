@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { ServerResponse } from 'node:http';
 import type { ReaderStore } from './store.ts';
 import type { MediaReference } from './media-reference.ts';
-import { isGallery } from './media-reference.ts';
+import { isGallery,completeCollection,mediaReference } from './media-reference.ts';
 import { RequestQueue } from './request-gate.ts';
 import { AccessError } from './browser.ts';
 import { retryAfter } from './limiter.ts';
@@ -19,7 +19,7 @@ export {mediaKey} from './media-key.ts';
 
 interface Cached { key: string; type: string; bytes: number }
 interface Task { postId: string; subreddit:string; revision:number; reference: MediaReference; generation: number; controller: AbortController; started?:boolean; pending?:Promise<unknown> }
-export interface MediaItem { key: string; kind: 'image' | 'video'; state: 'idle' | 'queued' | 'loading' | 'ready' | 'error'; url: string | null; localPath: string | null; message?: string }
+export interface MediaItem { key: string; kind: 'image' | 'video'; state: 'idle' | 'queued' | 'loading' | 'ready' | 'error'; url: string | null; localPath: string | null; message?: string;caption?:string }
 export interface MediaDependencies { directory: string; queue: RequestQueue; fetch?: typeof fetch; onAccess: (error: AccessError) => void; maxRequests?: number; maxBytes?: number }
 
 /** Downloads public, observed media URLs. Browser navigation and CDN requests share one queue. */
@@ -68,9 +68,11 @@ export class MediaCache {
   async initialize() {
     await this.ready;
     await this.reconcile();
+    // These were implementation limits, not evidence that a remote file vanished.
+    for(const post of this.store.implementationLimitedMedia())this.store.setMediaSync(this.store.generation,post,'pending','Collector support changed; Sync to retry this file');
     for(const id of [...this.store.readyMediaIds()]){
       const post=this.store.getPost(id);
-      const saved=Boolean(post?.attachments.length&&post.attachments.every(item=>this.cached.has(mediaKey(item))));
+      const saved=Boolean(post?.attachments.length&&post.attachments.every(item=>this.cached.has(mediaKey(item)))&&(!isGallery(post.outbound)||completeCollection('reddit:'+post.id,post.attachments)));
       if(saved)this.store.setMediaSync(this.store.generation,id,'ready');
       else if(this.store.mediaSync(id)?.status==='ready')this.store.setMediaSync(this.store.generation,id,'pending','Saved media is incomplete; sync to download it again');
     }
@@ -88,9 +90,11 @@ export class MediaCache {
   pendingPosts(source:string,session:string):string[] { return this.store.pendingMedia(source,session); }
   preparePost(id:string,session:string):{discover:boolean}|null {
     const post=this.store.getPost(id),previous=this.store.mediaSync(id);
-    if(!post||post.availability!=='available'||!previous||previous.status==='unavailable')return null;
-    if(isGallery(post.outbound)){
-      this.store.setMediaSync(this.store.generation,id,'unavailable','Complete gallery downloads are not supported by the current Reddit layout',session);return null;
+    if(!post||post.availability!=='available'||!previous)return null;
+    const gallery=isGallery(post.outbound);
+    if(previous.status==='unavailable'&&!(gallery&&previous.reason?.startsWith('Complete gallery downloads')))return null;
+    if(gallery&&(!completeCollection('reddit:'+post.id,post.attachments)||previous.status==='failed'&&previous.reason?.startsWith('Media URL expired'))){
+      this.store.setMediaSync(this.store.generation,id,'downloading',null,session);return {discover:true};
     }
     if(post.attachments.length&&post.attachments.every(item=>this.cached.has(mediaKey(item)))){
       this.store.setMediaSync(this.store.generation,id,'ready',null,session);return null;
@@ -106,8 +110,15 @@ export class MediaCache {
     await this.reconcile();signal.throwIfAborted();
     this.budget=this.requests+allowance;
     this.store.setMediaSync(this.store.generation,id,'downloading',null,session);
-    await this.enqueue(id,true,signal);
-    await Promise.all([...this.pending]);signal.throwIfAborted();
+    // Drain bounded batches so a large post is not cut off by the in-memory queue.
+    let retry=true;
+    while(true){
+      await this.enqueue(id,retry,signal);retry=false;
+      await Promise.all([...this.pending]);signal.throwIfAborted();
+      const batch=await this.items(id);
+      const interrupted=batch.some(item=>item.state==='error'&&(this.states.get(`${postId(id)}:${item.key}`)?.pause||/fetch failed|ENETUNREACH|ENOTFOUND|ECONN|request budget|storage (limit|cap)|ENOSPC/i.test(item.message??'')));
+      if(interrupted||!batch.some(item=>item.state==='idle'))break;
+    }
     const items=await this.items(id),failures=items.filter(item=>item.state==='error');
     const failureState=(item:MediaItem)=>this.states.get(`${postId(id)}:${item.key}`);
     for(const failure of failures){
@@ -132,7 +143,7 @@ export class MediaCache {
     if (!post || post.availability !== 'available') return [];
     return post.attachments.map(reference => {
       const key = mediaKey(reference), saved = this.cached.get(key), state = this.states.get(`${post.id}:${key}`);
-      return {key,kind:reference.kind,state:saved?'ready':state?.state??'idle',message:state?.message,
+      return {key,kind:reference.kind,caption:reference.caption,state:saved?'ready':state?.state??'idle',message:state?.message,
         url:saved?`/media/${post.id}/${key}`:null,localPath:saved?join(this.options.directory,key):null};
     });
   }
@@ -145,7 +156,7 @@ export class MediaCache {
     for (const reference of post.attachments) {
       const key = mediaKey(reference), taskKey = `${postId}:${key}`;
       if (this.cached.has(key) || this.tasks.has(taskKey) || (!retry && this.states.has(taskKey))) continue;
-      if (this.tasks.size >= 40) { this.states.set(taskKey,{subreddit:post.subreddit,state:'error',message:'Media queue is full. Resume sync after it finishes.'}); continue; }
+      if (this.tasks.size >= 40) break;
       const task: Task = {postId,subreddit:post.subreddit,revision:this.store.sourceRevision(post.subreddit),reference,generation:this.store.generation,controller:new AbortController()};
       const abort=()=>task.controller.abort();
       signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
@@ -174,40 +185,49 @@ export class MediaCache {
     if (this.store.getSetting('accessPause')) throw new Error('Collection is paused. Resume to revalidate access first.');
   }
   private async response(task:Task,url:string,accept:string) {
-    this.assertCurrent(task);
-    this.store.assertStorageAvailable();
-    if(this.requests>=this.budget)throw new Error('Sync request budget reached; Resume to save remaining media.');
-    const signal=AbortSignal.any([task.controller.signal,AbortSignal.timeout(120_000)]);
-    this.requests++;
-    const response=await (this.options.fetch??fetch)(url,{redirect:'manual',signal,headers:{Accept:accept}});
-    if([403,429].includes(response.status)){
-      await response.body?.cancel();
-      // A signed manifest or track may have expired. Persist the need to rediscover
-      // its URLs before the global pause aborts this task. Only explicit Resume retries.
-      if(response.status===403 && /\.mpd(?:\?|$)/i.test(task.reference.url))
-        this.store.setMediaSync(task.generation,task.postId,'failed','Video URL expired or access denied; Resume will rediscover it');
-      const error=new AccessError(`Media host returned ${response.status}; all collection stopped`,retryAfter(response.headers.get('retry-after')??undefined));this.options.onAccess(error);throw error;
+    const visited=new Set<string>();
+    while(true){
+      if(visited.has(url)||visited.size>=5)throw new Error('Media redirect did not reach a file; Resume to retry');
+      visited.add(url);
+      this.assertCurrent(task);
+      this.store.assertStorageAvailable();
+      if(this.requests>=this.budget)throw new Error('Sync request budget reached; Resume to save remaining media.');
+      const signal=AbortSignal.any([task.controller.signal,AbortSignal.timeout(60*60_000)]);
+      this.requests++;
+      const response=await (this.options.fetch??fetch)(url,{redirect:'manual',signal,headers:{Accept:accept}});
+      if([301,302,303,307,308].includes(response.status)){
+        const location=response.headers.get('location');await response.body?.cancel();
+        let next:string;try{next=new URL(location??'',url).href;}catch{throw new UnsupportedMediaError('Invalid media redirect');}
+        if(!location||!mediaReference(next))throw new UnsupportedMediaError('Media redirect leaves supported public file hosts');
+        await delay(this.options.queue.intervalMs,undefined,{signal:task.controller.signal});url=next;continue;
+      }
+      if([403,429].includes(response.status)){
+        await response.body?.cancel();
+        // A signed manifest or track may have expired. Persist the need to rediscover
+        // its URLs before the global pause aborts this task. Only explicit Resume retries.
+        if(response.status===403)
+          this.store.setMediaSync(task.generation,task.postId,'failed','Media URL expired or access denied; Resume will rediscover it');
+        const error=new AccessError(`Media host returned ${response.status}; all collection stopped`,retryAfter(response.headers.get('retry-after')??undefined));this.options.onAccess(error);throw error;
+      }
+      if(response.status!==200){await response.body?.cancel();const Failure=[404,410].includes(response.status)?UnsupportedMediaError:Error;throw new Failure(`Media unavailable (HTTP ${response.status}); no automatic retry.`);}
+      return response;
     }
-    if(response.status!==200){await response.body?.cancel();const Failure=[301,302,303,307,308,404,410].includes(response.status)?UnsupportedMediaError:Error;throw new Failure(`Media unavailable (HTTP ${response.status}); no automatic retry.`);}
-    return response;
   }
   private async manifest(task:Task) {
     const response=await this.response(task,task.reference.url,'application/dash+xml,application/xml');
-    if(!/^(application\/(dash\+xml|xml)|text\/xml)(?:;|$)/i.test(response.headers.get('content-type')??'')||!response.body){await response.body?.cancel();throw new UnsupportedMediaError('Unsupported media manifest format');}
+    if(!/^(application\/(dash\+xml|xml)|text\/xml)(?:;|$)/i.test(response.headers.get('content-type')??'')||!response.body){await response.body?.cancel();throw new Error('Media manifest format could not be read; Resume to rediscover it');}
     const decoder=new TextDecoder('utf-8',{fatal:true});let bytes=0,xml='';
-    for await(const chunk of response.body){this.assertCurrent(task);bytes+=chunk.length;if(bytes>512*1024)throw new UnsupportedMediaError('Media manifest exceeds its size limit');xml+=decoder.decode(chunk,{stream:true});}
-    xml+=decoder.decode();try{return dashMedia(xml,task.reference.url);}catch(error){throw new UnsupportedMediaError(error instanceof Error?error.message:'Unsupported media manifest');}
+    for await(const chunk of response.body){this.assertCurrent(task);bytes+=chunk.length;if(bytes>512*1024)throw new Error('Media manifest exceeds its parser safety bound; collection is incomplete');xml+=decoder.decode(chunk,{stream:true});}
+    xml+=decoder.decode();try{return dashMedia(xml,response.url||task.reference.url);}catch(error){throw new Error(error instanceof Error?error.message:'Media manifest could not be read; Resume to retry');}
   }
   private async downloadFile(task:Task,url:string,path:string,kind:'image'|'video'|'audio') {
     const response=await this.response(task,url,kind==='image'?'image/*':kind==='audio'?'audio/*,video/mp4':'video/*');
     const type=(response.headers.get('content-type')??'').split(';')[0]!.trim().toLowerCase();
     const allowed=kind==='image'?/^image\/(jpeg|png|gif|webp|avif)$/:kind==='audio'?/^(audio|video)\/mp4$/:/^video\/(mp4|webm)$/;
-    const limit=kind==='video'?128*1024*1024:32*1024*1024;
     if(!allowed.test(type)||!response.body){await response.body?.cancel();throw new UnsupportedMediaError('Unsupported media format. Open the post on Reddit.');}
-    if(Number(response.headers.get('content-length')??0)>limit){await response.body.cancel();throw new UnsupportedMediaError('Media exceeds the per-file download limit.');}
     try{this.store.assertStorageFits(Number(response.headers.get('content-length')??0));}catch(error){await response.body.cancel();throw error;}
     const file=await open(path,'wx',0o600);let bytes=0;
-    try{for await(const chunk of response.body){this.assertCurrent(task);bytes+=chunk.length;if(bytes>limit)throw new UnsupportedMediaError('Media exceeds the per-file download limit.');if(this.bytes+bytes>(this.options.maxBytes??Infinity))throw new Error('Media storage limit reached.');this.store.assertStorageFits(bytes);await file.writeFile(chunk);}if(!bytes)throw new UnsupportedMediaError('Empty media file');}
+    try{for await(const chunk of response.body){this.assertCurrent(task);bytes+=chunk.length;if(this.bytes+bytes>(this.options.maxBytes??Infinity))throw new Error('Media storage limit reached.');this.store.assertStorageFits(bytes);await file.writeFile(chunk);}if(!bytes)throw new Error('Empty media response; Resume to retry');}
     finally{await file.close();}
     return {type,bytes};
   }
@@ -229,7 +249,7 @@ export class MediaCache {
           process.on('exit',(code,signal)=>code===0?resolve():reject(signal?new SyncLimitError('Video combining was interrupted; sync paused. Resume to retry.'):new UnsupportedMediaError('Video/audio tracks could not be combined. Open the post on Reddit.')));
         });
         saved={type:'video/mp4',bytes:(await stat(muxed)).size};result=muxed;
-        if(saved.bytes>160*1024*1024||this.bytes+saved.bytes>(this.options.maxBytes??Infinity))throw new Error('Media storage limit reached.');
+        if(this.bytes+saved.bytes>(this.options.maxBytes??Infinity))throw new Error('Media storage limit reached.');
       }
       const entry={key,...saved},metadata=JSON.stringify(entry),metadataBytes=Buffer.byteLength(metadata);
       this.assertCurrent(task);this.store.assertStorageFits(saved.bytes+metadataBytes);

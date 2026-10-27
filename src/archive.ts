@@ -1,4 +1,5 @@
-import { mediaReferences } from './media-reference.ts';
+import { mediaReferences,mediaReference,postMediaReferences,MAX_MEDIA_REFERENCES } from './media-reference.ts';
+import type {MediaReference} from './media-reference.ts';
 import { randomUUID } from 'node:crypto';
 import { setImmediate as yieldNow } from 'node:timers/promises';
 import { Readable, Transform } from 'node:stream';
@@ -32,7 +33,27 @@ export function archivePost(row: Record<string, any>, name: string, exportId: st
     permalink: typeof row.permalink === 'string' ? row.permalink : `/r/${name}/comments/${id.slice(3)}/`,
     created: { epochMs: seconds(row.created_utc)!, precisionMs: 1000 },
     source: 'archive', exportId, observedAt, capturedAt: seconds(row.retrieved_on, false),
-    body, media, outbound:typeof row.url==='string'?row.url:undefined, attachments: mediaReferences([typeof row.url === 'string' ? row.url : null]), availability: availability(row, body) });
+    body, media, outbound:typeof row.url==='string'?row.url:undefined, attachments:archiveMedia(row,id), availability: availability(row, body) });
+}
+
+/** Archive records may already contain complete ordered file evidence. No
+ * filenames are constructed and incomplete metadata falls back to DOM discovery. */
+function archiveMedia(row:Record<string,any>,id:string):MediaReference[]{
+ const items=row.gallery_data?.items,metadata=row.media_metadata;
+ if(Array.isArray(items)&&items.length&&items.length<=MAX_MEDIA_REFERENCES&&metadata&&typeof metadata==='object'){
+  const references:MediaReference[]=[];
+  for(const [index,item] of items.entries()){
+   const media=typeof item?.media_id==='string'?metadata[item.media_id]:null;
+   if(!media||media.status!=='valid')return [];
+   const input=media.e==='AnimatedImage'?(media.s?.gif??media.s?.mp4):media.s?.u;
+   const ref=typeof input==='string'?mediaReference(input.replaceAll('&amp;','&')):null;if(!ref)return [];
+   if(item.caption!==undefined&&(typeof item.caption!=='string'||item.caption.length>20_000))return [];
+   references.push({...ref,...item.caption?{caption:item.caption}:{},collection:{id:'reddit:'+id,index,total:items.length}});
+  }
+  return references;
+ }
+ const video=row.secure_media?.reddit_video??row.media?.reddit_video;
+ return postMediaReferences(row.url,mediaReferences([typeof row.url==='string'?row.url:null,typeof video?.dash_url==='string'?video.dash_url:null,video?.is_gif===true&&typeof video.fallback_url==='string'?video.fallback_url:null]));
 }
 
 export interface ImportProgress { id: string; filename: string; state: 'running' | 'done' | 'paused'; lines: number; accepted: number; added: number; omitted: number; filtered: number; bytes: number; reason: string | null }

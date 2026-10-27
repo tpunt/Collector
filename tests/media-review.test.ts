@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {ReaderStore} from '../src/store.ts';
 import {postMediaReferences,mediaReferences} from '../src/media-reference.ts';
 import type {MediaKind,PostObservation,Availability} from '../src/domain.ts';
+import {archivePost} from '../src/archive.ts';
 
 test('combined Media filter includes images, videos and discovered attachments with no duplicates, and composes with pagination, source and search',()=>{
  const store=new ReaderStore(':memory:');try{
@@ -26,6 +27,24 @@ test('native video references reject posters, low-resolution previews and anothe
  assert.deepEqual(postMediaReferences(outbound,references),[{kind:'video',url:manifest}]);
  const direct=outbound+'/DASH_720.mp4';assert.deepEqual(postMediaReferences(direct,mediaReferences([direct])),[{kind:'video',url:direct}]);
  const image='https://i.redd.it/image.jpg';assert.deepEqual(postMediaReferences(image,mediaReferences([image])),[{kind:'image',url:image}]);
+});
+
+test('archive gallery metadata must establish the whole ordered set, and native video metadata supplies only observed owned manifests',()=>{
+ const row={id:'abc',subreddit:'aww',title:'Archived gallery',created_utc:1700000000,is_gallery:true,url:'https://www.reddit.com/gallery/abc',gallery_data:{items:[{media_id:'one',caption:'Original caption'},{media_id:'two'}]},media_metadata:{one:{status:'valid',e:'Image',s:{u:'https://i.redd.it/one.jpg'}},two:{status:'valid',e:'AnimatedImage',s:{gif:'https://i.redd.it/two.gif'}}}};
+ const full=archivePost(row,'aww','gallery-meta',Date.now());assert.equal(full.attachments?.length,2);assert.equal(full.attachments?.[0]?.caption,'Original caption');assert.deepEqual(full.attachments?.map(item=>item.collection?.index),[0,1]);
+ const partial=archivePost({...row,media_metadata:{one:row.media_metadata.one}},'aww','gallery-meta',Date.now());assert.deepEqual(partial.attachments,[]);
+ const video=archivePost({...row,is_gallery:false,gallery_data:undefined,media_metadata:undefined,url:'https://v.redd.it/mainvideo',is_video:true,secure_media:{reddit_video:{dash_url:'https://v.redd.it/mainvideo/DASHPlaylist.mpd'}}},'aww','video-meta',Date.now());assert.deepEqual(video.attachments,[{kind:'video',url:'https://v.redd.it/mainvideo/DASHPlaylist.mpd'}]);
+ const unrelated=archivePost({...row,is_gallery:false,gallery_data:undefined,media_metadata:undefined,url:'https://v.redd.it/mainvideo',is_video:true,secure_media:{reddit_video:{dash_url:'https://v.redd.it/other/DASHPlaylist.mpd'}}},'aww','video-meta',Date.now());assert.deepEqual(unrelated.attachments,[]);
+});
+
+test('listing previews and on-demand discussion reads preserve complete saved gallery evidence',()=>{
+ const store=new ReaderStore(':memory:');try{
+  store.addSubreddit('aww');store.importArchiveBatch(store.generation,[{id:'abc',subreddit:'aww',title:'Gallery',permalink:'/r/aww/comments/abc/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'gallery-evidence',observedAt:1800000000000,media:['Image'],outbound:'https://www.reddit.com/gallery/abc'}]);
+  const refs=[0,1].map(index=>({kind:'image' as const,url:`https://i.redd.it/gallery${index}.jpg`,collection:{id:'reddit:t3_abc',index,total:2}}));store.saveMediaReferences(store.generation,'abc',refs);store.setMediaSync(store.generation,'abc','ready');
+  const target=store.createTarget({subreddit:'aww',upperMs:1800000000001});store.commitBatch({generation:store.generation,targetId:target,observations:[{id:'abc',subreddit:'aww',title:'Gallery',permalink:'/r/aww/comments/abc/',created:{epochMs:1700000000000,precisionMs:1000},source:'live',observedAt:1800000000001,media:['Image'],outbound:'https://www.reddit.com/gallery/abc',attachments:[]}],continuation:null});
+  assert.deepEqual(store.getPost('abc')?.attachments,refs);assert.equal(store.mediaSync('abc')?.status,'ready');
+  store.saveSnapshot(store.generation,{id:'gallery-comments',postId:'t3_abc',source:'live',capturedAt:null,observedAt:1800000000002,sort:'best',body:null,availability:'available',comments:[],omitted:0,sample:'On-demand discussion'});assert.deepEqual(store.getPost('abc')?.attachments,refs);
+ }finally{store.close();}
 });
 
 test('media filters use the same accepted attachments as the displayed post',()=>{

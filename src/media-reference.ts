@@ -1,10 +1,16 @@
 import {onlineEmbed} from './online-embed.ts';
 
-export interface MediaReference { kind: 'image' | 'video'; url: string; audioUrl?: string }
+export interface MediaReference { kind: 'image' | 'video'; url: string; audioUrl?: string; caption?:string; collection?:{id:string;index:number;total:number} }
+export const MAX_MEDIA_REFERENCES=1000;
 
 export function isGallery(input: string | null | undefined): boolean {
   try { const url = new URL(input ?? ''); return ['reddit.com','www.reddit.com','old.reddit.com'].includes(url.hostname) && /^\/gallery\//.test(url.pathname); }
   catch { return false; }
+}
+
+/** A preview list never establishes that an entire ordered collection was read. */
+export function completeCollection(id:string,items:MediaReference[]):boolean {
+  return items.length>0&&items.every((item,index)=>item.collection?.id===id&&item.collection.index===index&&item.collection.total===items.length);
 }
 
 /** Public media CDNs only. Never a user-supplied fetch proxy or arbitrary website. */
@@ -21,8 +27,10 @@ export function mediaReference(input: string): MediaReference | null {
 }
 
 export function mediaReferences(inputs: (string | null | undefined)[]): MediaReference[] {
-  return [...new Map(inputs.map(input => input ? mediaReference(input) : null).filter((item): item is MediaReference => item !== null)
-    .map(item => [item.url, item])).values()].slice(0, 20);
+  const items=[...new Map(inputs.map(input => input ? mediaReference(input) : null).filter((item): item is MediaReference => item !== null)
+    .map(item => [item.url, item])).values()];
+  if(items.length>MAX_MEDIA_REFERENCES)throw new Error('Too many media files to validate in one post; collection is incomplete');
+  return items;
 }
 
 /** A native video's poster/preview is not the video. Require its canonical file

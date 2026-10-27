@@ -10,7 +10,7 @@ import type { Listing } from '../src/extract.ts';
 
 function listing(name:string):Listing {
   const id=name==='python'?'t3_abc':'t3_def';
-  return {account:'fixture_user',posts:[{id,subreddit:name,title:'Fixture '+name,permalink:`/r/${name}/comments/${id.slice(3)}/`,created:{epochMs:1600000000000,precisionMs:1000},source:'live',observedAt:Date.now(),media:name==='python'?['Text']:['Image']}],ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:id};
+  return {account:'fixture_user',posts:[{id,subreddit:name,title:'Fixture '+name,permalink:`/r/${name}/comments/${id.slice(3)}/`,created:{epochMs:1600000000000,precisionMs:1000},source:'live',observedAt:Date.now(),body:'Fixture body',media:name==='python'?['Text']:['Image']}],ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:id};
 }
 class FakeBrowser {
   counts={intercepted:0,released:0,aborted:0,suppressed:0,intervalMs:5000};

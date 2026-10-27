@@ -1,4 +1,4 @@
-import { mediaReference } from './media-reference.ts';
+import { mediaReference,MAX_MEDIA_REFERENCES } from './media-reference.ts';
 import type { MediaReference } from './media-reference.ts';
 export const MEDIA_KINDS = ['Text', 'Image', 'Video', 'Link', 'Unknown'] as const;
 export type MediaKind = typeof MEDIA_KINDS[number];
@@ -22,6 +22,7 @@ export interface PostObservation {
   observedAt: number;
   capturedAt?: number;
   body?: string;
+  bodyNeedsFetch?:boolean;
   media?: MediaKind[];
   outbound?: string;
   attachments?: MediaReference[];
@@ -110,13 +111,16 @@ export function validateObservation(input: PostObservation): PostObservation {
   if (input.body !== undefined && (typeof input.body !== 'string' || input.body.length > 1_000_000)) {
     throw new Error('Invalid post body');
   }
+  if(input.bodyNeedsFetch!==undefined&&typeof input.bodyNeedsFetch!=='boolean')throw new Error('Invalid body collection state');
   if (input.media !== undefined && (!Array.isArray(input.media) ||
       input.media.some(kind => !MEDIA_KINDS.includes(kind)))) throw new Error('Invalid media category');
   if (input.availability && !['available', 'deleted', 'removed'].includes(input.availability)) {
     throw new Error('Invalid availability marker');
   }
-  if (input.attachments !== undefined && (!Array.isArray(input.attachments) || input.attachments.length > 20 ||
+  if (input.attachments !== undefined && (!Array.isArray(input.attachments) || input.attachments.length > MAX_MEDIA_REFERENCES ||
     input.attachments.some(item => !item || mediaReference(item.url)?.kind !== item.kind ||
+      (item.caption!==undefined&&(typeof item.caption!=='string'||item.caption.length>20_000))||
+      (item.collection!==undefined&&(!item.collection||typeof item.collection.id!=='string'||!/^[a-z0-9:_-]{1,100}$/i.test(item.collection.id)||!Number.isInteger(item.collection.index)||!Number.isInteger(item.collection.total)||item.collection.index<0||item.collection.index>=item.collection.total||item.collection.total>MAX_MEDIA_REFERENCES))||
       (item.audioUrl !== undefined && (item.kind!=='video'||mediaReference(item.audioUrl)?.kind!=='video'||new URL(item.audioUrl).hostname!=='v.redd.it'))))) throw new Error('Invalid media attachment');
   const marker = input.body?.trim();
   const availability = marker === '[deleted]' ? 'deleted' : marker === '[removed]' ? 'removed' : input.availability;

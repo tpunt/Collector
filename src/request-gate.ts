@@ -69,6 +69,7 @@ export interface RequestGateOptions {
   isPaused?: () => boolean;
   onFailure?: (reason: string) => void;
   blockedResourceTypes?: string[];
+  allowResource?: (url:string,type:string)=>boolean;
   maxRequests?: number;
   onBudget?: () => void;
 }
@@ -95,6 +96,7 @@ export class ChromiumRequestGate {
   private isPaused: () => boolean;
   private onFailure: (reason: string) => void;
   private onMediaRequest: RequestGateOptions['onMediaRequest'];
+  private allowResource:RequestGateOptions['allowResource'];
 
   private constructor(socket: WebSocket, options: RequestGateOptions) {
     this.socket = socket;
@@ -103,6 +105,7 @@ export class ChromiumRequestGate {
     this.isPaused = options.isPaused ?? (() => false);
     this.onFailure = options.onFailure ?? (() => {});
     this.onMediaRequest = options.onMediaRequest;
+    this.allowResource=options.allowResource;
     this.blockedTypes = new Set(options.blockedResourceTypes ?? []);
     this.maxRequests = options.maxRequests ?? Infinity;
     this.onBudget = options.onBudget ?? (() => {});
@@ -213,7 +216,7 @@ export class ChromiumRequestGate {
         void this.send('Fetch.failRequest', {requestId,errorReason:'BlockedByClient'},session).catch(()=>undefined);
         return;
       }
-      if (this.blockedTypes.has(String(message.params!.resourceType))) {
+      if (this.blockedTypes.has(String(message.params!.resourceType)) || (this.allowResource&&!this.allowResource(mediaUrl??'',String(message.params!.resourceType)))) {
         this.suppressed++;
         void this.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, session).catch(() => undefined);
         return;

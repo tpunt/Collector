@@ -32,7 +32,7 @@ async function setup(options:{images?:number;end?:boolean;unsupported?:boolean;f
    await options.beforeListing?.();
    const second=page.url().includes('?'),prefix=second?'b':'a';
    const text:PostObservation[]=Array.from({length:5},(_,i)=>({id:`t3_${prefix}${i}`,subreddit:'aww',title:'History proof',permalink:`/r/aww/comments/${prefix}${i}/`,
-    created:{epochMs:old-i,precisionMs:1000},source:'live',observedAt:Date.now(),media:['Text']}));
+    created:{epochMs:old-i,precisionMs:1000},source:'live',observedAt:Date.now(),media:['Text'],body:'History proof'}));
    return{account:'fixture_user',posts:[...records(),...text],ordinary:text.map(p=>({id:p.id,createdMs:p.created.epochMs,precisionMs:1000})),unknownTime:false,omissions:0,
     next:options.end?null:`https://old.reddit.com/r/aww/new/?after=t3_${second?'b4':'a4'}`,empty:false,signature:prefix};
   }});

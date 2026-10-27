@@ -37,6 +37,35 @@ test('media redirects and wrong content types fail once, and explicit retry is r
  try{await cache.enqueue('t3_abc');await settled(cache);assert.equal(calls,1);await cache.enqueue('t3_abc');await settled(cache);assert.equal(calls,1);assert.equal((await cache.items('t3_abc'))[0]?.state,'error');await cache.enqueue('t3_abc',true);await settled(cache);assert.equal(calls,2);assert.equal(cache.status.bytes,0);}finally{await cache.close();store.close();await rm(directory,{recursive:true,force:true});}
 });
 
+test('a safe observed CDN redirect is paced, downloaded and saved instead of being discarded',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'reader-safe-redirect-')),store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[record()]);const starts:number[]=[];
+ const cache=new MediaCache(store,{directory,queue:new RequestQueue({intervalMs:25,fromCompletion:true}),onAccess:()=>{},fetch:async()=>{starts.push(Date.now());return starts.length===1?new Response('',{status:302,headers:{Location:'https://i.redd.it/current.jpg'}}):new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/jpeg'}});}});
+ try{await cache.syncPost('abc','redirect',3,new AbortController().signal);assert.equal(starts.length,2);assert(starts[1]!-starts[0]!>=20);assert.equal(store.mediaSync('abc')?.status,'ready');assert.equal((await cache.items('abc'))[0]?.state,'ready');}
+ finally{await cache.close();store.close();await rm(directory,{recursive:true,force:true});}
+});
+
+test('a post with more than forty files drains every bounded queue batch during the same sync',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'reader-many-files-')),store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[{...record(),attachments:mediaReferences(Array.from({length:65},(_,i)=>`https://i.redd.it/many${i}.png`))}]);let requests=0;
+ const cache=new MediaCache(store,{directory,queue:new RequestQueue({intervalMs:0}),onAccess:()=>{},fetch:async()=>{requests++;return new Response(new Uint8Array([1]),{headers:{'Content-Type':'image/png'}});}});
+ try{await cache.syncPost('abc','many-files',80,new AbortController().signal);assert.equal(requests,65);assert.equal((await cache.items('abc')).filter(item=>item.state==='ready').length,65);assert.equal(store.mediaSync('abc')?.status,'ready');}
+ finally{await cache.close();store.close();await rm(directory,{recursive:true,force:true});}
+});
+
+for(const failure of [404,503])test(`a ${failure} file cannot strand later queue batches or retry itself within the same sync`,async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'reader-batch-failure-')),store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[{...record(),attachments:mediaReferences(Array.from({length:65},(_,i)=>`https://i.redd.it/file${i}.png`))}]);const requests:string[]=[];
+ const cache=new MediaCache(store,{directory,queue:new RequestQueue({intervalMs:0}),onAccess:()=>{},fetch:async url=>{requests.push(String(url));return String(url).endsWith('/file0.png')?new Response('',{status:failure}):new Response(new Uint8Array([1]),{headers:{'Content-Type':'image/png'}});}});
+ try{await assert.rejects(cache.syncPost('abc','mixed-batches',80,new AbortController().signal),error=>error instanceof Error&&(failure===404?error instanceof UnsupportedMediaError:!(error instanceof UnsupportedMediaError)));assert.equal(requests.length,65);assert.equal(requests.filter(url=>url.endsWith('/file0.png')).length,1);assert.equal((await cache.items('abc')).filter(item=>item.state==='ready').length,64);}
+ finally{await cache.close();store.close();await rm(directory,{recursive:true,force:true});}
+});
+
+test('streamed media above the former per-file limit is saved within the configured storage cap',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'reader-large-image-')),store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[record()]);
+ const chunk=new Uint8Array(1024*1024),total=33*chunk.length;let count=0;
+ const cache=new MediaCache(store,{directory,queue:new RequestQueue({intervalMs:0}),onAccess:()=>{},fetch:async()=>new Response(new ReadableStream({pull(controller){if(count++<33)controller.enqueue(chunk);else controller.close();}}),{headers:{'Content-Type':'image/jpeg','Content-Length':String(total)}})});
+ try{await cache.syncPost('abc','large-file',1,new AbortController().signal);assert.equal(cache.status.bytes,total);assert.equal(store.mediaSync('abc')?.status,'ready');}
+ finally{await cache.close();store.close();await rm(directory,{recursive:true,force:true});}
+});
+
 test('a media 429 pauses all collection and cancels queued files without automatic retries',async()=>{
  const directory=await mkdtemp(join(tmpdir(),'reader-media-test-')),store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[record(),record('def','https://i.redd.it/other.jpg')]);let calls=0;let reason='';
  const cache=new MediaCache(store,{directory,queue:new RequestQueue({intervalMs:0}),onAccess:error=>{reason=error.message;store.setSetting('accessPause',{reason,notBefore:error.notBefore});cache.stop();},fetch:async()=>{calls++;return new Response('',{status:429,headers:{'Retry-After':'120'}});}});
@@ -73,6 +102,13 @@ test('startup removes orphaned files left by an interrupted post deletion withou
   const reopened=new MediaCache(store,{directory,queue:new RequestQueue({intervalMs:0}),onAccess:()=>{},fetch:async()=>assert.fail('Startup must stay offline')});
   try{await reopened.initialize();assert.equal(reopened.status.bytes,0);assert.deepEqual(await readdir(directory),[]);}finally{await reopened.close();}
  }finally{await cache.close();store.close();await rm(directory,{recursive:true,force:true});}
+});
+
+test('startup requeues former implementation-limit failures while retaining genuine missing-file gaps without making requests',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'reader-retry-old-limits-')),store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[record(),record('def')]);store.setMediaSync(store.generation,'abc','unavailable','Media exceeds the per-file download limit.');store.setMediaSync(store.generation,'def','unavailable','Media unavailable (HTTP 404); no automatic retry.');
+ const cache=new MediaCache(store,{directory,queue:new RequestQueue({intervalMs:0}),onAccess:()=>{},fetch:async()=>assert.fail('Startup cannot make website requests')});
+ try{await cache.initialize();assert.equal(store.mediaSync('abc')?.status,'pending');assert.equal(store.mediaSync('def')?.status,'unavailable');assert.equal(cache.status.requests,0);}
+ finally{await cache.close();store.close();await rm(directory,{recursive:true,force:true});}
 });
 
 test('DASH selects the main supported video and explicit audio, rejects hostile XML and does not invent segment URLs',async()=>{

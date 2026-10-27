@@ -62,6 +62,8 @@ export class ReaderBrowser {
     this.gate = await ChromiumRequestGate.install(await chromiumControlUrl(profileDirectory), {
       queue: this.queue,
       onMediaRequest: interactive==='media' ? url=>this.observedMedia.add(url) : undefined,
+      // Media controls need Reddit's scripts, not unrelated embeds or tracking.
+      allowResource:interactive==='media'?url=>{try{const host=new URL(url).hostname;return ['reddit.com','old.reddit.com','www.reddit.com'].includes(host)||host==='redditstatic.com'||host.endsWith('.redditstatic.com')||host==='redditmedia.com'||host.endsWith('.redditmedia.com');}catch{return false;}}:undefined,
       blockedResourceTypes: interactive === 'media' ? ['Image', 'Media', 'Font', 'Ping', 'Other'] : interactive ? [] : ['Image', 'Media', 'Font', 'Script', 'XHR', 'Fetch', 'Ping', 'Other'], maxRequests,
       isPaused: () => this.failure !== null,
       onBudget: () => { const error = new AccessError('Website request budget reached; Continue explicitly to fetch more'); this.failure = error; this.onAccess(error); void this.close(); },
@@ -85,7 +87,8 @@ export class ReaderBrowser {
         signal?.throwIfAborted();
         // CSS determines rendered visibility. Drain paced resources before Next;
         // otherwise requests from the previous page can starve the next navigation.
-        await page.goto(url.href, { waitUntil: 'load', timeout: 180_000 });
+        // A paced 120-request session can legitimately take ten minutes.
+        await page.goto(url.href, { waitUntil: 'load', timeout: 600_000 });
         await page.locator('#header, main, h1, form').first().waitFor({ state: 'attached', timeout: 15_000 });
       }, signal);
       if (this.failure) throw this.failure;

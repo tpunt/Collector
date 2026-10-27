@@ -65,7 +65,7 @@ test('known online players play in isolated frames, retain offline warnings and 
    const url=route.request().url();if(url.startsWith(origin))return route.continue();
    requests.push({url,referer:route.request().headers().referer});
    if(!players.includes(url))return route.abort();
-   return route.fulfill({contentType:'text/html',body:`<!doctype html><button onclick="const v=document.querySelector('video');v.muted=true;v.play().then(()=>this.textContent='Playing')">Play fixture</button><video controls src="data:video/mp4;base64,${video}"></video>`});
+   return route.fulfill({contentType:'text/html',body:`<!doctype html><button onclick="const v=document.querySelector('video');v.muted=true;v.play().then(()=>this.textContent='Playing')">Play fixture</button><video controls loop src="data:video/mp4;base64,${video}"></video>`});
   });
   await page.goto(origin);
   const card=(title:string)=>page.locator('.post-card').filter({has:page.getByRole('button',{name:title,exact:true})});

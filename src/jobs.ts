@@ -20,8 +20,8 @@ export interface MediaSyncDriver {
   reconcile?():Promise<void>;
 }
 type Work = ({ id: string; kind: 'target'; targetId: string; head: boolean; deadline: number; generation: number } |
-  { id: string; kind: 'thread' | 'media'; postId: string; deadline: number; generation: number } |
-  {id:string;kind:'media-source';subreddit:string;deadline:number;generation:number}) & {requestBaseline?:number};
+  { id: string; kind: 'thread' | 'media' | 'body'; postId: string; deadline: number; generation: number } |
+  {id:string;kind:'media-source'|'body-source';subreddit:string;deadline:number;generation:number}) & {requestBaseline?:number};
 export interface JobDependencies {
   network?: RequestQueue;
   mediaSync?:MediaSyncDriver|null;
@@ -57,6 +57,7 @@ export class ReaderJobs {
   private message = 'Ready';
   private onPause: () => void;
   private discover: typeof discoverMedia;
+  private attemptedBodies=new Set<string>();
   constructor(store: ReaderStore, dependencies: JobDependencies = {}) {
     this.store = store;this.mediaSync=dependencies.mediaSync??null;
     this.onPause = dependencies.onPause ?? (() => {});
@@ -70,7 +71,7 @@ export class ReaderJobs {
     this.account = dependencies.readAccount ?? (async page => (await page.evaluate(collectClassicListingDom)).account);
   }
   private sourceOf(work: Work): string | null {
-    if(work.kind==='media-source')return work.subreddit;
+    if('subreddit' in work)return work.subreddit;
     return work.kind === 'target' ? this.store.getTarget(work.targetId)?.subreddit ?? null : this.store.getPost(work.postId)?.subreddit ?? null;
   }
   feedStatus(input: string): 'idle' | 'queued' | 'syncing' | 'stopping' {
@@ -98,6 +99,9 @@ export class ReaderJobs {
   private queueMediaSource(name:string,deadline:number){
     if(!this.mediaSync||this.queue.some(work=>work.kind==='media-source'&&work.subreddit===name))return;
     this.queue.push({id:randomUUID(),kind:'media-source',subreddit:name,deadline,generation:this.store.generation});
+  }
+  private queueBodies(name:string,deadline:number,requestBaseline?:number){
+    if(!this.queue.some(work=>work.kind==='body-source'&&work.subreddit===name))this.queue.push({id:randomUUID(),kind:'body-source',subreddit:name,deadline,generation:this.store.generation,requestBaseline});
   }
   syncMedia(names:string[],options:{resume?:boolean}={}){
     this.store.assertStorageAvailable();
@@ -128,6 +132,8 @@ export class ReaderJobs {
       this.targets(plans.flatMap(plan=>plan.heads),{heads:true,resume:true});
       this.targets(plans.flatMap(plan=>plan.history),{resume:true});
       this.syncMedia(names,{resume:true});
+      for(const name of names)this.queueBodies(name,Date.now()+60*60_000);
+      this.start();
       this.finishFeeds();
     }catch(error){for(const name of names)this.store.pauseSource(name,error instanceof Error?error.message:'Sync could not start');throw error;}
     return plans.reduce((sum,plan)=>sum+plan.heads.length+plan.history.length,0);
@@ -145,7 +151,8 @@ export class ReaderJobs {
     signal.throwIfAborted();
     this.assertCanQueue();this.stopping=false;
     await this.mediaSync?.reconcile?.();signal.throwIfAborted();
-    const matches=(work:Work)=>(work.kind==='media')&&ids.includes(work.postId);
+    const matches=(work:Work)=>(work.kind==='media'||work.kind==='body')&&ids.includes(work.postId);
+    for(const id of ids){const state=this.store.bodySync(id);if(state&&state.status!=='ready'&&!this.queue.some(work=>work.kind==='body'&&work.postId===id))this.queue.push({id:randomUUID(),kind:'body',postId:id,deadline:Date.now()+60*60_000,generation:this.store.generation,requestBaseline:this.archiveRequestBaseline??undefined});}
     for(const id of ids)if(this.store.mediaSync(id)&&!this.queue.some(work=>work.kind==='media'&&work.postId===id)&&!(this.active?.kind==='media'&&this.active.postId===id))
       this.queue.push({id:randomUUID(),kind:'media',postId:id,deadline:Date.now()+60*60_000,generation:this.store.generation,requestBaseline:this.archiveRequestBaseline??undefined});
     this.start();
@@ -153,6 +160,8 @@ export class ReaderJobs {
     signal.throwIfAborted();
     const pause=this.store.getSetting<{reason:string}>('accessPause');if(pause)throw new Error(pause.reason);
     const missing=ids.filter(id=>{const state=this.store.mediaSync(id);return state&&['pending','downloading','failed'].includes(state.status);});
+    const missingBodies=ids.filter(id=>{const state=this.store.bodySync(id);return state&&state.status!=='ready';});
+    if(missingBodies.length)throw new Error(`${missingBodies.length} archive post bodies could not be saved; Resume archive to retry`);
     if(missing.length)throw new Error(`${missing.length} archive media post(s) could not be saved; Resume archive to retry`);
   }
   targets(ids: string[], options: { resume?: boolean; heads?: boolean } = {}) {
@@ -216,7 +225,7 @@ export class ReaderJobs {
   }
   async stopPost(input:string) {
     const id=postId(input);this.mediaSync?.stopPost?.(id);
-    const matches=(work:Work)=>['thread','media'].includes(work.kind)&&'postId' in work&&work.postId===id;
+    const matches=(work:Work)=>['thread','media','body'].includes(work.kind)&&'postId' in work&&work.postId===id;
     this.queue=this.queue.filter(work=>!matches(work));
     if(this.active&&matches(this.active)){
       this.stoppedWork.add(this.active.id);this.controller?.abort();await this.closeBrowser();
@@ -231,13 +240,13 @@ export class ReaderJobs {
   }
   async finishSignIn() { this.pause('Sign-in browser closed. Resume collection to verify the saved account.'); await this.closeBrowser(); }
   async close() { this.pause('Application stopped; explicit Resume required'); await this.closeBrowser();await this.pumpDone; }
-  private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.pumpDone=this.pump(); } }
+  private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();this.pumpDone=this.pump(); } }
   private async pump() {
     const startingRequests = this.totalRequests();
     try {
       while (this.queue.length && !this.stopping) {
         const ready=(work:Work)=>work.kind!=='target'||!this.store.getTarget(work.targetId)?.dependsOn||this.store.getTarget(this.store.getTarget(work.targetId)!.dependsOn!)?.status==='done';
-        const rank=(work:Work)=>work.kind==='thread'?0:work.kind==='target'&&work.head?1:work.kind==='media'?2:work.kind==='media-source'?3:4;
+        const rank=(work:Work)=>work.kind==='thread'?0:work.kind==='target'&&work.head?1:work.kind==='media'||work.kind==='body'?2:work.kind==='media-source'||work.kind==='body-source'?3:4;
         let index=-1;
         for(let i=0;i<this.queue.length;i++)if(ready(this.queue[i]!)&&(index<0||rank(this.queue[i]!)<rank(this.queue[index]!)))index=i;
         if(index<0){for(const work of this.queue)if(work.kind==='target')this.store.pauseTarget(work.targetId,'Newer catch-up is unfinished; Resume to continue');this.queue=[];break;}
@@ -254,6 +263,11 @@ export class ReaderJobs {
           this.controller.signal.throwIfAborted();
           if(work.generation!==this.store.generation)continue;
           this.store.assertStorageAvailable();
+          if(work.kind==='body-source'){
+            const ids=this.store.pendingBodies(work.subreddit,this.attemptedBodies);
+            for(const postId of ids){this.attemptedBodies.add(postId);this.queue.push({id:randomUUID(),kind:'body',postId,deadline:work.deadline,generation:work.generation,requestBaseline:work.requestBaseline});}
+            if(ids.length)this.queue.push(work);continue;
+          }
           if(work.kind==='media-source'){
             const ids=this.mediaSync?.pendingPosts(work.subreddit,workSession)??[];
             // Save observed files before opening another browser page for discovery.
@@ -310,7 +324,7 @@ export class ReaderJobs {
             if (this.store.getTarget(target.id)?.status === 'cancelled') continue;
             this.store.bindAccount(listing.account);
             const result = advanceBoundary(target, listing, this.store.hasBatch(target.id, listing.signature));
-            this.store.commitBatch({ generation: work.generation, targetId: target.id, observations: listing.posts,
+            this.store.commitBatch({ generation: work.generation, targetId: target.id, observations: listing.posts.map(post=>post.bodyNeedsFetch&&this.attemptedBodies.has(post.id)?{...post,body:undefined,bodyNeedsFetch:false}:post),
               continuation: listing.next, omissions: listing.omissions, boundary: result.boundary, batchKey: listing.signature,
               fromHead: head, pageUrl:url, completion:result.completion,
               status: result.done ? 'done' : result.stalled ? 'paused' : 'queued',
@@ -319,10 +333,15 @@ export class ReaderJobs {
             this.message = `r/${target.subreddit}: ${listing.posts.length} posts checked${listing.omissions ? `, ${listing.omissions} omitted` : ''}`;
             if (!result.done && !result.stalled) this.queue.push({ ...work, head: false });
             this.queueMediaSource(target.subreddit,work.deadline);
-          } else {
+            this.queueBodies(target.subreddit,work.deadline);
+          } else if(work.kind==='thread'||work.kind==='body') {
             const post = this.store.getPost(work.postId);
             if (!post) continue;
-            this.message = `Reading discussion: ${post.title}`;
+            if(work.kind==='body'){
+              if(!this.store.bodySync(post.id)||this.store.bodySync(post.id)?.status==='ready')continue;
+              this.attemptedBodies.add(post.id);this.store.setBodySync(work.generation,post.id,'fetching');
+            }
+            this.message = work.kind==='body'?`Saving post text: ${post.title}`:`Reading discussion: ${post.title}`;
             const page = await this.browser.navigate(post.permalink.replace('https://www.reddit.com', 'https://old.reddit.com'), this.controller.signal);
             const account = await this.account(page);
             this.controller.signal.throwIfAborted();
@@ -330,11 +349,15 @@ export class ReaderJobs {
             this.store.bindAccount(account);
             const { snapshot, attachments } = await this.discussion(page, post.id);
             this.controller.signal.throwIfAborted();
-            this.store.saveSnapshot(work.generation, snapshot);
+            if(work.kind==='body'){
+              if(snapshot.availability!=='available'){this.store.markPostUnavailable(work.generation,post.id,snapshot.availability,snapshot.observedAt);this.store.noteSyncGap(post.subreddit);}
+              else if(snapshot.body===null)throw new Error('The complete post body was not exposed; Resume to retry');
+              else this.store.savePostBody(work.generation,post.id,snapshot.body,snapshot.observedAt);
+            }else this.store.saveSnapshot(work.generation, snapshot);
             if(attachments)this.store.saveMediaReferences(work.generation,post.id,attachments);
             await this.mediaSync?.reconcile?.();
             if(this.mediaSync&&this.store.mediaSync(post.id))this.queue.push({id:randomUUID(),kind:'media',postId:post.id,deadline:work.deadline,generation:work.generation});
-            this.message = `Discussion saved: ${snapshot.comments.length} sampled comments; sort ${snapshot.sort}`;
+            this.message = work.kind==='body'?'Post text saved offline':`Discussion saved: ${snapshot.comments.length} sampled comments; sort ${snapshot.sort}`;
           }
         } catch (error) {
           const reason=error instanceof Error?error.message:'Collection failed';
@@ -342,9 +365,10 @@ export class ReaderJobs {
             await this.closeBrowser();
           } else if (!this.stopping) {
             if(error instanceof SyncLimitError){this.accessFailure(new AccessError(reason));}
-            else if(work.kind==='media'&&(error instanceof UnsupportedMediaError||(!(error instanceof AccessError)&&!(error instanceof PostIdentityError)&&!/sign.in|account|block|verification|layout|does not match|request control/i.test(reason)))){
-              this.store.setMediaSync(work.generation,work.postId,error instanceof UnsupportedMediaError?'unavailable':'failed',reason,workSession);
-              this.message=`Media ${error instanceof UnsupportedMediaError?'unavailable':'failed'}: ${reason}`;
+            else if((work.kind==='media'||work.kind==='body')&&(error instanceof UnsupportedMediaError||(!(error instanceof AccessError)&&!(error instanceof PostIdentityError)&&!/sign.in|account|block|verification|layout|does not match|request control/i.test(reason)))){
+              if(work.kind==='media')this.store.setMediaSync(work.generation,work.postId,error instanceof UnsupportedMediaError?'unavailable':'failed',reason,workSession);
+              else this.store.setBodySync(work.generation,work.postId,'failed',reason);
+              this.message=`${work.kind==='body'?'Post text':'Media'} ${error instanceof UnsupportedMediaError?'unavailable':'failed'}: ${reason}`;
               await this.closeBrowser();
             }else{
               this.pause(reason);
@@ -353,6 +377,7 @@ export class ReaderJobs {
           }
         } finally {
           if(work.kind==='media'&&this.store.mediaSync(work.postId)?.status==='downloading')this.store.setMediaSync(work.generation,work.postId,'pending','Sync interrupted; Resume to finish saving this feed',workSession);
+          if(work.kind==='body'&&this.store.bodySync(work.postId)?.status==='fetching')this.store.setBodySync(work.generation,work.postId,'pending','Sync interrupted; Resume to finish saving post text');
           this.stoppedWork.delete(work.id);
           this.active=null;this.finishFeeds();
         }

@@ -3,9 +3,9 @@
 ## Current scope and next stage — 27 October 2026
 
 This section records the latest user decisions and takes precedence over older
-planning below. This round implements the combined Media filter and rechecks
-live archive fetching. The additions below are planned, not implemented in this
-round. Keep the app a compact, on-demand local web reader.
+planning below. The core offline-content work now includes full post text,
+complete native galleries, archive media metadata and resumable downloads.
+Backup/read/search/cleanup/launcher additions below remain planned. Keep the app a compact, on-demand local web reader.
 
 ### Future content sources
 
@@ -106,19 +106,26 @@ integration or a generic plugin framework in this round.
 - Verify sharing, cancellation, active downloads, capacity, reclaimed space and
   compaction failure reporting.
 
-### 5. Complete galleries
+### 5. Complete galleries — implemented
 
-- Traverse rendered gallery controls deterministically through the same paced
-  browser, without a Reddit API, hidden state or AI extraction.
-- Bind every slide to its post and establish the full ordered set. Persist
-  slide progress, download all supported items and render an offline gallery.
-  A preview or first slide must never count as a complete gallery.
-- Handle repeated controls, unknown totals, mixed media, expired URLs, partial
-  failure and Stop/Resume. Revisit the existing 20-reference safety bound;
-  never silently truncate a larger gallery and mark it complete.
-- YouTube/Vimeo can play online with an orange Not downloaded pill and an
-  internet requirement. Other unsupported providers remain labelled links.
-  Offline saving needs a separately verified, supported download path.
+- Traverse every native Classic gallery slide through its real controls, bind
+  each slide to the post and reported order/count, prefer the visible full-size
+  link and preserve captions. No API, hidden-state or screenshot extraction.
+- Commit the complete file list before downloading. Persist collection evidence
+  with the files so Stop/Resume and restart keep saved slides; incomplete
+  discovery remains retryable. Refresh/discussion reads cannot replace a full
+  gallery with its listing previews.
+- Complete archive gallery/native-video metadata supplies observed file URLs
+  directly; missing metadata falls back to the browser. No endpoints are guessed.
+- Remove silent 20-file truncation and drain bounded download batches beyond 40
+  files. Enforce the user's storage cap instead of fixed media file-size caps.
+- Full post text has durable pending/fetching/ready/failed state, automatic
+  collection on sync and observed-update refresh. Text links and inline-image
+  originals are preserved; discussions stay on demand. Version-one data receives
+  one preserving additive upgrade for that ledger.
+- YouTube/Vimeo remain explicitly online under the agreed exception, with an
+  orange Not downloaded pill. Other unknown providers retain an original link;
+  missing/deleted/denied source content cannot be promised offline.
 
 ### 6. Easier launching
 

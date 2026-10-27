@@ -10,6 +10,16 @@ import { ChromiumRequestGate, chromiumControlUrl } from '../src/request-gate.ts'
 import { chromium } from 'playwright';
 import { browserLaunchOptions } from '../src/browser-options.ts';
 
+test('a collection resource policy blocks unrelated scripts before dispatch while native controls still run',async()=>{
+ const hits:string[]=[];
+ const server=createServer((req,res)=>{hits.push(req.url!);res.setHeader('Content-Type',req.url==='/native.js'?'text/javascript':'text/html');if(req.url==='/native.js')res.end("document.body.append(Object.assign(document.createElement('p'),{textContent:'Native controls ready'}))");else{const port=(server.address()as any).port;res.end(`<html><body><script src="/native.js"></script><script src="http://localhost:${port}/unrelated.js"></script></body></html>`);}});
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const directory=await mkdtemp(join(tmpdir(),'reader-resource-policy-'));let context:any,gate:ChromiumRequestGate|undefined;
+ try{
+  context=await chromium.launchPersistentContext(directory,{...browserLaunchOptions,headless:true,channel:'chrome'});gate=await ChromiumRequestGate.install(await chromiumControlUrl(directory),{intervalMs:5,allowResource:url=>new URL(url).hostname==='127.0.0.1',blockedResourceTypes:['Image','Other']});
+  const page=context.pages()[0];await page.goto(`http://127.0.0.1:${(server.address()as any).port}/page`);await page.getByText('Native controls ready',{exact:true}).waitFor();assert(hits.includes('/native.js'));assert(!hits.includes('/unrelated.js'));assert(gate.counts.suppressed>=1);
+ }finally{await context?.close();gate?.disposeAfterBrowserClose();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(directory,{recursive:true,force:true});}
+});
+
 test('real Chromium HTTP requests are spaced across redirects, frames, workers, resources and new tabs', { timeout: 30_000 }, async () => {
   const hits: { path: string; time: number }[] = [];
   const server = createServer((request, response) => {

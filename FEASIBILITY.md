@@ -327,3 +327,55 @@ collector count stayed zero. The screenshot is in the ignored QA directory.
 This live check contacted YouTube/its player resources; Vimeo playback was
 checked with fixtures, not a live provider call. No Reddit collection ran, and
 the user's library and sign-in profile were untouched.
+
+## Offline-content completion audit — 27 October 2026
+
+The full audit and remaining explicit source boundaries are recorded in
+[OFFLINE_AUDIT.md](OFFLINE_AUDIT.md). Native galleries now use the actual Classic
+grid/Next controls and verify each visible slide against the reported IDs/order.
+The original rendered full-size link is preferred over its preview. Ordered
+collection evidence and captions persist before file downloads; Stop/restart,
+refresh and on-demand discussion reads preserve that evidence.
+
+Sync now automatically reads full post text, retains link destinations and
+original inline-image references, and re-reads observed updates. A durable text
+ledger prevents absent or stale bodies from counting as complete, even across
+restart. Discussions remain on demand, as the user clarified. A preserving
+additive schema upgrade queues previously unverified live text without starting
+network traffic. Text and media progress are visible separately.
+
+Complete archive gallery/native-video metadata supplies explicit file evidence
+without a Reddit visit. Silent 20-file truncation and the 40-file queue cutoff
+are removed; bounded batches continue under the existing request budget. Mixed
+missing/temporary failures do not strand later batches or retry themselves within
+the same run. Media streams under the user's storage cap instead of fixed file
+size limits. Safe observed CDN redirects are followed with pacing; invalid
+manifest/discovery work remains retryable. Former implementation-limit failures
+are reopened while genuine missing-file gaps stay unavailable.
+
+Five bounded live checks used one existing six-image public gallery. Browser
+request releases were 12 (first probe hit its ceiling), 13, 13, 21 and 21; the
+last check made six additional CDN requests and saved all six files. Total:
+80 browser releases plus six CDN fetches, all through the completion-based
+five-second gate. No Reddit API calls, screenshots, hidden state, guessed URLs
+or AI extraction were used. These are dispatch counters, not reconstructed server
+logs. An intermediate diagnostic using direct page.goto was rejected by automatic
+approval review because pacing was not established; it did not execute. Subsequent
+checks used normal ReaderBrowser.navigate through the installed gate.
+
+The real files were reopened in an isolated app with all website navigation and
+new media downloads disabled. All six images decoded from local URLs: 3264×1484,
+4608×2096 (two images) and 1864×4096 (three images). Horizontal gallery browsing,
+the six local paths, the saved/total count and a full-text fixture were inspected
+in the in-app browser with zero collection requests. Screenshot and dimensional
+evidence remain in the ignored 2026-10-27 QA directory. The user's main library
+was inspected read-only; collection results were stored only in the isolated QA
+database/media directory, using the existing sign-in browser profile.
+
+Final validation: all 141 unit tests and 44 local integration tests pass, plus
+type checking, production build and Git whitespace checks. The integration suite
+includes offline image/video playback, captions, local paths, source ownership,
+capacity, request pacing, interrupted work and database upgrades. The online
+player fixture loops its short sample to avoid racing clip completion when
+asserting playback; production playback behavior is unchanged. The detailed
+resolved-gap inventory and remaining source boundaries are in OFFLINE_AUDIT.md.

@@ -14,7 +14,7 @@ test('one feed control waits for local media before showing successful sync, the
   browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){return{url:()=>url}as any;}},
   readListing:async page=>{
    const prefix=page.url().includes('?')?'b':'a';
-   const posts:PostObservation[]=Array.from({length:5},(_,i)=>({id:`t3_${prefix}${i}`,subreddit:'aww',title:'Saved history '+prefix+i,permalink:`/r/aww/comments/${prefix}${i}/`,created:{epochMs:old-i,precisionMs:1000},source:'live',observedAt:Date.now(),media:['Text']}));
+   const posts:PostObservation[]=Array.from({length:5},(_,i)=>({id:`t3_${prefix}${i}`,subreddit:'aww',title:'Saved history '+prefix+i,permalink:`/r/aww/comments/${prefix}${i}/`,created:{epochMs:old-i,precisionMs:1000},source:'live',observedAt:Date.now(),body:'Complete fixture body',media:['Text']}));
    return{account:'fixture_user',posts:[{...posts[0]!,id:'t3_img',title:'Saved offline image',permalink:'/r/aww/comments/img/',media:['Image'],attachments:[{kind:'image',url:'https://i.redd.it/fixture.png'}]},...posts],ordinary:posts.map(post=>({id:post.id,createdMs:post.created.epochMs,precisionMs:1000})),unknownTime:false,omissions:0,next:`https://old.reddit.com/r/aww/new/?after=t3_${prefix}4`,empty:false,signature:prefix};
   }},media:{fetch:async()=>{downloads++;started=true;await gate;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
  app.store.addSubreddit('aww');const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});

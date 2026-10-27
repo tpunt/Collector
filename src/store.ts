@@ -10,7 +10,7 @@ import type { HistoryMonths } from './history-window.ts';
 import type { ThreadSnapshot } from './extract.ts';
 import type { ArchiveFetchState } from './archive-fetch-state.ts';
 import type { MediaReference } from './media-reference.ts';
-import {postMediaReferences} from './media-reference.ts';
+import {postMediaReferences,isGallery,completeCollection} from './media-reference.ts';
 import {mediaKey} from './media-key.ts';
 import { DEFAULT_STORAGE_CAP, storageCap, StorageLimitError } from './storage-limit.ts';
 import type { StorageStatus } from './storage-limit.ts';
@@ -54,8 +54,10 @@ export interface StoredPost {
   createdMs: number;
   precisionMs: number;
   body: string | null;
+  bodySync:{status:'pending'|'fetching'|'ready'|'failed';reason:string|null}|null;
   media: MediaKind[];
   attachments: MediaReference[];
+  mediaDiscoveryComplete:boolean;
   outbound: string|null;
   availability: Availability;
   source: 'live' | 'archive';
@@ -76,6 +78,7 @@ export interface FeedSyncSummary {
   reason:string|null;
 }
 export interface FeedSource {
+  text:{total:number;ready:number;pending:number;failed:number};
   name: string;
   postCount: number;
   historyMonths: HistoryMonths;
@@ -280,8 +283,10 @@ export class ReaderStore {
       id: String(row.id), subreddit: String(row.subreddit), permalink: String(row.permalink), title: String(row.title),
       createdMs: Number(row.created_ms), precisionMs: Number(row.precision_ms),
       body: availability === 'available' ? row.body as string | null : null,
+      bodySync:this.bodySync(String(row.id)),
       media: availability === 'available' ? [...new Set<MediaKind>([...JSON.parse(String(row.media ?? '[]')), ...attachments.map(item=>item.kind==='image'?'Image' as const:'Video' as const)])] : [],
       attachments,
+      mediaDiscoveryComplete:!isGallery(row.outbound as string|null)||completeCollection('reddit:'+String(row.id),attachments),
       outbound: availability === 'available'?row.outbound as string|null:null,
       availability, source: row.source as StoredPost['source'], exportId: row.export_id as string | null,
       observedAt: Number(row.observed_at), capturedAt: row.captured_at as number | null,
@@ -301,10 +306,34 @@ export class ReaderStore {
   *readyMediaIds():Generator<string> {
     for(const row of this.db.prepare("SELECT post_id FROM media_sync WHERE status='ready'").iterate())yield String(row.post_id);
   }
+  implementationLimitedMedia():string[] {
+    return this.db.prepare("SELECT post_id FROM media_sync WHERE status='unavailable' AND (reason LIKE 'Complete gallery downloads%' OR reason LIKE '%per-file download limit%' OR reason LIKE '%media manifest%' OR reason LIKE '%single-file video representation%')").all().map(row=>String(row.post_id));
+  }
   pendingMedia(source:string,session:string,limit=25):string[] {
     return this.db.prepare(`SELECT m.post_id FROM media_sync m JOIN posts p ON p.id=m.post_id
-      WHERE p.subreddit=? AND m.status IN ('pending','failed') AND (m.session IS NULL OR m.session<>?)
+      WHERE p.subreddit=? AND (m.status IN ('pending','failed') OR (m.status='unavailable' AND m.reason LIKE 'Complete gallery downloads%')) AND (m.session IS NULL OR m.session<>?)
       ORDER BY p.created_ms DESC,p.id DESC LIMIT ?`).all(subredditName(source),session,limit).map(row=>String(row.post_id));
+  }
+  pendingBodies(source:string,excluded:ReadonlySet<string>=new Set(),limit=25):string[] {
+    const result:string[]=[];
+    for(const row of this.db.prepare(`SELECT p.id FROM posts p JOIN body_sync b ON b.post_id=p.id
+      WHERE p.subreddit=? AND b.status IN ('pending','failed')
+      ORDER BY p.created_ms DESC,p.id DESC`).iterate(subredditName(source))){
+      const id=String(row.id);if(!excluded.has(id))result.push(id);if(result.length>=limit)break;
+    }
+    return result;
+  }
+  private missingBodyCount(source:string):number {return Number(this.db.prepare("SELECT count(*) AS n FROM body_sync b JOIN posts p ON p.id=b.post_id WHERE p.subreddit=? AND b.status<>'ready'").get(subredditName(source))!.n);}
+  offlineText(source:string){
+    const result={total:0,ready:0,pending:0,failed:0};
+    for(const row of this.db.prepare('SELECT b.status,count(*) AS n FROM body_sync b JOIN posts p ON p.id=b.post_id WHERE p.subreddit=? GROUP BY b.status').all(subredditName(source))){const key=row.status==='fetching'?'pending':row.status as 'pending'|'ready'|'failed';result[key]+=Number(row.n);result.total+=Number(row.n);}return result;
+  }
+  bodySync(input:string):{status:'pending'|'fetching'|'ready'|'failed';reason:string|null}|null {
+    const row=this.db.prepare('SELECT status,reason FROM body_sync WHERE post_id=?').get(postId(input));return row?row as unknown as {status:'pending'|'fetching'|'ready'|'failed';reason:string|null}:null;
+  }
+  setBodySync(generation:number,input:string,status:'pending'|'fetching'|'failed',reason:string|null=null){
+    if(generation!==this.generation)return;this.db.prepare('UPDATE body_sync SET status=?,reason=? WHERE post_id=?').run(status,reason,postId(input));
+    this.db.prepare("UPDATE metadata SET value=value+1 WHERE key='content_revision'").run();
   }
   offlineMedia(source:string):OfflineMediaCounts {
     const result:OfflineMediaCounts={total:0,ready:0,pending:0,failed:0,unavailable:0};
@@ -318,10 +347,10 @@ export class ReaderStore {
   feedSync(input:string):FeedSyncSummary {
     const name=subredditName(input),row=this.db.prepare('SELECT * FROM feed_sync WHERE subreddit=?').get(name);
     if(row){
-      const media=this.offlineMedia(name),missing=['complete','gaps'].includes(String(row.state))&&(media.pending>0||media.failed>0);
+      const media=this.offlineMedia(name),missing=['complete','gaps'].includes(String(row.state))&&(media.pending>0||media.failed>0||this.missingBodyCount(name)>0);
       return {state:missing?'incomplete':row.state as FeedSyncSummary['state'],lastSuccessAt:row.last_success_ms as number|null,
         lastCompletedAt:row.last_completed_ms as number|null,startedAt:Number(row.started_ms),
-        reason:missing?'Some media still needs saving; Resume to finish this feed':row.reason as string|null};
+        reason:missing?'Some post content still needs saving; Resume to finish this feed':row.reason as string|null};
     }
     return {state:'never',lastSuccessAt:null,lastCompletedAt:null,startedAt:null,reason:null};
   }
@@ -362,11 +391,11 @@ export class ReaderStore {
       const row=this.db.prepare("SELECT * FROM feed_sync WHERE subreddit=? AND run_id=? AND state='running'").get(name,runId);if(!row)return;
       const targets=(JSON.parse(String(row.targets)) as string[]).map(id=>this.getTarget(id));
       const unfinished=targets.find(target=>target?.status!=='done');
-      const media=this.offlineMedia(name);
+      const media=this.offlineMedia(name),bodies=this.missingBodyCount(name);
       let reason=unfinished?.reason??(targets.some(target=>!target)?'A sync checkpoint is no longer available':null);
       let state:FeedSyncSummary['state']='complete';
-      if(targets.some(target=>target?.status!=='done')||media.pending||media.failed){
-        state='incomplete';reason??=media.failed?`${media.failed} media post(s) failed to save; Resume to retry`:media.pending?`${media.pending} media post(s) still need saving; Resume to continue`:'Post collection is unfinished; Resume to continue';
+      if(targets.some(target=>target?.status!=='done')||media.pending||media.failed||bodies){
+        state='incomplete';reason??=bodies?`${bodies} post body/bodies still need saving; Resume to retry`:media.failed?`${media.failed} media post(s) failed to save; Resume to retry`:media.pending?`${media.pending} media post(s) still need saving; Resume to continue`:'Post collection is unfinished; Resume to continue';
       }else{
         const gaps:string[]=[];
         if(targets.some(target=>target?.completion==='listing-end'))gaps.push('Reached the end Reddit serves; full historical coverage could not be verified');
@@ -498,7 +527,7 @@ export class ReaderStore {
       (SELECT count(*) FROM posts p WHERE p.subreddit = s.name AND EXISTS(SELECT 1 FROM observations WHERE post_id = p.id AND source = 'live')) AS live_count,
       (SELECT count(*) FROM posts p WHERE p.subreddit = s.name AND EXISTS(SELECT 1 FROM observations o WHERE o.post_id = p.id)) AS post_count
       FROM feeds s WHERE s.subscribed=1 ORDER BY s.name`).all()
-      .map(row => ({ name: String(row.name), postCount: Number(row.post_count), historyMonths: historyMonths(Number(row.history_months)),
+      .map(row => ({ name: String(row.name),text:this.offlineText(String(row.name)), postCount: Number(row.post_count), historyMonths: historyMonths(Number(row.history_months)),
         historyTarget: row.history_target_id ? this.getTarget(String(row.history_target_id)) : null, oldestMs: row.oldest_ms as number | null, newestMs: row.newest_ms as number | null,
         liveCount: Number(row.live_count), archiveCount: Number(row.post_count)-Number(row.live_count),sync:this.feedSync(String(row.name)) }));
   }
@@ -647,6 +676,15 @@ export class ReaderStore {
       this.db.prepare("UPDATE metadata SET value=value+1 WHERE key='content_revision'").run();
     });
   }
+  savePostBody(generation:number,input:string,body:string,observedAt=Date.now()) {
+    this.contentTransaction(()=>{
+      if(generation!==this.generation)throw new StaleGenerationError();
+      const post=this.getPost(input);if(!post||post.availability!=='available')return;
+      this.writePost(validateObservation({id:post.id,subreddit:post.subreddit,title:post.title,permalink:post.permalink,
+        created:{epochMs:post.createdMs,precisionMs:post.precisionMs},source:'live',observedAt,body,
+        media:post.media,outbound:post.outbound??undefined}));
+    });
+  }
   saveSnapshot(generation: number, snapshot: ThreadSnapshot): void {
     this.contentTransaction(() => {
       if (generation !== this.generation) throw new StaleGenerationError();
@@ -753,6 +791,12 @@ export class ReaderStore {
       this.db.prepare('DELETE FROM media_evidence WHERE post_id=?').run(record.id);
     this.syncMediaOwnership(record.id);
     this.updateMediaSync(record.id);
+    const preferred=this.getPost(record.id)!;
+    if(preferred.availability==='available'&&preferred.media.includes('Text')){
+      const status=record.bodyNeedsFetch||preferred.body===null?'pending':'ready';
+      this.db.prepare(`INSERT INTO body_sync(post_id,status) VALUES (?,?) ON CONFLICT(post_id) DO UPDATE SET status=excluded.status,reason=NULL
+        WHERE ? OR (? AND ?='live')`).run(record.id,status,Number(Boolean(record.bodyNeedsFetch)),Number(record.body!==undefined),record.source);
+    }else this.db.prepare('DELETE FROM body_sync WHERE post_id=?').run(record.id);
     this.db.prepare("UPDATE metadata SET value=value+1 WHERE key='content_revision'").run();
     return Number(insert.changes);
   }
