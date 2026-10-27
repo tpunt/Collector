@@ -5,7 +5,7 @@
 This section records the latest user decisions and takes precedence over older
 planning below. The core offline-content work now includes full post text,
 complete native galleries, archive media metadata and resumable downloads.
-Backup/read/search/cleanup/launcher additions below remain planned. Keep the app a compact, on-demand local web reader.
+Read tracking is implemented; backup/search/cleanup/launcher additions below are in progress. Keep the app a compact, on-demand local web reader.
 
 Request pacing now uses a fresh uniform random 4–6 second delay after response
 readiness, shared by browser, archive and media traffic, including redirects and
@@ -71,7 +71,7 @@ integration or a generic plugin framework in this round.
 - Verify encrypted round trips, corruption, large files, interruption, disk/cap
   failures and preservation of deletion exclusions.
 
-### 2. Viewport-based read tracking
+### 2. Viewport-based read tracking — implemented
 
 - Add persistent local read/unread status and All / Unread / Read filtering.
   Reading is local to Collector and does not interact with Reddit's account.

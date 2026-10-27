@@ -62,3 +62,5 @@
 .feed-page-note{color:#85949d;font-size:10px;line-height:1.7;margin:13px 2px 0;max-width:850px}
 @container(max-width:420px){.feed-card-body{grid-template-columns:1fr;gap:14px}.feed-card-header{flex-wrap:wrap}.feed-header-actions{margin-left:auto}.feed-provenance{display:block}.feed-history-settings{width:100%}.feed-card .feed-facts dt{flex-basis:104px}.feed-detail-group h3{margin-bottom:6px}.feed-row-actions{margin-left:0}.feed-history-controls{gap:6px}.feed-card-body{margin-top:15px}.feed-header-actions{gap:9px}}
 @media(max-width:620px){.feed-card{padding:13px 13px 0}.feed-list{gap:10px}}
+
+.read-toggle{font-size:14px;color:#9cb9a8;padding:3px}.post-card.is-read .post-title{color:#a5b2b9}.filter-inputs{flex-wrap:wrap}.feed-meta>span>button{font-size:inherit;padding:0;color:var(--green)}

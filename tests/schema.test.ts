@@ -34,7 +34,7 @@ test('the additive text-work upgrade preserves a version-one library and queues 
   store.addSubreddit('python');store.setSetting('storageCapBytes',1_000_000_000);
   store.importArchiveBatch(store.generation,[{id:'abc',subreddit:'python',title:'Retained archive',body:'Complete archive text',permalink:'/r/python/comments/abc/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'upgrade',observedAt:1800000000000,media:['Text']}]);
   const target=store.createTarget({subreddit:'python',upperMs:1800000000000});store.commitBatch({generation:store.generation,targetId:target,observations:[{id:'def',subreddit:'python',title:'Missing body',permalink:'/r/python/comments/def/',created:{epochMs:1700000000001,precisionMs:1000},source:'live',observedAt:1800000000000,media:['Text']}],continuation:null});
-  store.close();const old=new DatabaseSync(path);old.exec('DROP TABLE body_sync; PRAGMA user_version=1;');old.close();
+  store.close();const old=new DatabaseSync(path);old.exec('DROP TABLE read_states; DROP TABLE body_sync; PRAGMA user_version=1;');old.close();
   store=new ReaderStore(path);assert.equal(store.getPost('abc')?.body,'Complete archive text');assert.equal(store.getPost('def')?.title,'Missing body');assert.equal(store.bodySync('abc')?.status,'ready');assert.equal(store.bodySync('def')?.status,'pending');assert.deepEqual(store.pendingBodies('python'),['t3_def']);assert.equal(store.getSetting('storageCapBytes'),1_000_000_000);assert.deepEqual(store.followedSources(),['python']);
  }finally{store.close();await rm(directory,{recursive:true,force:true});}
 });

@@ -47,6 +47,7 @@ export interface HistoryTarget {
   boundary: { olderIds: string[]; batches: number; lastSignature: string | null; repeats: number };
 }
 export interface StoredPost {
+  readAt:number|null;
   id: string;
   subreddit: string;
   permalink: string;
@@ -281,6 +282,7 @@ export class ReaderStore {
     const attachments = availability === 'available' ? postMediaReferences(row.outbound as string|null,JSON.parse(String(row.discovered_attachments ?? row.attachments ?? '[]')) as MediaReference[]) : [];
     return {
       id: String(row.id), subreddit: String(row.subreddit), permalink: String(row.permalink), title: String(row.title),
+      readAt:(this.db.prepare('SELECT read_at FROM read_states WHERE post_id=?').get(String(row.id))?.read_at as number|undefined)??null,
       createdMs: Number(row.created_ms), precisionMs: Number(row.precision_ms),
       body: availability === 'available' ? row.body as string | null : null,
       bodySync:this.bodySync(String(row.id)),
@@ -423,7 +425,7 @@ export class ReaderStore {
 
   clearContent(): number {
     const generation=this.transaction(() => {
-      this.db.exec(`DELETE FROM feed_sync; DELETE FROM archive_fetches; DELETE FROM thread_snapshots; UPDATE feeds SET history_target_id=NULL,requested_ms=NULL;
+      this.db.exec(`DELETE FROM read_states; DELETE FROM feed_sync; DELETE FROM archive_fetches; DELETE FROM thread_snapshots; UPDATE feeds SET history_target_id=NULL,requested_ms=NULL;
         UPDATE metadata SET value = value + 1 WHERE key = 'generation';
         DELETE FROM comment_states WHERE availability='available';
         DELETE FROM targets; DELETE FROM observations; DELETE FROM media_sync; DELETE FROM media_evidence; DELETE FROM post_media;
@@ -611,11 +613,23 @@ export class ReaderStore {
     });
   }
 
-  queryFeed(input: { subreddit?: string; media?: MediaFilter; text?: string; afterMs?: number; beforeMs?: number; cursor?: string; limit?: number } = {}) {
+  setRead(input:string,read:boolean):StoredPost {
+    if(typeof read!=='boolean')throw new Error('Invalid read status');
+    const id=postId(input);if(!this.getPost(id))throw new Error('Post is no longer stored');
+    if(read)this.db.prepare('INSERT OR IGNORE INTO read_states VALUES (?,?)').run(id,Date.now());
+    else this.db.prepare('DELETE FROM read_states WHERE post_id=?').run(id);
+    return this.getPost(id)!;
+  }
+  queryFeed(input: { subreddit?: string; media?: MediaFilter; text?: string; read?:string; readBefore?:number; afterMs?: number; beforeMs?: number; cursor?: string; limit?: number } = {}) {
     const limit = Math.min(100, Math.max(1, input.limit ?? 50));
     const clauses: string[] = ["EXISTS(SELECT 1 FROM feeds f WHERE f.name=p.subreddit AND f.subscribed=1)"];
     const params: (string | number)[] = [];
     if (!Number.isInteger(limit)) throw new Error('Invalid feed limit');
+    if(input.read&&!['all','read','unread'].includes(input.read))throw new Error('Invalid read filter');
+    const readBefore=input.readBefore??Date.now();if(!Number.isSafeInteger(readBefore)||readBefore<0)throw new Error('Invalid reading snapshot');
+    if(input.read&&input.read!=='all'){
+      clauses.push(`${input.read==='unread'?'NOT ':''}EXISTS(SELECT 1 FROM read_states r WHERE r.post_id=p.id AND r.read_at<=?)`);params.push(readBefore);
+    }
     if (input.subreddit) { clauses.push('p.subreddit = ?'); params.push(subredditName(input.subreddit)); }
     for (const [value, operator] of [[input.afterMs, '>='], [input.beforeMs, '<']] as const) {
       if (value !== undefined) { if (!Number.isSafeInteger(value)) throw new Error('Invalid date filter'); clauses.push(`p.created_ms ${operator} ?`); params.push(value); }

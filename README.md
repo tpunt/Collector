@@ -2,7 +2,16 @@
 
 A local web app for reading selected subreddits on demand. Uses its own signed-in Chrome profile, Playwright, structured rendered Classic Reddit HTML, React, and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
 
-The [next-stage plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records encrypted backups, viewport-based read tracking, search scopes, storage cleanup, complete galleries and a launcher. These are planned additions; live-library encryption is deferred until after them.
+Viewport-based read tracking and complete native galleries are implemented. The [next-stage plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records the remaining encrypted backups, search scopes, storage cleanup and launcher. Live-library encryption is deferred until after them.
+
+Read status is local to Collector. A card is marked read after its full visible
+area has been shown for one second while the page is visible and unobscured.
+Tall cards accumulate viewed coverage; fast scrolling and incomplete media layout
+do not count. Use the circle beside a post to override its status. Mark unread
+stays unread while it remains on screen. All / Unread / Read filters compose with
+the existing filters; newly read cards stay in an Unread view until **Refresh
+view** or a filter change. Sync, import and restart retain read status. Deletion
+and Clear remove it with the content.
 
 ## Run
 
@@ -38,7 +47,7 @@ The server binds only to `127.0.0.1`, validates Host/Origin and requires a per-l
 
 ## Persistence
 
-New databases use schema version 2. Existing version-1 libraries receive one additive, transactional upgrade for durable post-text work, preserving content, media, preferences and deletion exclusions. Previously unverified live text is queued for the next explicit sync; startup makes no website requests. Unknown/prototype schemas and application identities are rejected before writes. To start fresh, stop the app, back up and move aside `reader.sqlite` together with any `reader.sqlite-wal` / `reader.sqlite-shm` files and the `media` directory, then restart. Keep `browser-profile` to retain the browser session.
+New databases use schema version 3, with an additive read-state upgrade for existing version-2 libraries. Existing version-1 libraries receive one additive, transactional upgrade for durable post-text work, preserving content, media, preferences and deletion exclusions. Previously unverified live text is queued for the next explicit sync; startup makes no website requests. Unknown/prototype schemas and application identities are rejected before writes. To start fresh, stop the app, back up and move aside `reader.sqlite` together with any `reader.sqlite-wal` / `reader.sqlite-shm` files and the `media` directory, then restart. Keep `browser-profile` to retain the browser session.
 
 Feed subscription, history limit, current history goal and newest-check boundary share one `feeds` row. `feed_sync` records completion separately from individual scan checkpoints. Date bounds define scan scope; there are no obsolete recent/since/all-time target types or first-page refresh timestamps. Post-to-media links determine file ownership across posts and communities, so deletion and Clear preserve shared files without a second ownership index. Post and comment removal evidence, exclusions and live/archive precedence remain enforced.
 

@@ -1,7 +1,11 @@
 import type {DatabaseSync} from 'node:sqlite';
 
-export const SCHEMA_VERSION=2;
+export const SCHEMA_VERSION=3;
 const APPLICATION_ID=0x52524452;
+const READ_SCHEMA=`CREATE TABLE read_states (
+  post_id TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+  read_at INTEGER NOT NULL CHECK(read_at>=0)
+); CREATE INDEX read_states_time ON read_states(read_at,post_id);`;
 const BODY_SCHEMA=`CREATE TABLE body_sync (
   post_id TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
   status TEXT NOT NULL CHECK(status IN ('pending','fetching','ready','failed')),
@@ -90,15 +94,16 @@ CREATE TABLE post_media (
 CREATE INDEX media_owner_post ON post_media(post_id);
 CREATE TABLE excluded_posts (post_id TEXT PRIMARY KEY, subreddit TEXT NOT NULL, deleted_at INTEGER NOT NULL);
 ${BODY_SCHEMA}
+${READ_SCHEMA}
 `;
 
-/** Unknown/prototype schemas are rejected. Version one has one additive,
- * transactional body-work upgrade; existing content and preferences are kept. */
+/** Unknown/prototype schemas are rejected. Published versions receive additive,
+ * transactional upgrades that preserve content and preferences. */
 export function initializeSchema(db:DatabaseSync):void {
   const version=Number(db.prepare('PRAGMA user_version').get()!.user_version);
   const application=Number(db.prepare('PRAGMA application_id').get()!.application_id);
   const empty=!db.prepare("SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").get();
-  if(!(version===0&&application===0&&empty)&&!([1,SCHEMA_VERSION].includes(version)&&application===APPLICATION_ID))
+  if(!(version===0&&application===0&&empty)&&!([1,2,SCHEMA_VERSION].includes(version)&&application===APPLICATION_ID))
     throw new Error(`Unsupported reader database schema (${version}). Back up and move aside reader.sqlite and its WAL/SHM files, then restart to create a fresh database.`);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;');
   if(empty){
@@ -118,8 +123,13 @@ export function initializeSchema(db:DatabaseSync):void {
         AND o.rowid=(SELECT rowid FROM observations WHERE post_id=p.id ORDER BY (source='live') DESC,observed_at DESC,source_key DESC LIMIT 1);
         UPDATE feed_sync SET state='incomplete',last_success_ms=NULL,reason='Post text needs verification; Sync to finish saving this feed'
           WHERE EXISTS(SELECT 1 FROM body_sync b JOIN posts p ON p.id=b.post_id WHERE p.subreddit=feed_sync.subreddit AND b.status<>'ready');
-        PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`);
+        PRAGMA user_version=2; COMMIT;`);
     }catch(error){db.exec('ROLLBACK');throw error;}
+  }
+  if(!empty&&version<3){
+    db.exec('BEGIN IMMEDIATE');
+    try{db.exec(READ_SCHEMA);db.exec('PRAGMA user_version=3; COMMIT;');}
+    catch(error){db.exec('ROLLBACK');throw error;}
   }
 }
 

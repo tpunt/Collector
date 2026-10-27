@@ -80,6 +80,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
         if(cleansContent)cleaningContent=true;
         try {
         switch (url.pathname) {
+          case '/api/read': json(res,{post:store.setRead(String(data.id),data.read as boolean)});return;
           case '/api/settings': {
             store.setStorageLimit(data.maxStoredBytes);
             if(store.storage.full){jobs.pause(STORAGE_CAP_MESSAGE);importer.stop();}
@@ -177,6 +178,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
         const media = url.searchParams.get('media') ?? undefined;
         if (media && !MEDIA_FILTERS.includes(media as MediaFilter)) throw new Error('Invalid media filter');
         json(res,store.queryFeed({subreddit:url.searchParams.get('subreddit') || undefined,media:media as MediaFilter | undefined,
+          read:url.searchParams.get('read')??undefined,readBefore:url.searchParams.has('readBefore')?Number(url.searchParams.get('readBefore')):undefined,
           text:(url.searchParams.get('q') ?? '').slice(0,500),afterMs:date(url.searchParams.get('after')),beforeMs:date(url.searchParams.get('before')),
           cursor:url.searchParams.get('cursor') || undefined})); return;
       }

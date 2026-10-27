@@ -395,3 +395,20 @@ samples verify exact 4/6-second endpoints, varying intermediate gaps, response
 completion, cancellation, shared archive/media pacing and video/audio hops.
 Local Chrome fixtures verify request gating and offline playback. No Reddit or
 other external collection requests were made for this change.
+
+## Read tracking — 27 October 2026
+
+Read status now persists independently of observations, with All/Unread/Read
+filters, stable unread-view snapshots, a Refresh view action and manual overrides.
+Viewport sampling requires one second of unobscured visible coverage; tall cards
+need every vertical section, and resizing resets coverage. Hidden tabs, dialogs,
+pending media layout and fast scrolling do not mark posts read. A manual unread
+override persists while the card stays on screen. Sync and import preserve read
+status; deleting/clearing content removes it. Version-two libraries receive an
+additive read-state upgrade, and version-one libraries traverse both upgrades.
+
+Validation: 145 unit tests, 45 local integration tests, type checking and build
+pass. The real Chrome fixture exercises hidden tabs, modal overlays, overrides,
+stable unread results, tall-card coverage and reload persistence. It caught and
+verified the fix for rounded corners interfering with obstruction hit tests.
+No website collection requests were made.

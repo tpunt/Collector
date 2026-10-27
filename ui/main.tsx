@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { StoredPost, HistoryTarget, FeedSource, OfflineMediaCounts } from '../src/store.ts';
 import type { ThreadSnapshot } from '../src/extract.ts';
@@ -7,6 +7,7 @@ import { historyLowerBound } from '../src/history-window.ts';
 import { HISTORY_OPTIONS } from '../src/history-window.ts';
 import type { HistoryMonths } from '../src/history-window.ts';
 import { PostMedia } from './Media.tsx';
+import {useReadTracking} from './read-tracking.ts';
 import { MEDIA_FILTERS } from '../src/domain.ts';
 import { GB } from '../src/storage-limit.ts';
 import type { StorageStatus } from '../src/storage-limit.ts';
@@ -50,6 +51,8 @@ function App() {
   const [state,setState]=useState<State|null>(null),[posts,setPosts]=useState<StoredPost[]>([]),[next,setNext]=useState<string|null>(null);
   const [view,setView]=useState(location.hash==='#feeds'?'feeds':'posts');
   const [source,setSource]=useState(''),[media,setMedia]=useState(''),[search,setSearch]=useState('');
+  const [readFilter,setReadFilter]=useState('all'),[readBefore,setReadBefore]=useState(Date.now);
+  const suppressedReads=useRef(new Set<string>());
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[modal,setModal]=useState<'source'|'history'|'import'|'clear'|'settings'|null>(null),[removeFeed,setRemoveFeed]=useState<string|null>(null);
   const [clearFeed,setClearFeed]=useState<string|null>(null);
   const [postToDelete,setPostToDelete]=useState<Pick<StoredPost,'id'|'title'|'subreddit'>|null>(null);
@@ -61,6 +64,7 @@ function App() {
   const [archiveFrom,setArchiveFrom]=useState(()=>new Date(historyLowerBound(1,Date.now())!).toISOString().slice(0,10)),[archiveTo,setArchiveTo]=useState(()=>new Date().toISOString().slice(0,10));
   const token=useRef(''),feedVersion=useRef(0),threadId=useRef<string|null>(null),pollVersion=useRef(''),stateVersion=useRef(0),currentQuery=useRef('');
   const params=new URLSearchParams();if(source)params.set('subreddit',source);if(media)params.set('media',media);if(search)params.set('q',search);
+  params.set('read',readFilter);params.set('readBefore',String(readBefore));
   if(currentQuery.current!==params.toString()){currentQuery.current=params.toString();feedVersion.current++;}
   const feeds=state?.feeds??[],activeFeeds=feeds.filter(syncing),pending=state?.targets.filter(target=>['queued','paused'].includes(target.status))??[];
   const count=source?feeds.find(feed=>feed.name===source)?.postCount??0:feeds.reduce((sum,feed)=>sum+feed.postCount,0);
@@ -86,7 +90,15 @@ function App() {
     catch(e){setError((e as Error).message);return null;}finally{setBusy(false);}
   }
   useEffect(()=>{void loadState().catch(e=>setError(e.message));const hash=()=>setView(location.hash==='#feeds'?'feeds':'posts');window.addEventListener('hashchange',hash);return()=>window.removeEventListener('hashchange',hash);},[]);
-  useEffect(()=>{const timer=setTimeout(()=>void loadFeed().catch(e=>setError(e.message)),200);return()=>clearTimeout(timer);},[source,media,search]);
+  const markRead=useCallback(async(id:string,read=true)=>{
+    const response=await fetch('/api/read',{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token.current},body:JSON.stringify({id,read})});
+    const value=await response.json();if(!response.ok){setError(value.error);throw new Error(value.error);}
+    setPosts(old=>old.map(post=>post.id===id?{...post,readAt:value.post.readAt}:post));
+    setThread(old=>old?.post.id===id?{...old,post:{...old.post,readAt:value.post.readAt}}:old);
+  },[]);
+  useReadTracking(view==='posts'&&!modal&&!thread&&!removeFeed&&!clearFeed&&!postToDelete&&Boolean(state),markRead,suppressedReads.current);
+  useEffect(()=>setReadBefore(Date.now()),[source,media,search]);
+  useEffect(()=>{const timer=setTimeout(()=>void loadFeed().catch(e=>setError(e.message)),200);return()=>clearTimeout(timer);},[source,media,search,readFilter,readBefore]);
   useEffect(()=>{
     let pending=false,disposed=false;
     const timer=setInterval(()=>{
@@ -170,15 +182,15 @@ function App() {
         </div><p className="feed-page-note" id="feed-history-note">Sync saves recent posts, unfinished history and supported media locally. Expanding the history limit starts a sync; reducing it keeps saved posts. Older archives and stored date ranges may have gaps.</p></>:<div className="empty-state"><h2>No feeds yet</h2><button className="button primary" onClick={()=>{setName('');setMonths(1);setModal('source');}}>Add a feed</button></div>}
       </section>:<>
         <section className="feed-tools" aria-label="Feed filters"><div className="type-tabs">{['',...MEDIA_FILTERS].map(type=><button key={type} className={media===type?'selected':''} onClick={()=>setMedia(type)}>{type||'All posts'}</button>)}</div>
-          <div className="filter-inputs"><select aria-label="Filter by subreddit" value={source} onChange={e=>setSource(e.target.value)}><option value="">All subreddits</option>{feeds.map(feed=><option key={feed.name} value={feed.name}>r/{feed.name}</option>)}</select><input className="search" aria-label="Search stored posts" placeholder="Search posts…" value={search} onChange={e=>setSearch(e.target.value)}/></div>
+          <div className="filter-inputs"><select aria-label="Read status" value={readFilter} onChange={e=>{setReadFilter(e.target.value);setReadBefore(Date.now());}}><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select><select aria-label="Filter by subreddit" value={source} onChange={e=>setSource(e.target.value)}><option value="">All subreddits</option>{feeds.map(feed=><option key={feed.name} value={feed.name}>r/{feed.name}</option>)}</select><input className="search" aria-label="Search stored posts" placeholder="Search posts…" value={search} onChange={e=>setSearch(e.target.value)}/></div>
         </section>
-        <div className="feed-meta"><span>Newest first</span>{currentFeed?<span>Last successful sync: {timestamp(currentFeed.sync.lastSuccessAt)} · {syncState(currentFeed)}{currentFeed.offline.total>0&&` · Media ${currentFeed.offline.ready}/${currentFeed.offline.total} offline`}</span>:<button onClick={()=>navigate('feeds')}>Manage feeds &amp; sync status →</button>}</div>
-        <div className="feed">{posts.map(post=><article className="post-card" key={post.id}>
+        <div className="feed-meta"><span>Newest first · <button onClick={()=>setReadBefore(Date.now())}>Refresh view</button></span>{currentFeed?<span>Last successful sync: {timestamp(currentFeed.sync.lastSuccessAt)} · {syncState(currentFeed)}{currentFeed.offline.total>0&&` · Media ${currentFeed.offline.ready}/${currentFeed.offline.total} offline`}</span>:<button onClick={()=>navigate('feeds')}>Manage feeds &amp; sync status →</button>}</div>
+        <div className="feed">{posts.map(post=><article className={"post-card "+(post.readAt!==null?"is-read":"")} data-post-id={post.id} data-read={post.readAt!==null} key={post.id}>
           <div className="post-content"><PostMedia post={post} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===post.subreddit)&&syncing(feeds.find(feed=>feed.name===post.subreddit)!))}>
             {mediaControls=><><div className="post-meta"><button onClick={()=>filterSource(post.subreddit)}>r/{post.subreddit}</button><time dateTime={new Date(post.createdMs).toISOString()}>{date(post.createdMs)}</time>{post.source==='archive'&&<span className="archive-label">Archive</span>}<div className="badges">{post.media.map(type=><span key={type}>{type}</span>)}{post.availability!=='available'&&<span>{post.availability}</span>}{mediaControls}</div></div>
             <button className="post-title" onClick={()=>void openThread(post.id)}>{post.title}</button>{media!=='Media'&&post.body&&<p className="post-preview">{post.body.slice(0,200)}</p>}</>}
           </PostMedia>
-          </div><div className="post-actions"><button className="read-thread" onClick={()=>void openThread(post.id)} aria-label={'Read thread: '+post.title}>↗</button><button className="delete-post danger" title="Delete post" disabled={busy} aria-label={'Delete post: '+post.title} onClick={()=>{setError('');setPostToDelete(post);}}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></svg></button></div>
+          </div><div className="post-actions"><button className="read-toggle" title={post.readAt!==null?"Mark unread":"Mark read"} aria-label={(post.readAt!==null?"Mark unread: ":"Mark read: ")+post.title} onClick={()=>{const read=post.readAt===null;if(!read)suppressedReads.current.add(post.id);else suppressedReads.current.delete(post.id);void markRead(post.id,read).catch(()=>{});}}>{post.readAt!==null?"●":"○"}</button><button className="read-thread" onClick={()=>void openThread(post.id)} aria-label={'Read thread: '+post.title}>↗</button><button className="delete-post danger" title="Delete post" disabled={busy} aria-label={'Delete post: '+post.title} onClick={()=>{setError('');setPostToDelete(post);}}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></svg></button></div>
         </article>)}</div>
         {!posts.length&&<div className="empty-state"><h2>{feeds.length?'No matching posts':'No feeds yet'}</h2><p>{feeds.length?'Refresh a feed or adjust your filters.':'Add a subreddit to get started.'}</p>{!feeds.length&&<button className="button primary" onClick={()=>navigate('feeds')}>Manage feeds</button>}</div>}
         {next&&<button className="button load-more" onClick={()=>void loadFeed(true)}>Load more</button>}
