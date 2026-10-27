@@ -5,7 +5,7 @@
 This section records the latest user decisions and takes precedence over older
 planning below. The core offline-content work now includes full post text,
 complete native galleries, archive media metadata and resumable downloads.
-Read tracking, encrypted backup/restore and indexed search scopes are implemented; cleanup/launcher additions below are in progress. Keep the app a compact, on-demand local web reader.
+Read tracking, encrypted backup/restore and indexed search scopes and storage management are implemented; the launcher addition below is in progress. Keep the app a compact, on-demand local web reader.
 
 Request pacing now uses a fresh uniform random 4–6 second delay after response
 readiness, shared by browser, archive and media traffic, including redirects and
@@ -99,7 +99,7 @@ integration or a generic plugin framework in this round.
 - Verify scope-specific matches, provenance, redaction, pagination and large
   libraries. Preserve filters against delayed responses.
 
-### 4. Storage breakdown and selective cleanup
+### 4. Storage breakdown and selective cleanup — implemented
 
 - Show space by subreddit and media type. Separate shared physical files and
   global database allocation so totals do not double-count shared media.

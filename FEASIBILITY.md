@@ -471,3 +471,26 @@ a real reclamation issue: cleared index segments needed rebuilding/optimization
 before VACUUM could reclaim their storage. Backup identity validation now also
 rejects noncanonical post/feed/exclusion IDs. Type checking, production build and
 Git whitespace checks pass. No external collection requests were made.
+
+## Storage management — 27 October 2026
+
+Settings now shows physical media/metadata and database/index allocation, with
+per-feed attribution that splits shared bytes without double-counting. Stored
+content from unsubscribed feeds remains manageable. Selective deletion defaults
+to read posts and supports feed, type and an exclusive UTC cutoff. Preview pauses
+collection, captures stable identities and revisions, and shows affected posts,
+reclaimable media and shared files retained. Confirmation rejects expired or
+changed selections. Batched deletion is atomic, preserves exclusions, removes
+read/discussion/search data and releases only media with no remaining owner.
+Reclaim compacts database/index space and removes unassigned files without
+pruning content. File/compaction failures are reported after logical deletion.
+
+Inventory reconciles missing local files and capacity accounting without network
+requests; unfinished work becomes retryable. Active downloads cannot overwrite
+newer file accounting during inspection. Backup preflight checks local inventory,
+and concurrent reads wait until a restore has published both database and cache.
+A browser regression exposed mobile overflow from an unbroken post body; the
+feed grid now constrains its column. The full 158 unit and 50 integration tests
+pass, along with type checking, production build and whitespace checks. The
+unit suite was run separately from the Chrome suite to avoid resource-contention
+timeouts in fixtures saving more than 100 files. No external collection was used.

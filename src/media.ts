@@ -19,6 +19,7 @@ export {mediaKey} from './media-key.ts';
 interface Cached { key: string; type: string; bytes: number }
 interface Task { postId: string; subreddit:string; revision:number; reference: MediaReference; generation: number; controller: AbortController; started?:boolean; pending?:Promise<unknown> }
 export interface MediaItem { key: string; kind: 'image' | 'video'; state: 'idle' | 'queued' | 'loading' | 'ready' | 'error'; url: string | null; localPath: string | null; message?: string;caption?:string }
+export interface MediaInventory {key:string;kind:'image'|'video'|'other';bytes:number;owners:{postId:string;feed:string}[]}
 export interface MediaDependencies { directory: string; queue: RequestQueue; fetch?: typeof fetch; onAccess: (error: AccessError) => void; maxRequests?: number; maxBytes?: number }
 
 /** Downloads public, observed media URLs. Browser navigation and CDN requests share one queue. */
@@ -67,6 +68,40 @@ export class MediaCache {
   async backupFiles():Promise<string[]> {
     await this.ready;
     return [...this.cached.keys()].filter(key=>this.store.hasMediaOwner(key)).flatMap(key=>[key,key+'.json']);
+  }
+  async inventory():Promise<MediaInventory[]> {
+    await this.ready;
+    for(const [name,previous] of [...this.diskFiles]){
+      const key=name.replace(/\.json$/,''),cached=this.cached.get(key);
+      const active=()=>{for(const taskKey of this.tasks.keys())if(taskKey.endsWith(':'+key))return true;return false;};
+      if(active())continue;
+      let bytes:number|undefined;
+      try{const file=await stat(join(this.options.directory,name));if(file.isFile())bytes=file.size;}
+      catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+      // A completed download may have published a replacement while stat was
+      // pending. Never overwrite its newer accounting with the earlier result.
+      if(active()||this.diskFiles.get(name)!==previous||this.cached.get(key)!==cached)continue;
+      if(bytes===undefined)this.diskFiles.delete(name);else this.diskFiles.set(name,bytes);
+      if(name.endsWith('.json'))this.metadataBytes+=(bytes??0)-previous;else this.bytes+=(bytes??0)-previous;
+    }
+    const keys=new Set([...this.cached.keys(),...[...this.diskFiles.keys()].map(name=>name.replace(/\.json$/,''))]),result:MediaInventory[]=[];
+    for(const key of keys){
+      const owners=this.store.mediaOwners(key),saved=this.cached.get(key);
+      if(saved&&(this.diskFiles.get(key)!==saved.bytes||!(this.diskFiles.get(key+'.json')??0))){
+        this.cached.delete(key);
+        for(const taskKey of this.states.keys())if(taskKey.endsWith(':'+key)&&!this.tasks.has(taskKey))this.states.delete(taskKey);
+        for(const owner of owners)if(this.store.mediaSync(owner.postId)?.status==='ready')this.store.setMediaSync(this.store.generation,owner.postId,'pending','Saved media changed or is missing; Sync to save it again');
+      }
+      const bytes=(this.diskFiles.get(key)??0)+(this.diskFiles.get(key+'.json')??0),current=this.cached.get(key);
+      if(bytes)result.push({key,kind:current?.type.startsWith('image/')?'image':current?.type.startsWith('video/')?'video':'other',bytes,owners});
+    }
+    return result;
+  }
+  async clearPosts(ids:string[],keys:string[]){
+    const selected=new Set(ids);
+    for(const task of this.tasks.values())if(selected.has(task.postId))task.controller.abort();
+    await this.clearMatching(task=>selected.has(task.postId),key=>selected.has(key.slice(0,key.lastIndexOf(':'))),keys);
+    await this.reconcile();
   }
   async reload(){
     await this.close();this.cached.clear();this.states.clear();this.diskFiles.clear();this.bytes=0;this.metadataBytes=0;this.reconciledRevision=null;

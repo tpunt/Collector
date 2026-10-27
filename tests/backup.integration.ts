@@ -3,6 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,rm,readFile} from 'node:fs/promises';
 import {createReadStream} from 'node:fs';
+import {setTimeout as delay} from 'node:timers/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {chromium} from 'playwright';
@@ -33,7 +34,13 @@ test('Settings creates a downloadable encrypted backup and validates before conf
   await page.getByLabel('Restore passphrase',{exact:true}).fill('backup fixture password');await page.getByRole('button',{name:'Validate backup',exact:true}).click();await page.getByRole('group',{name:'Confirm library replacement'}).waitFor();assert(app.store.getPost('later'));
   await page.getByRole('button',{name:'Keep current library',exact:true}).click();await page.getByRole('group',{name:'Confirm library replacement'}).waitFor({state:'detached'});assert(app.store.getPost('later'));
   await page.getByLabel('Restore passphrase',{exact:true}).fill('backup fixture password');await page.getByRole('button',{name:'Validate backup',exact:true}).click();await page.getByRole('group',{name:'Confirm library replacement'}).waitFor();
-  await page.getByRole('button',{name:'Replace library',exact:true}).click();await page.getByText('Library restored. Sync explicitly when ready; the current browser account will be verified.',{exact:true}).waitFor();
+  const reload=app.media.reload.bind(app.media);let release!:()=>void,entered!:()=>void;const waiting=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+  app.media.reload=async()=>{entered();await waiting;await reload();};
+  await page.getByRole('button',{name:'Replace library',exact:true}).click();await started;
+  let readCompleted=false;const reading=fetch(origin+'/api/storage').then(async response=>{readCompleted=true;assert.equal(response.status,200);return response.json();});
+  try{await delay(50);assert.equal(readCompleted,false,'Reads must wait until both the restored database and media are ready');}finally{release();}
+  assert.equal((await reading).feeds[0].posts,1);app.media.reload=reload;
+  await page.getByText('Library restored. Sync explicitly when ready; the current browser account will be verified.',{exact:true}).waitFor();
   assert.equal(app.store.getPost('later'),null);assert.notEqual(app.store.getPost('abc')!.readAt,null);assert(app.store.isPostExcluded('spam'));assert.equal(app.jobs.state.running,false);assert.equal(app.media.status.requests,0);
   const denied=await fetch(origin+'/api/restore/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});assert.equal(denied.status,403);
  }finally{await browser.close();await app.close();await rm(directory,{recursive:true,force:true});}

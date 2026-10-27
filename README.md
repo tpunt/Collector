@@ -2,7 +2,7 @@
 
 A local web app for reading selected subreddits on demand. Uses its own signed-in Chrome profile, Playwright, structured rendered Classic Reddit HTML, React, and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
 
-Viewport-based read tracking, encrypted backup/restore, scoped indexed search and complete native galleries are implemented. The [next-stage plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records the remaining storage cleanup and launcher. Live-library encryption is deferred until after them.
+Viewport-based read tracking, encrypted backup/restore, scoped indexed search, storage management and complete native galleries are implemented. The [next-stage plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records the remaining launcher. Live-library encryption is deferred until after them.
 
 Read status is local to Collector. A card is marked read after its full visible
 area has been shown for one second while the page is visible and unobscured.
@@ -63,6 +63,22 @@ include owned media, preferences, exclusions and read states, while excluding th
 browser profile. Restore keeps that profile and verifies its account on the next
 explicit Sync. Collection stays paused. See [backup format, temporary-space and
 recovery details](BACKUPS.md). The working library remains unencrypted.
+
+## Storage management
+
+Use **Settings → Manage storage** for physical database/index allocation and
+image/video cache sizes. Per-feed media totals split shared files between their
+owners; the database is global. Retained data from removed feeds is included.
+**Reclaim freed space** removes unowned cache files and compacts the database
+without deleting posts. Inspection only reads local files.
+
+Selective cleanup defaults to read posts. Choose a feed, post type and optional
+exclusive UTC cutoff, then **Preview cleanup**. Preview pauses collection and
+shows affected posts, media files and estimated media savings. **Delete posts**
+requires confirmation of that preview; changed content, ownership or selection
+requires a fresh preview. Deletion removes saved discussions/read states, keeps
+files still owned elsewhere, and records exclusions so sync/import cannot bring
+the posts back. There is no automatic eviction or history pruning.
 
 ## Persistence
 

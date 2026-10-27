@@ -16,6 +16,7 @@ import { DEFAULT_STORAGE_CAP, storageCap, StorageLimitError } from './storage-li
 import type { StorageStatus } from './storage-limit.ts';
 import {normalizeText} from './search.ts';
 import {ARCHIVE_JOIN,POST_BODY} from './reader-fields.ts';
+import type {CleanupCriteria} from './library-storage.ts';
 
 // A listing can omit fields that an archive already saved. Compose the reader
 // view without relabelling archive evidence as a new live observation.
@@ -497,6 +498,22 @@ export class ReaderStore {
   sourceRevision(input:string):number {return this.getSetting<number>('sourceRevision:'+subredditName(input))??0;}
   ownedMediaKeys(input:string):string[] {return this.db.prepare('SELECT DISTINCT m.key FROM post_media m JOIN posts p ON p.id=m.post_id WHERE p.subreddit=?').all(subredditName(input)).map(row=>String(row.key));}
   hasMediaOwner(key:string):boolean {return Boolean(this.db.prepare('SELECT 1 FROM post_media WHERE key=? LIMIT 1').get(key));}
+  mediaOwners(key:string):{postId:string;feed:string}[]{return this.db.prepare('SELECT p.id AS postId,p.subreddit AS feed FROM post_media m JOIN posts p ON p.id=m.post_id WHERE m.key=? ORDER BY p.id').all(key) as unknown as {postId:string;feed:string}[];}
+  storageFeeds(){return this.db.prepare(`SELECT f.name AS feed,f.subscribed,count(p.id) AS posts FROM feeds f LEFT JOIN posts p ON p.subreddit=f.name AND EXISTS(SELECT 1 FROM observations WHERE post_id=p.id) GROUP BY f.name ORDER BY f.name`).all().map(row=>({feed:String(row.feed),subscribed:Boolean(row.subscribed),posts:Number(row.posts)}));}
+  cleanupIds(criteria:CleanupCriteria):string[]{
+    const clauses=['1'],params:(string|number)[]=[];
+    if(criteria.feed){clauses.push('p.subreddit=?');params.push(criteria.feed);}
+    if(criteria.beforeMs!==null){clauses.push('p.created_ms<?');params.push(criteria.beforeMs);}
+    if(criteria.readOnly)clauses.push('EXISTS(SELECT 1 FROM read_states WHERE post_id=p.id)');
+    if(criteria.kind){
+      const kinds=criteria.kind==='Media'?['Image','Video']:[criteria.kind];
+      clauses.push(`coalesce(p.live_availability,o.availability)='available' AND (`+kinds.map(kind=>{
+        params.push(kind,kind==='Image'?'image':kind==='Video'?'video':'');
+        return `(EXISTS(SELECT 1 FROM json_each(${POST_MEDIA}) WHERE value=?) OR has_media_reference(${POST_OUTBOUND},coalesce((SELECT attachments FROM media_evidence WHERE post_id=p.id),${POST_ATTACHMENTS}),?))`;
+      }).join(' OR ')+')');
+    }
+    return this.db.prepare(`SELECT p.id FROM posts p JOIN observations o ON o.rowid=(SELECT rowid FROM observations WHERE post_id=p.id ORDER BY (source='live') DESC,observed_at DESC,source_key DESC LIMIT 1) ${ARCHIVE_JOIN} WHERE ${clauses.join(' AND ')} ORDER BY p.created_ms DESC,p.id DESC`).all(...params).map(row=>String(row.id));
+  }
   private syncMediaOwnership(id:string) {
     this.db.prepare('DELETE FROM post_media WHERE post_id=?').run(id);
     const insert=this.db.prepare('INSERT OR IGNORE INTO post_media VALUES (?,?)');
@@ -506,16 +523,23 @@ export class ReaderStore {
     return Boolean(this.db.prepare('SELECT 1 FROM excluded_posts WHERE post_id=?').get(postId(input)));
   }
   deletePost(input:string):string[] {
-    const id=postId(input);
+    return this.deletePosts([input]);
+  }
+  deletePosts(inputs:string[]):string[] {
+    this.compactionWarning=null;
+    const ids=[...new Set(inputs.map(postId))];if(!ids.length)return[];
     const keys=this.transaction(()=>{
+      const owned=new Set<string>();
+      for(const id of ids){
       const post=this.getPost(id);
-      if(!post){if(this.isPostExcluded(id))return [];throw new Error('Post not found');}
+      if(!post){if(this.isPostExcluded(id))continue;throw new Error('Post not found');}
       // Keep only identity and deletion time as the user's persistent exclusion preference.
       this.db.prepare('INSERT OR IGNORE INTO excluded_posts VALUES (?,?,?)').run(id,post.subreddit,Date.now());
       this.db.prepare('DELETE FROM comment_states WHERE post_id=?').run(id);
-      const owned=this.db.prepare('SELECT key FROM post_media WHERE post_id=?').all(id).map(row=>String(row.key));
+      for(const row of this.db.prepare('SELECT key FROM post_media WHERE post_id=?').all(id))owned.add(String(row.key));
       this.db.prepare('DELETE FROM posts WHERE id=?').run(id);
-      const released=owned.filter(key=>!this.hasMediaOwner(key));
+      }
+      const released=[...owned].filter(key=>!this.hasMediaOwner(key));
       this.db.exec("UPDATE metadata SET value=value+1 WHERE key IN ('content_revision','media_sync_revision')");
       return released;
     });
@@ -536,14 +560,15 @@ export class ReaderStore {
     });
     this.compactContent();
   }
-  private compactContent() {
+  compactStorage(){this.compactContent('Content kept');}
+  private compactContent(message='Content cleared') {
     // Compaction is best effort; logical Clear and file cleanup must still finish.
     this.compactionWarning = null;
     try {
       const empty=!this.db.prepare('SELECT 1 FROM search_text LIMIT 1').get();
       this.db.exec(`INSERT INTO search_index(search_index) VALUES ('${empty?'rebuild':'optimize'}'); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);`);
     }
-    catch { this.compactionWarning = 'Content cleared. Database compaction failed; some allocated space may remain in use.'; }
+    catch { this.compactionWarning = message+'. Database compaction failed; some allocated space may remain in use.'; }
   }
 
   getSetting<T>(key: string): T | null {

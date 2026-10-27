@@ -63,6 +63,7 @@ export class LibraryBackups {
     const signal=clientSignal?AbortSignal.any([clientSignal,this.controller.signal]):this.controller.signal;
     const secret=password(passphrase,true),directory=await this.stage(),snapshot=join(directory,'reader.sqlite'),output=join(directory,'backup.age');
     try{
+      await this.media.inventory();
       await this.store.snapshot(snapshot);await chmod(snapshot,0o600);
       signal.throwIfAborted();
       const files:BackupFile[]=[];

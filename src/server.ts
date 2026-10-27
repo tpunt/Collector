@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual, randomUUID } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { extname, resolve, sep, join, dirname } from 'node:path';
 import {createReadStream} from 'node:fs';
@@ -20,6 +20,8 @@ import type { MediaDependencies } from './media.ts';
 import { RequestQueue } from './request-gate.ts';
 import { STORAGE_CAP_MESSAGE } from './storage-limit.ts';
 import {LibraryBackups,recoverLibraryRestore} from './library-backup.ts';
+import {cleanupCriteria,cleanupPreview,storageBreakdown} from './library-storage.ts';
+import type {CleanupCriteria} from './library-storage.ts';
 
 export function createReaderServer(options: { database?: string; port?: number; backup?:{workFactor?:number}; archive?:{fetch?:typeof fetch}; jobs?: JobDependencies; media?: Partial<Pick<MediaDependencies,'directory'|'fetch'|'maxBytes'|'maxRequests'>> } = {}) {
   const database=options.database??databasePath;
@@ -45,7 +47,9 @@ export function createReaderServer(options: { database?: string; port?: number; 
   const dist = fileURLToPath(new URL('../dist/', import.meta.url));
   let origin = '';
   let cleaningContent=false;
-  const cleanupPaths=new Set(['/api/remove','/api/clear-source','/api/delete-post','/api/clear','/api/backup/create','/api/restore/commit']);
+  let replacement:Promise<void>|null=null;
+  const cleanupPlans=new Map<string,{ids:string[];criteria:CleanupCriteria;revision:number;mediaRevision:number;expires:number}>();
+  const cleanupPaths=new Set(['/api/remove','/api/clear-source','/api/delete-post','/api/clear','/api/backup/create','/api/restore/commit','/api/storage/preview','/api/storage/delete','/api/storage/compact']);
   const stopPaths=new Set(['/api/pause','/api/import/stop','/api/archive/stop','/api/sign-in/finish']);
   const assertCleanupIdle=(path:string)=>{if(cleaningContent&&!stopPaths.has(path))throw new Error('Content cleanup is still in progress. Try again when it finishes.');};
   const quiesce=async()=>{await archive.close();await importer.close();await jobs.close();await media.close();};
@@ -67,6 +71,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
     try {
       if (req.headers.host !== new URL(origin).host || (req.headers.origin && req.headers.origin !== origin) || req.headers['sec-fetch-site'] === 'cross-site') { json(res, { error: 'Local requests only' },403); return; }
       const url = new URL(req.url ?? '/', origin);
+      if(req.method==='GET'&&replacement)await replacement;
       if(backups.recoveryRequired)throw new Error('Restore recovery requires an application restart; library access is blocked until recovery');
       if (req.method === 'POST') {
         const supplied = String(req.headers['x-reader-token'] ?? '');
@@ -95,12 +100,34 @@ export function createReaderServer(options: { database?: string; port?: number; 
         if(cleansContent)cleaningContent=true;
         try {
         switch (url.pathname) {
+          case '/api/storage/preview': {
+            const criteria=cleanupCriteria(data);if(criteria.feed&&!store.storageFeeds().some(feed=>feed.feed===criteria.feed))throw new Error('Choose a stored feed');
+            await quiesce();const inventory=await media.inventory();
+            const {ids,...preview}=cleanupPreview(store,inventory,criteria),id=randomUUID();cleanupPlans.clear();
+            cleanupPlans.set(id,{ids,criteria,revision:store.contentRevision,mediaRevision:media.status.revision,expires:Date.now()+10*60_000});
+            json(res,{...preview,id});return;
+          }
+          case '/api/storage/discard': cleanupPlans.delete(String(data.id));json(res,{ok:true});return;
+          case '/api/storage/compact': await quiesce();await media.reconcile();store.compactStorage();json(res,{warning:store.compactionWarning});return;
+          case '/api/storage/delete': {
+            if(data.confirm!==true)throw new Error('Confirm deleting the previewed posts first');
+            const id=String(data.id),plan=cleanupPlans.get(id);
+            if(!plan||plan.expires<Date.now())throw new Error('Cleanup preview expired; preview again');
+            await quiesce();await media.inventory();
+            if(plan.revision!==store.contentRevision||plan.mediaRevision!==media.status.revision||JSON.stringify(plan.ids)!==JSON.stringify(store.cleanupIds(plan.criteria)))throw new Error('The library changed; preview cleanup again');
+            cleanupPlans.delete(id);const keys=store.deletePosts(plan.ids);let warning=store.compactionWarning;
+            try{await media.clearPosts(plan.ids,keys);}catch{warning=[warning,'Posts deleted, but some files could not be removed. Restart to retry file cleanup.'].filter(Boolean).join(' ');}
+            json(res,{deleted:plan.ids.length,warning,storage:store.storage});return;
+          }
           case '/api/backup/create': {
             const controller=new AbortController(),cancel=()=>controller.abort();res.once('close',cancel);
             try{await quiesce();json(res,await backups.create(data.passphrase,controller.signal));}
             finally{res.removeListener('close',cancel);}return;
           }
-          case '/api/restore/commit': if(data.confirm!==true)throw new Error('Confirm library replacement first');await quiesce();await backups.restore(String(data.id));await importer.clear();json(res,{ok:true});return;
+          case '/api/restore/commit': {
+            if(data.confirm!==true)throw new Error('Confirm library replacement first');await quiesce();replacement=backups.restore(String(data.id));
+            try{await replacement;await importer.clear();cleanupPlans.clear();json(res,{ok:true});}finally{replacement=null;}return;
+          }
           case '/api/restore/discard': await backups.discard(String(data.id));json(res,{ok:true});return;
           case '/api/read': json(res,{post:store.setRead(String(data.id),data.read as boolean)});return;
           case '/api/settings': {
@@ -194,6 +221,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
         } finally {if(cleansContent)cleaningContent=false;}
       }
       if (req.method !== 'GET') { json(res,{error:'Method not allowed'},405); return; }
+      if(url.pathname==='/api/storage'){json(res,storageBreakdown(store,await media.inventory()));return;}
       if(url.pathname.startsWith('/api/backup/download/')){
         const file=backups.download(url.pathname.slice('/api/backup/download/'.length));
         res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':'attachment; filename="collector.tar.age"','Content-Length':file.bytes,'Cache-Control':'no-store'});
