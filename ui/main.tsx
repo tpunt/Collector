@@ -70,6 +70,8 @@ function App() {
   const suppressedReads=useRef(new Set<string>()),readRequests=useRef(new Map<string,number>()),readSequence=useRef(0),readChanges=useRef(0),readResults=useRef(new Map<string,{version:number;context:string;readAt:number|null}>());
   const [readClient]=useState(()=>crypto.randomUUID());
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[modal,setModal]=useState<'source'|'history'|'import'|'clear'|'settings'|'storage'|null>(null),[removeFeed,setRemoveFeed]=useState<string|null>(null);
+  const [loadErrors,setLoadErrors]=useState({state:'',feed:''}),retryFeed=useRef(false);
+  const visibleError=error||loadErrors.state||loadErrors.feed;
   const [clearFeed,setClearFeed]=useState<string|null>(null);
   const [postToDelete,setPostToDelete]=useState<Pick<StoredPost,'id'|'title'|'subreddit'>|null>(null);
   const [storageGb,setStorageGb]=useState('10'),[storageSaved,setStorageSaved]=useState(false);
@@ -96,43 +98,49 @@ function App() {
   function openFavourites(nextView:'favourites'|'users'){setSource('');navigate(nextView);}
   function filterSource(name:string){setSource(name);navigate('posts');}
   function openSettings(){setStorageGb(String((state?.storage.limitBytes??10*GB)/GB));setStorageSaved(false);setError('');setModal('settings');}
-  async function get<T>(path:string):Promise<T>{const response=await fetch(path);const value=await response.json();if(!response.ok)throw new Error(value.error);return value;}
+  async function get<T>(path:string):Promise<T>{const response=await fetch(path).catch(()=>{throw new Error('Cannot connect to Collector. Make sure the local app is running; retrying automatically.');});const value=await response.json();if(!response.ok)throw new Error(value.error);return value;}
+  function loadError(kind:'state'|'feed',message:string){setLoadErrors(old=>old[kind]===message?old:{...old,[kind]:message});}
   async function loadState(){
     const version=++stateVersion.current;
-    const value=await get<State>('/api/state');
-    if(stoppedRef.current||version!==stateVersion.current)return{...value,contentChanged:false};
-    const revision=JSON.stringify([value.stats.posts,value.stats.snapshots,value.stats.mediaPosts,value.stats.contentRevision,value.feeds.map(feed=>[feed.name,feed.postCount,feed.sync.lastSuccessAt])]);
-    const contentChanged=revision!==pollVersion.current;pollVersion.current=revision;
-    if(contentChanged)feedChange.current++;
-    token.current=value.token;setState(value);return{...value,contentChanged};
+    try{
+      const value=await get<State>('/api/state');
+      if(stoppedRef.current||version!==stateVersion.current)return null;
+      const revision=JSON.stringify([value.stats.posts,value.stats.snapshots,value.stats.mediaPosts,value.stats.contentRevision,value.feeds.map(feed=>[feed.name,feed.postCount,feed.sync.lastSuccessAt])]);
+      const contentChanged=revision!==pollVersion.current;pollVersion.current=revision;
+      if(contentChanged)feedChange.current++;
+      token.current=value.token;setState(value);loadError('state','');return{...value,contentChanged};
+    }catch(e){if(!stoppedRef.current&&version===stateVersion.current)loadError('state',(e as Error).message);return null;}
   }
   function showPosts(rows:StoredPost[]){postRows.current=rows;setPosts(rows);}
   async function loadFeed(append=false){
     const version=++feedVersion.current,key=currentQuery.current,same=loadedQuery.current===key,confirmedReads=readChanges.current,change=feedChange.current;
-    const more=append&&same&&postRows.current.length>0;
-    if(more&&!loadedNext.current)return;
-    const oldest=!more&&same?postRows.current.at(-1):null;
-    let cursor=more?loadedNext.current:null,after:string|null=null,rows:StoredPost[]=[];
-    const visited=new Set<string>(),atOrPast=(a:StoredPost,b:StoredPost)=>a.createdMs<b.createdMs||(a.createdMs===b.createdMs&&a.id<=b.id);
-    do{
-      const q=new URLSearchParams(key);if(cursor)q.set('cursor',cursor);
-      const result=await get<{posts:StoredPost[];next:string|null}>('/api/feed?'+q);
-      if(stoppedRef.current||version!==feedVersion.current||key!==currentQuery.current)return;
-      rows.push(...result.posts);after=result.next;
-      if(oldest&&result.posts.length&&atOrPast(result.posts.at(-1)!,oldest)){
-        const retained=rows.filter(post=>atOrPast(oldest,post));
-        if(retained.length){const older=retained.length<rows.length||Boolean(after);rows=retained;after=older?feedCursor(rows.at(-1)!):null;}
-        break;
-      }
-      if(after&&visited.has(after))throw new Error('The feed changed while loading. Refresh view and try again.');
-      if(after)visited.add(after);cursor=after;
-    }while(!more&&oldest&&after);
-    if(same&&!more){const visible=[...document.querySelectorAll<HTMLElement>('.post-card[data-post-id]')].find(card=>{const box=card.getBoundingClientRect();return box.bottom>0&&box.top<innerHeight;});if(visible)scrollAnchor.current={id:visible.dataset.postId!,top:visible.getBoundingClientRect().top};}
-    rows=rows.map(post=>{const read=readResults.current.get(post.id);return read&&read.version>confirmedReads&&read.context===post.readContext?{...post,readAt:read.readAt}:post;});
-    const unique=new Map((more?[...postRows.current,...rows]:rows).map(post=>[post.id,post]));
-    showPosts([...unique.values()]);readResults.current.clear();loadedQuery.current=key;loadedNext.current=after;setNext(after);
-    // Appending older rows does not replace a cancelled refresh of newer rows.
-    if(!more)renderedFeedChange.current=change;
+    try{
+      const more=append&&same&&postRows.current.length>0;
+      if(more&&!loadedNext.current)return;
+      const oldest=!more&&same?postRows.current.at(-1):null;
+      let cursor=more?loadedNext.current:null,after:string|null=null,rows:StoredPost[]=[];
+      const visited=new Set<string>(),atOrPast=(a:StoredPost,b:StoredPost)=>a.createdMs<b.createdMs||(a.createdMs===b.createdMs&&a.id<=b.id);
+      do{
+        const q=new URLSearchParams(key);if(cursor)q.set('cursor',cursor);
+        const result=await get<{posts:StoredPost[];next:string|null}>('/api/feed?'+q);
+        if(stoppedRef.current||version!==feedVersion.current||key!==currentQuery.current)return;
+        rows.push(...result.posts);after=result.next;
+        if(oldest&&result.posts.length&&atOrPast(result.posts.at(-1)!,oldest)){
+          const retained=rows.filter(post=>atOrPast(oldest,post));
+          if(retained.length){const older=retained.length<rows.length||Boolean(after);rows=retained;after=older?feedCursor(rows.at(-1)!):null;}
+          break;
+        }
+        if(after&&visited.has(after))throw new Error('The feed changed while loading. Refresh view and try again.');
+        if(after)visited.add(after);cursor=after;
+      }while(!more&&oldest&&after);
+      if(same&&!more){const visible=[...document.querySelectorAll<HTMLElement>('.post-card[data-post-id]')].find(card=>{const box=card.getBoundingClientRect();return box.bottom>0&&box.top<innerHeight;});if(visible)scrollAnchor.current={id:visible.dataset.postId!,top:visible.getBoundingClientRect().top};}
+      rows=rows.map(post=>{const read=readResults.current.get(post.id);return read&&read.version>confirmedReads&&read.context===post.readContext?{...post,readAt:read.readAt}:post;});
+      const unique=new Map((more?[...postRows.current,...rows]:rows).map(post=>[post.id,post]));
+      showPosts([...unique.values()]);readResults.current.clear();loadedQuery.current=key;loadedNext.current=after;setNext(after);
+      // Appending older rows does not replace a cancelled refresh of newer rows.
+      if(!more)renderedFeedChange.current=change;
+      retryFeed.current=false;loadError('feed','');
+    }catch(e){if(!stoppedRef.current&&version===feedVersion.current&&key===currentQuery.current){retryFeed.current=true;loadError('feed',(e as Error).message);}}
   }
   useLayoutEffect(()=>{const anchor=scrollAnchor.current;scrollAnchor.current=null;if(!anchor)return;const card=[...document.querySelectorAll<HTMLElement>('.post-card[data-post-id]')].find(card=>card.dataset.postId===anchor.id);if(card)window.scrollBy(0,card.getBoundingClientRect().top-anchor.top);},[posts]);
   async function action(path:string,data:unknown={}){
@@ -140,7 +148,7 @@ function App() {
     try{const response=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token.current},body:JSON.stringify(data)});const value=await response.json();if(!response.ok)throw new Error(value.error);if(value.warning)setError(value.warning);await loadState();await loadFeed();return value;}
     catch(e){setError((e as Error).message);return null;}finally{setBusy(false);}
   }
-  useEffect(()=>{void loadState().catch(e=>setError(e.message));const hash=()=>{setView(location.hash==='#feeds'?'feeds':'posts');setCollection(hashCollection());};window.addEventListener('hashchange',hash);return()=>window.removeEventListener('hashchange',hash);},[]);
+  useEffect(()=>{void loadState();const hash=()=>{setView(location.hash==='#feeds'?'feeds':'posts');setCollection(hashCollection());};window.addEventListener('hashchange',hash);return()=>window.removeEventListener('hashchange',hash);},[]);
   async function togglePostFavourite(post:StoredPost){const result=await action('favourite/post',{id:post.id,context:post.readContext,favourite:!post.favourite});if(result?.post)setThread(old=>old?.post.id===post.id&&old.post.readContext===post.readContext?{...old,post:{...old.post,favourite:result.post.favourite}}:old);}
   async function toggleUserFavourite(author:Author,active:boolean){const result=await action('favourite/user',{author,favourite:!active});if(result&&active&&userFilter===authorKey(author))setUserFilter('');if(result)setThread(old=>old?.post.author&&authorKey(old.post.author)===authorKey(author)?{...old,post:{...old.post,favouriteUser:!active}}:old);}
   function authorControls(post:StoredPost){return post.author&&<span className="post-author"><span>{authorLabel(post.author)}</span><FavouriteButton active={post.favouriteUser} label={(post.favouriteUser?'Unfavourite user: ':'Favourite user: ')+authorLabel(post.author)} disabled={busy} onClick={()=>void toggleUserFavourite(post.author!,post.favouriteUser)}/></span>;}
@@ -160,14 +168,14 @@ function App() {
   useEffect(()=>{if(state&&userFilter&&!selectedAuthor)setUserFilter('');},[Boolean(state),userFilter,selectedAuthor?.platform,selectedAuthor?.id]);
   useEffect(()=>{if(state&&view==='posts'&&collection==='all'&&source&&!state.sources.includes(source))setSource('');},[state?.sources,view,collection,source]);
   useEffect(()=>setReadBefore(Date.now()),[source,media,search,searchScope,collection,userFilter]);
-  useEffect(()=>{const timer=setTimeout(()=>void loadFeed().catch(e=>setError(e.message)),200);return()=>clearTimeout(timer);},[source,media,search,searchScope,readFilter,readBefore,collection,userFilter,selectedAuthor?.id,selectedAuthor?.platform]);
+  useEffect(()=>{const timer=setTimeout(()=>void loadFeed(),200);return()=>clearTimeout(timer);},[source,media,search,searchScope,readFilter,readBefore,collection,userFilter,selectedAuthor?.id,selectedAuthor?.platform]);
   useEffect(()=>{
     let pending=false,disposed=false;
     const timer=setInterval(()=>{
       if(pending||stoppedRef.current)return;pending=true;
       void loadState().then(async value=>{
-        if(disposed||stoppedRef.current)return;
-        if(value.contentChanged||renderedFeedChange.current!==feedChange.current)await loadFeed();
+        if(!value||disposed||stoppedRef.current)return;
+        if(value.contentChanged||retryFeed.current||renderedFeedChange.current!==feedChange.current)await loadFeed();
         const id=threadId.current;
         if(id){const result=await get<Thread>('/api/post/'+id);if(threadId.current===id){if(result.post)setThread(result);else{setThread(null);threadId.current=null;}}}
       }).catch(e=>{if(!disposed&&!stoppedRef.current)setError(e.message);}).finally(()=>{pending=false;});
@@ -214,14 +222,14 @@ function App() {
           {view==='posts'&&currentFeed?feedSync(currentFeed):<button className="button" disabled={busy||!feeds.length||feeds.every(syncing)} onClick={()=>void action('sync')}>Sync all</button>}
         </>}{view==='feeds'&&<button className="button primary" onClick={()=>{setName('');setMonths(1);setModal('source');}}>＋ Add feed</button>}</div>
       </header>
-      {error&&!modal&&!removeFeed&&!clearFeed&&!postToDelete&&<div className="notice error" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={()=>setError('')}>×</button></div>}
+      {visibleError&&!modal&&!removeFeed&&!clearFeed&&!postToDelete&&<div className="notice error" role="alert"><span>{visibleError}</span><button aria-label="Dismiss error" onClick={()=>{setError('');setLoadErrors({state:'',feed:''});}}>×</button></div>}
       {state?.storage.full&&<div className="notice"><span>Storage cap reached. Existing content is kept; increase the cap to continue collecting.</span><button className="button" onClick={openSettings}>Storage settings</button></div>}
       {state?.job.accessPause&&<div className="notice">{state.job.accessPause.reason}<button className="button" disabled={busy} onClick={()=>void action('sync')}>Resume sync</button></div>}
       {archiveActive&&<div className="sync-bar archive-sync" role="status"><span className="status-dot pulse"/><span>r/{archiveActive.subreddit} · {archiveActive.phase==='media'?'Saving archive media':'Fetching archive'} · {archiveActive.observed.toLocaleString()} posts checked</span><button onClick={openArchives}>Progress</button><button disabled={busy} onClick={()=>void action('archive/stop',{id:archiveActive.id})}>Stop archive</button></div>}
       {(state?.job.running||Boolean(state?.media.pending))&&<div className="sync-bar" role="status"><span className="status-dot pulse"/><span>{state!.job.running?state!.job.message:`Loading media · ${state!.media.pending} files queued`}</span>{state!.job.queued>0&&<span className="muted">{state!.job.queued} queued</span>}
         {state!.job.subreddit&&<button onClick={()=>void action('pause',{name:state!.job.subreddit})} disabled={busy}>Stop r/{state!.job.subreddit}</button>}
       </div>}
-      {view==='feeds'?<section className="feeds-page" aria-label="Subscribed feeds">
+      {!state?<div className="empty-state" role="status"><h2>{loadErrors.state?'Waiting for Collector':'Loading Collector…'}</h2><p>Connecting to your local library.</p></div>:view==='feeds'?<section className="feeds-page" aria-label="Subscribed feeds">
         {feeds.length?<><div className="feed-list">
           {feeds.map(feed=><article className="feed-card" key={feed.name} data-feed={feed.name} aria-labelledby={'feed-title-'+feed.name}>
             <header className="feed-card-header">
@@ -262,7 +270,7 @@ function App() {
           </div><div className="post-actions"><FavouriteButton active={post.favourite} label={(post.favourite?'Unfavourite post: ':'Favourite post: ')+post.title} disabled={busy} onClick={()=>void togglePostFavourite(post)}/><button className="read-toggle" title={post.readAt!==null?"Mark unread":"Mark read"} aria-label={(post.readAt!==null?"Mark unread: ":"Mark read: ")+post.title} onClick={()=>{const read=post.readAt===null;if(!read)suppressedReads.current.add(post.id);else suppressedReads.current.delete(post.id);void markRead(post.id,read).catch(()=>{});}}>{post.readAt!==null?"●":"○"}</button><button className="read-thread" onClick={()=>void openThread(post.id)} aria-label={'Read thread: '+post.title}>↗</button><button className="delete-post danger" title="Delete post" disabled={busy} aria-label={'Delete post: '+post.title} onClick={()=>{setError('');setPostToDelete(post);}}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></svg></button></div>
         </article>)}</div>
         {!posts.length&&<div className="empty-state"><h2>{collection==='posts'?'No matching favourite posts':collection==='users'?'No matching posts from favourite users':feeds.length?'No matching posts':'No feeds yet'}</h2><p>{collection==='posts'?'Use the star on a post to keep it here, or adjust your filters.':collection==='users'?'Use the star beside an author’s name to favourite them. Older posts without author details gain them when synced or imported again.':feeds.length?'Refresh a feed or adjust your filters.':'Add a subreddit to get started.'}</p>{collection==='all'&&!feeds.length&&<button className="button primary" onClick={()=>navigate('feeds')}>Manage feeds</button>}</div>}
-        {next&&<button className="button load-more" onClick={()=>void loadFeed(true).catch(error=>setError(error.message))}>Load more</button>}
+        {next&&<button className="button load-more" onClick={()=>void loadFeed(true)}>Load more</button>}
       </>}
     </main>
     {thread&&<div className="drawer-backdrop" onClick={()=>{setThread(null);threadId.current=null;}}><section className="thread-drawer" role="dialog" aria-modal="true" aria-label="Thread details" onClick={e=>e.stopPropagation()}>
