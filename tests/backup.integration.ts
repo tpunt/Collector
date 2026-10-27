@@ -38,10 +38,13 @@ test('Settings creates a downloadable encrypted backup and validates before conf
   await page.getByLabel('Restore passphrase',{exact:true}).fill('backup fixture password');await page.getByRole('button',{name:'Validate backup',exact:true}).click();await page.getByRole('group',{name:'Confirm library replacement'}).waitFor();
   const reload=app.media.reload.bind(app.media);let release!:()=>void,entered!:()=>void;const waiting=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
   app.media.reload=async()=>{entered();await waiting;await reload();};
+  let releaseState!:()=>void,stateEntered!:()=>void,holdState=true;const stateGate=new Promise<void>(resolve=>{releaseState=resolve;}),stateStarted=new Promise<void>(resolve=>{stateEntered=resolve;});
+  await page.route('**/api/state',async route=>{const response=await route.fetch();if(holdState&&!app.store.getPost('later')){stateEntered();await stateGate;}await route.fulfill({response});});
   await page.getByRole('button',{name:'Replace library',exact:true}).click();await started;
   let readCompleted=false;const reading=fetch(origin+'/api/storage').then(async response=>{readCompleted=true;assert.equal(response.status,200);return response.json();});
   try{await delay(50);assert.equal(readCompleted,false,'Reads must wait until both the restored database and media are ready');}finally{release();}
   assert.equal((await reading).feeds[0].posts,1);app.media.reload=reload;
+  try{await stateStarted;assert.equal(await page.getByText('Library restored. Sync explicitly when ready; the current browser account will be verified.',{exact:true}).count(),0,'Restore must not report completion before the sidebar filters and library state are refreshed');assert.equal(await page.getByLabel('Search stored posts',{exact:true}).inputValue(),'Offline');}finally{holdState=false;releaseState();}
   await page.getByText('Library restored. Sync explicitly when ready; the current browser account will be verified.',{exact:true}).waitFor();
   assert.equal(await page.getByLabel('Search stored posts',{exact:true}).inputValue(),'');assert.equal(await page.getByLabel('Search scope',{exact:true}).inputValue(),'both');assert.equal(await page.getByLabel('Read status',{exact:true}).inputValue(),'all');
   assert.equal(app.store.getPost('later'),null);assert.notEqual(app.store.getPost('abc')!.readAt,null);assert(app.store.isPostExcluded('spam'));assert.equal(app.jobs.state.running,false);assert.equal(app.media.status.requests,0);
