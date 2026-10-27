@@ -728,3 +728,22 @@ filter. No browser warnings or errors were recorded in that final check.
 The isolated app was stopped. Manual screenshots and recovery/fixture files are
 in the ignored `.local-data/qa/2026-10-27/final-pass/` directory; screenshots
 include `manual-restored.png` and `manual-retained-media.png`.
+
+### Compact media controls and full-screen viewing — 27 October 2026
+
+The earlier manual sample labelled “Offline video with audio” mistakenly used
+the audio-only input fixture. Its readiness/playback checks did not establish
+that a picture was present. The ignored sample script and its cached file now
+use an eight-second MP4 with a 320×180 video track and an audio track; the original
+sample is preserved outside the cache. The retained-media test now also asserts
+video dimensions. The new player test verifies picture dimensions and decoded
+audio, plus playback, seeking, mute/volume and uninterrupted native full screen.
+
+Saved media now uses a 30px playback row and image/video full-screen viewing.
+Local Chrome checks cover native full screen and denied-API fallback, gallery
+captions, focus restoration, mobile layout, read tracking and Esc within a
+discussion. A manual check in the app browser verified the compact player,
+video enlargement, the second gallery image, its caption and Esc. That browser
+used the viewport-sized fallback. No Reddit or media-provider requests were
+made. TypeScript checking, the production build and all 77 browser/integration
+tests pass. `manual-compact-video.png` is saved with the other ignored screenshots.

@@ -2,6 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import type {StoredPost,MediaSyncState} from '../src/store.ts';
 import type {MediaItem} from '../src/media.ts';
 import {onlineEmbed} from '../src/online-embed.ts';
+import {MediaPreview} from './MediaPreview.tsx';
 
 /** Sync owns offline downloads. Known external players remain explicitly online. */
 export function PostMedia({post,syncing,revision,children}:{post:StoredPost;syncing:boolean;revision:number;children?:(controls:React.ReactNode)=>React.ReactNode}) {
@@ -54,7 +55,7 @@ export function PostMedia({post,syncing,revision,children}:{post:StoredPost;sync
   const controls=<>{post.bodySync&&post.bodySync.status!=='ready'&&<span className="media-offline-status" title={post.bodySync.reason??'Sync this feed to save the complete post text'}>{post.body!==null?'Text update pending':'Text not downloaded'}</span>}{notDownloaded&&<span className="media-offline-status" role="status" title={note}>{ready.length?'Partially downloaded':'Not downloaded'}</span>}{localError&&hasMedia&&<span className="media-status-unknown" title={localError}>Status unknown</span>}{copyLocalPath}</>;
   return <>{children?.(controls)}{hasMedia&&<div className="post-media" ref={ref} data-read-pending={!checked}>
     {(items.length>1||!post.mediaDiscoveryComplete)&&<p className="media-note">{post.mediaDiscoveryComplete?`${ready.length}/${items.length} files saved offline`:`${ready.length} files saved · Collection not fully discovered`}{ready.length>1?' · Scroll horizontally to view all':''}</p>}
-    {ready.length>0&&<div className={'media-items '+(ready.length>1?'gallery':'')} role="group" aria-label={`${ready.length} saved media files`} tabIndex={ready.length>1?0:undefined}>{ready.map((item,index)=><figure key={item.key+':'+index}>{item.kind==='image'?<a href={item.url!} target="_blank" rel="noreferrer"><img src={item.url!} alt={ready.length>1?`${post.title} — image ${index+1}`:post.title} loading="lazy"/></a>:<video src={item.url!} controls preload="metadata" playsInline aria-label={post.title}/>} {item.caption&&<figcaption>{item.caption}</figcaption>}</figure>)}</div>}
+    {ready.length>0&&<div className={'media-items '+(ready.length>1?'gallery':'')} role="group" aria-label={`${ready.length} saved media files`} tabIndex={ready.length>1?0:undefined}>{ready.map((item,index)=><figure key={item.key+':'+index}><MediaPreview kind={item.kind} url={item.url!} title={item.kind==='image'&&ready.length>1?`${post.title} — image ${index+1}`:post.title} caption={item.caption}/>{item.caption&&<figcaption>{item.caption}</figcaption>}</figure>)}</div>}
     {embed&&<div className="online-media"><p className="media-note">Online player · Requires internet · Not saved locally</p><iframe key={embed.url} src={embed.url} title={`${embed.provider} player: ${post.title}`} loading="lazy" referrerPolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; fullscreen; picture-in-picture" allowFullScreen/></div>}
     {(!checked||localError||notDownloaded)&&<p className="media-note">{note}{original&&<a href={original} target="_blank" rel="noreferrer" title="Requires internet; this media is not stored locally">Open original ↗</a>}</p>}
   </div>}</>;

@@ -39,7 +39,7 @@ export function useReadTracking(enabled:boolean,onRead:(id:string)=>Promise<void
   useEffect(()=>{
     const coverage=new Map<string,VisibleCoverage>(),pending=new Set<string>();
     const timer=setInterval(()=>{
-      const eligible=enabled&&document.visibilityState==='visible';
+      const eligible=enabled&&document.visibilityState==='visible'&&!document.querySelector('[data-media-expanded="true"]');
       for(const card of document.querySelectorAll<HTMLElement>('.post-card[data-post-id]')){
         const id=card.dataset.postId!;let seen=coverage.get(id);if(!seen){seen=new VisibleCoverage();coverage.set(id,seen);}
         const rect=card.getBoundingClientRect(),top=Math.max(0,-rect.top),bottom=Math.min(rect.height,innerHeight-rect.top);
