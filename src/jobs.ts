@@ -357,7 +357,7 @@ export class ReaderJobs {
             }else this.store.saveSnapshot(work.generation, snapshot);
             if(attachments)this.store.saveMediaReferences(work.generation,post.id,attachments);
             await this.mediaSync?.reconcile?.();
-            if(this.mediaSync&&this.store.mediaSync(post.id))this.queue.push({id:randomUUID(),kind:'media',postId:post.id,deadline:work.deadline,generation:work.generation});
+            if(this.mediaSync&&this.store.followedSources().includes(post.subreddit)&&this.store.mediaSync(post.id))this.queue.push({id:randomUUID(),kind:'media',postId:post.id,deadline:work.deadline,generation:work.generation});
             this.message = work.kind==='body'?'Post text saved offline':`Discussion saved: ${snapshot.comments.length} sampled comments; sort ${snapshot.sort}`;
           }
         } catch (error) {

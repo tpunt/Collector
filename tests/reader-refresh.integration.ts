@@ -25,3 +25,17 @@ test('a delayed background feed response cannot undo a confirmed read or unread 
   hold=true;app.store.importArchiveBatch(app.store.generation,[record('another',1700000001000)]);await began;await page.getByRole('button',{name:'Mark read: Window choice',exact:true}).click();await page.getByRole('button',{name:'Mark unread: Window choice',exact:true}).waitFor();release();await page.getByRole('button',{name:'Window another',exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'Mark unread: Window choice',exact:true}).count(),1);assert.notEqual(app.store.getPost('choice')!.readAt,null);
  }finally{release();await browser.close();await app.close();}
 });
+
+test('Load more cannot permanently discard a simultaneous background refresh',async()=>{
+ const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,Array.from({length:125},(_,index)=>record('item'+index,1700000000000-index*1000)));
+ const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});let hold=false,release!:()=>void,entered!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;}),began=new Promise<void>(resolve=>{entered=resolve;});
+ try{
+  const page=await browser.newPage();await page.addInitScript(()=>Object.defineProperty(document,'visibilityState',{get:()=> 'hidden'}));
+  await page.route('**/api/feed?*',async route=>{if(!hold||new URL(route.request().url()).searchParams.has('cursor')){await route.continue();return;}hold=false;const response=await route.fetch();entered();await gate;await route.fulfill({response});});
+  await page.goto(origin);await page.waitForFunction(()=>document.querySelectorAll('.post-card').length===50);
+  hold=true;app.store.importArchiveBatch(app.store.generation,[record('racedhead',1700000010000)]);await began;
+  await page.getByRole('button',{name:'Load more',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.post-card').length===100);release();
+  await page.waitForTimeout(2500);assert.equal(await page.getByRole('button',{name:'Window racedhead',exact:true}).count(),1,'A newer stored post must appear without another data change or an explicit Refresh view');
+  assert.equal(await page.locator('.post-card').count(),101);assert.equal(app.jobs.state.requests.sessionTotal,0);
+ }finally{release();await browser.close();await app.close();}
+});

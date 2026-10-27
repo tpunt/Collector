@@ -162,7 +162,8 @@ test('inline images and playable video use cached local assets, range responses 
   const videoUrl=await page.locator('video').getAttribute('src');assert(videoUrl?.startsWith('/media/t3_def/'));const range=await fetch(origin+videoUrl,{headers:{Range:'bytes=0-15'}});assert.equal(range.status,206);assert.equal((await range.arrayBuffer()).byteLength,16);assert.match(range.headers.get('content-range')??'',/^bytes 0-15\//);
   assert.equal((await fetch(origin+videoUrl,{headers:{Range:'bytes=999999-'}})).status,416);
   await page.getByRole('button',{name:'Image inline fixture',exact:true}).click();await page.getByRole('dialog',{name:'Thread details'}).locator('img').waitFor();assert.equal(downloads,4);assert.equal(await page.getByText(/Media content is not downloaded/).count(),0);assert.equal(await page.getByRole('button',{name:'Load media',exact:true}).count(),0);await page.getByRole('button',{name:'Close thread'}).click();await page.reload();await page.locator('img').waitFor();assert.equal(downloads,4);
-  app.store.removeSubreddit('aww');assert.equal((await fetch(origin+videoUrl)).status,404);
+  app.store.removeSubreddit('aww');assert.equal((await fetch(origin+videoUrl)).status,200);
+  app.store.clearSubreddit('aww');await app.media.reconcile();assert.equal((await fetch(origin+videoUrl)).status,404);
  }finally{await browser.close();await app.close();}
 });
 

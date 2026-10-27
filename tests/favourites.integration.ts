@@ -56,3 +56,28 @@ test('favourites mutations require authentication and valid identities and rejec
   app.store.clearSubreddit('python');app.store.importArchiveBatch(app.store.generation,[row('abc','Alice_Example')]);assert.equal((await post('post',{id:'abc',context,favourite:true})).status,400);assert.equal(app.store.getPost('abc')!.favourite,false);
  }finally{await app.close();}
 });
+
+test('a removed favourite-user filter cannot silently reactivate if that user is favourited again elsewhere',async()=>{
+ const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');const alice=row('alice','Alice_Example'),bob=row('bob','Bob_Example');app.store.importArchiveBatch(app.store.generation,[alice,bob]);app.store.setUserFavourite(alice.author,true);app.store.setUserFavourite(bob.author,true);
+ const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
+ try{
+  const page=await browser.newPage();await page.addInitScript(()=>Object.defineProperty(document,'visibilityState',{get:()=> 'hidden'}));await page.goto(origin+'/#users');const users=page.getByRole('region',{name:'Favourited users',exact:true});await page.waitForFunction(()=>document.querySelectorAll('.post-card').length===2);
+  await users.getByRole('button',{name:'u/Alice_Example',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.post-card').length===1);assert.equal(await page.getByRole('button',{name:'Favourite alice',exact:true}).count(),1);
+  app.store.setUserFavourite(alice.author,false);await users.getByRole('button',{name:'u/Alice_Example',exact:true}).waitFor({state:'detached'});await page.getByRole('button',{name:'Favourite bob',exact:true}).waitFor();
+  app.store.setUserFavourite(alice.author,true);await users.getByRole('button',{name:'u/Alice_Example',exact:true}).waitFor();await page.waitForTimeout(400);
+  assert.match(await users.getByRole('button',{name:'All favourite users',exact:true}).getAttribute('class')??'',/selected/,'Restored favourites must keep the displayed All favourite users selection');
+  // The newly eligible older post is beyond the retained viewport window.
+  await page.getByRole('button',{name:'Load more',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.post-card').length===2);
+ }finally{await browser.close();await app.close();}
+});
+
+test('Back and the Collector home link leave a stored-only subreddit filter when returning to the normal feed',async()=>{
+ const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[row('old','Alice_Example'),row('active','Bob_Example','aww')]);app.store.setPostFavourite('old',true);app.store.setPostFavourite('active',true);app.store.removeSubreddit('python');
+ const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
+ try{
+  const page=await browser.newPage();await page.goto(origin+'/#posts');await page.getByRole('button',{name:'Favourite active',exact:true}).waitFor();
+  const filterRetained=async()=>{await page.getByRole('navigation',{name:'Main navigation'}).getByRole('button',{name:/^Favourite posts /}).click();await page.getByRole('button',{name:'Favourite old',exact:true}).waitFor();await page.locator('.post-card').filter({hasText:'Favourite old'}).getByRole('button',{name:'r/python',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.post-card').length===1);assert.equal(await page.getByLabel('Filter by subreddit',{exact:true}).inputValue(),'python');};
+  await filterRetained();await page.goBack();await page.waitForTimeout(400);assert.equal(await page.getByLabel('Filter by subreddit',{exact:true}).inputValue(),'');await page.getByRole('button',{name:'Favourite active',exact:true}).waitFor();
+  await filterRetained();await page.getByRole('link',{name:'Collector',exact:true}).click();await page.getByRole('heading',{name:'All subreddits',exact:true}).waitFor();await page.getByRole('button',{name:'Favourite active',exact:true}).waitFor();assert.equal(await page.locator('.post-card').count(),1);
+ }finally{await browser.close();await app.close();}
+});

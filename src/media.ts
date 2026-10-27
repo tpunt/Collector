@@ -354,7 +354,7 @@ export class MediaCache {
   async serve(postId: string,key: string,range: string|undefined,res: ServerResponse) {
     await this.ready;
     const post=this.store.getPost(postId),saved=this.cached.get(key);
-    if(!post||post.availability!=='available'||!this.store.followedSources().includes(post.subreddit)||!saved||!post.attachments.some(item=>mediaKey(item)===key)) {res.writeHead(404).end();return;}
+    if(!post||post.availability!=='available'||!saved||!post.attachments.some(item=>mediaKey(item)===key)) {res.writeHead(404).end();return;}
     let start=0,end=saved.bytes-1;
     if(range){const match=/^bytes=(\d*)-(\d*)$/.exec(range);if(!match||(!match[1]&&!match[2])){res.writeHead(416,{'Content-Range':`bytes */${saved.bytes}`}).end();return;}
       if(!match[1])start=Math.max(0,saved.bytes-Number(match[2]));else{start=Number(match[1]);if(match[2])end=Math.min(end,Number(match[2]));}

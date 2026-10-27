@@ -8,7 +8,9 @@ usual search, read-status, media and subreddit filters. Favourite users shows
 all locally collected posts by those authors across subreddits; select a username
 to narrow it to one author. Future synced/imported posts by a favourite author
 appear automatically. These actions do not follow accounts or make requests to
-Reddit. Favourite content from removed subscriptions remains visible.
+Reddit. Posts and cached media from removed subscriptions remain available in
+favourites. On-demand discussion reads still work for retained posts; further
+media collection follows your subscriptions.
 
 Author names are captured from validated rendered profile links and archive
 records. Existing posts without author details gain them when collected again

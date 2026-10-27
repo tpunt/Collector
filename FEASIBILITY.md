@@ -643,3 +643,88 @@ the running user app and its data were untouched.
 Final checks pass: 178 unit tests, 67 browser/integration tests, TypeScript,
 production build and whitespace validation. The final integration run includes
 the author-only removal regression fix and the compact action layout.
+
+## Final manual workflow pass and independent review — 27 October 2026
+
+A separate manual end-to-end pass used the actual in-app browser UI with an
+isolated on-disk library and injected fixture collection adapters. This was
+separate from the automated Playwright test suite. The running user app and
+library were untouched. No Reddit, archive-service or CDN collection requests
+were made. The fixture adapters used local responses and shortened test timing;
+production pacing and request limits were unchanged.
+
+Manually exercised:
+
+- Adding two feeds with the one-month default, individual Stop/Resume, Sync all,
+  independent feed status, history expansion and contraction without pruning,
+  history/provenance timestamps, and unsubscribe confirmation/cancellation.
+- Combined, subreddit and media views; title/body search scopes; automatic read
+  marking, manual unread, read-status filters, post and author favourites,
+  author/subreddit narrowing, unfavouriting without deletion, and retained posts
+  from an unsubscribed feed.
+- Inline two-file galleries and captions, Copy local path confirmation, actual
+  playback of a locally served video (ready state 4, no error, 0.6-second fixture),
+  and on-demand saved discussion comments. Restart preserved content, media,
+  favourites and read states and started with zero collection requests.
+- Archive date fetching, Stop/Resume and overlapping ranges (one existing post,
+  zero new posts on replay); a compressed file chosen through the browser file
+  picker, replay of that export without increasing the post count, and a selected
+  post's imported discussion sample.
+- Storage cap changes and sidebar percentages without data loss, storage
+  attribution, selective cleanup preview/cancel/confirm, keeping shared files,
+  compaction, individual deletion/cancellation and absence after reconciliation,
+  scoped Clear and global Clear with confirmation/cancellation.
+- Real password-encrypted backup creation and browser download, wrong-password
+  rejection, validate/keep-current, validate/replace, and recovery of all 21
+  fixture posts, four media files, two post favourites, one favourite user and
+  saved read state. Restore retained the destination's 10 GB cap rather than the
+  backup's 1 MB cap. Quit was exercised through the UI; the fixture process was
+  relaunched and its browser tab reloaded to verify persisted state.
+
+Browser file-picker/download tool calls were unusually slow; this pass does not
+establish real-world import throughput. Real Reddit authentication/live markup,
+current archive-service availability and external-provider online playback were
+not revalidated. Existing local integration fixtures cover extraction, DASH and
+audio muxing, pagination, request pacing and failure/recovery cases. Very large
+library performance remains unmeasured.
+
+Codex then reviewed the current implementation, and Claude CLI independently
+reviewed a sanitized snapshot using Opus 5.5 at xhigh effort. Claude had only
+read-only source/test/documentation tools, with no runtime data, credentials,
+browser profile or Git metadata. Its generic pass prioritized the current
+favourites, store/server, media and job paths; this was not an exhaustive read of
+every unchanged file. Codex also reviewed archive/import, history, backup and
+request-lifecycle interactions. No high-severity finding was reported.
+
+Five confirmed findings were fixed and regression-tested:
+
+- Cached media from an unsubscribed feed returned 404 despite remaining owned
+  and reported as ready. Cached serving now checks post availability and file
+  ownership independently of subscription. Downloading still requires a
+  subscription. New coverage opens images, a complete gallery and video from a
+  removed feed without a warm browser cache, and checks that deletion/Clear
+  still revoke access.
+- Reading a retained discussion could queue unrelated media discovery that
+  would fail for an unsubscribed feed. Such discussion reads no longer queue
+  media work; their existing pending media stays pending.
+- Returning home or Back from a stored-only subreddit filter could leave an
+  empty normal feed. Normal navigation now drops invalid subscription filters;
+  favourites retain their ability to filter stored-only feeds.
+- Load more could cancel an in-flight head refresh after polling had already
+  consumed the content revision. The pending revision now remains outstanding
+  until a full refresh displays it, so polling retries even without another
+  content change.
+- An author filter removed in another window could silently reactivate if that
+  author was favourited again. A missing selected author now clears the stored
+  filter, preserving the displayed All favourite users selection.
+
+Claude's short verification pass found no remaining confirmed defect in these
+five fixes. Final validation passes 179 unit tests, 71 browser/integration tests,
+TypeScript checking, the production build and whitespace checks. The retained
+gallery fix was also checked manually after restarting the fixture app: both
+local images decoded after unsubscribe, and home navigation reset the stored-only
+filter. No browser warnings or errors were recorded in that final check.
+
+The isolated app was stopped. Manual screenshots and recovery/fixture files are
+in the ignored `.local-data/qa/2026-10-27/final-pass/` directory; screenshots
+include `manual-restored.png` and `manual-retained-media.png`.

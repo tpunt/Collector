@@ -165,3 +165,12 @@ test('an explicit removed-media redirect is unavailable rather than a saved plac
  let calls=0;const h=await setup({records:[{...image(100),attachments:[{kind:'image',url:'https://i.imgur.com/old-image.jpg'}]}],fetch:async()=>{calls++;return calls===1?new Response('',{status:302,headers:{Location:'https://i.imgur.com/removed.png'}}):new Response(png,{headers:{'Content-Type':'image/png'}});}});
  try{h.jobs.targets([h.target()]);await settle(h.jobs);assert.equal(calls,1);assert.equal(h.store.mediaSync(image(100).id)?.status,'unavailable');assert.equal(h.cache.status.bytes,0);}finally{await h.close();await rm(h.directory,{recursive:true,force:true});}
 });
+
+test('reading a retained unsubscribed discussion does not queue media discovery or downloads',async()=>{
+ const store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[{...image(100),source:'archive',exportId:'retained-discussion',outbound:'https://www.reddit.com/gallery/abc/',attachments:[]}]);store.removeSubreddit('aww');let visits=0,prepared=0,discoveries=0;
+ const jobs=new ReaderJobs(store,{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){visits++;return{url:()=>url}as any;}},readAccount:async()=> 'fixture_user',
+  readThread:async(_page,id)=>({topLink:null,snapshot:{id:'retained-thread',postId:id,source:'live',capturedAt:null,observedAt:Date.now(),sort:'best',body:'Saved discussion body',availability:'available',comments:[],omitted:0,sample:'Fixture discussion'}}),
+  discoverMedia:async()=>{discoveries++;return[{kind:'image',url:'https://i.redd.it/retained-discovered.png'}];},mediaSync:{status:{requests:0},pendingPosts:()=>[],preparePost:()=>{prepared++;return{discover:true};},async syncPost(){throw new Error('Media post is unavailable');},stop(){}}});
+ try{jobs.thread(image(100).id);await settle(jobs);assert(store.latestSnapshot(image(100).id));assert.equal(visits,1);assert.equal(prepared,0);assert.equal(discoveries,0);assert.equal(store.mediaSync(image(100).id)?.status,'pending');}
+ finally{await jobs.close();store.close();}
+});

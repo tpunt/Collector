@@ -79,6 +79,7 @@ function App() {
   const [archiveMode,setArchiveMode]=useState<'fetch'|'file'>('fetch'),[archiveName,setArchiveName]=useState('');
   const [archiveFrom,setArchiveFrom]=useState(()=>new Date(historyLowerBound(1,Date.now())!).toISOString().slice(0,10)),[archiveTo,setArchiveTo]=useState(()=>new Date().toISOString().slice(0,10));
   const token=useRef(''),feedVersion=useRef(0),threadId=useRef<string|null>(null),pollVersion=useRef(''),stateVersion=useRef(0),currentQuery=useRef('');
+  const feedChange=useRef(0),renderedFeedChange=useRef(0);
   const favouriteUsers=state?.favourites?.users??[],selectedAuthor=favouriteUsers.find(author=>authorKey(author)===userFilter);
   const params=new URLSearchParams();if(source)params.set('subreddit',source);if(media)params.set('media',media);if(search)params.set('q',search);
   if(collection!=='all')params.set('favourites',collection);
@@ -102,11 +103,12 @@ function App() {
     if(stoppedRef.current||version!==stateVersion.current)return{...value,contentChanged:false};
     const revision=JSON.stringify([value.stats.posts,value.stats.snapshots,value.stats.mediaPosts,value.stats.contentRevision,value.feeds.map(feed=>[feed.name,feed.postCount,feed.sync.lastSuccessAt])]);
     const contentChanged=revision!==pollVersion.current;pollVersion.current=revision;
+    if(contentChanged)feedChange.current++;
     token.current=value.token;setState(value);return{...value,contentChanged};
   }
   function showPosts(rows:StoredPost[]){postRows.current=rows;setPosts(rows);}
   async function loadFeed(append=false){
-    const version=++feedVersion.current,key=currentQuery.current,same=loadedQuery.current===key,confirmedReads=readChanges.current;
+    const version=++feedVersion.current,key=currentQuery.current,same=loadedQuery.current===key,confirmedReads=readChanges.current,change=feedChange.current;
     const more=append&&same&&postRows.current.length>0;
     if(more&&!loadedNext.current)return;
     const oldest=!more&&same?postRows.current.at(-1):null;
@@ -129,6 +131,8 @@ function App() {
     rows=rows.map(post=>{const read=readResults.current.get(post.id);return read&&read.version>confirmedReads&&read.context===post.readContext?{...post,readAt:read.readAt}:post;});
     const unique=new Map((more?[...postRows.current,...rows]:rows).map(post=>[post.id,post]));
     showPosts([...unique.values()]);readResults.current.clear();loadedQuery.current=key;loadedNext.current=after;setNext(after);
+    // Appending older rows does not replace a cancelled refresh of newer rows.
+    if(!more)renderedFeedChange.current=change;
   }
   useLayoutEffect(()=>{const anchor=scrollAnchor.current;scrollAnchor.current=null;if(!anchor)return;const card=[...document.querySelectorAll<HTMLElement>('.post-card[data-post-id]')].find(card=>card.dataset.postId===anchor.id);if(card)window.scrollBy(0,card.getBoundingClientRect().top-anchor.top);},[posts]);
   async function action(path:string,data:unknown={}){
@@ -153,6 +157,8 @@ function App() {
     finally{if(readRequests.current.get(id)===version)readRequests.current.delete(id);}
   },[]);
   useReadTracking(!stopped&&view==='posts'&&!modal&&!thread&&!removeFeed&&!clearFeed&&!postToDelete&&Boolean(state),markRead,suppressedReads.current);
+  useEffect(()=>{if(state&&userFilter&&!selectedAuthor)setUserFilter('');},[Boolean(state),userFilter,selectedAuthor?.platform,selectedAuthor?.id]);
+  useEffect(()=>{if(state&&view==='posts'&&collection==='all'&&source&&!state.sources.includes(source))setSource('');},[state?.sources,view,collection,source]);
   useEffect(()=>setReadBefore(Date.now()),[source,media,search,searchScope,collection,userFilter]);
   useEffect(()=>{const timer=setTimeout(()=>void loadFeed().catch(e=>setError(e.message)),200);return()=>clearTimeout(timer);},[source,media,search,searchScope,readFilter,readBefore,collection,userFilter,selectedAuthor?.id,selectedAuthor?.platform]);
   useEffect(()=>{
@@ -161,7 +167,7 @@ function App() {
       if(pending||stoppedRef.current)return;pending=true;
       void loadState().then(async value=>{
         if(disposed||stoppedRef.current)return;
-        if(value.contentChanged)await loadFeed();
+        if(value.contentChanged||renderedFeedChange.current!==feedChange.current)await loadFeed();
         const id=threadId.current;
         if(id){const result=await get<Thread>('/api/post/'+id);if(threadId.current===id){if(result.post)setThread(result);else{setThread(null);threadId.current=null;}}}
       }).catch(e=>{if(!disposed&&!stoppedRef.current)setError(e.message);}).finally(()=>{pending=false;});
@@ -186,7 +192,7 @@ function App() {
     <button className="button" disabled={busy||Boolean(state?.job.manual)} onClick={()=>void action('sync',{names:[feed.name]})} aria-label={syncLabel(feed)+' r/'+feed.name}>{syncLabel(feed)}</button>;
   return <div className="app">
     <aside className="sidebar">
-      <a className="brand" href="#posts" onClick={()=>navigate('posts')}><span className="brand-mark" aria-hidden="true">C</span> Collector</a>
+      <a className="brand" href="#posts" onClick={()=>filterSource('')}><span className="brand-mark" aria-hidden="true">C</span> Collector</a>
       <nav aria-label="Main navigation"><button className={'nav-item '+(view==='feeds'?'active':'')} onClick={()=>navigate('feeds')}>Feeds <span>{feeds.length}</span></button><button className={'nav-item '+(view==='posts'&&collection==='posts'?'active':'')} onClick={()=>openFavourites('favourites')}>Favourite posts <span>{state?.favourites?.posts??0}</span></button><button className={'nav-item '+(view==='posts'&&collection==='users'?'active':'')} onClick={()=>openFavourites('users')}>Favourite users <span>{favouriteUsers.length}</span></button></nav>
       <div className="source-nav"><p className="sidebar-label">SUBREDDITS</p><button className={'source-item '+(!source&&view==='posts'&&collection==='all'?'selected':'')} onClick={()=>filterSource('')}><span>All subreddits</span><span className="source-count">{feeds.reduce((sum,feed)=>sum+feed.postCount,0)}</span></button>
         {feeds.map(feed=><button className={'source-item '+(source===feed.name&&view==='posts'&&collection==='all'?'selected':'')} key={feed.name} onClick={()=>filterSource(feed.name)}>
