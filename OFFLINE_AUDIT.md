@@ -54,6 +54,6 @@ discard work according to their existing ownership/generation rules.
 - Linked external articles are not downloaded as whole websites. Post text and
   link destinations are retained. On-demand discussions still disclose their
   initially rendered comment sample and omitted branches.
-- Read tracking, encrypted backups, search scopes, storage cleanup and launcher
-  improvements remain the separately planned additions; they are not prerequisites
-  for saving complete post bodies and native media.
+- Read tracking, encrypted backups, indexed search scopes, confirmed storage
+  cleanup and a macOS launcher are implemented. Live-library encryption remains
+  deferred. These additions do not change the source availability boundaries above.

@@ -26,9 +26,11 @@ test('Settings creates a downloadable encrypted backup and validates before conf
  const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
   const page=await browser.newPage();await page.route('**/*',route=>route.request().url().startsWith(origin)?route.continue():route.abort());await page.goto(origin);
+  await page.getByLabel('Search stored posts',{exact:true}).fill('Offline');await page.getByLabel('Search scope',{exact:true}).selectOption('body');await page.getByLabel('Read status',{exact:true}).selectOption('read');
   await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByLabel('Backup passphrase',{exact:true}).fill('backup fixture password');await page.getByLabel('Repeat passphrase',{exact:true}).fill('backup fixture password');
   await page.getByRole('button',{name:'Create encrypted backup',exact:true}).click();const link=page.getByRole('link',{name:'Download backup',exact:true});await link.waitFor();
-  const event=page.waitForEvent('download');await link.click();const download=await event,path=join(directory,'collector.tar.age');await download.saveAs(path);
+  const event=page.waitForEvent('download');await link.click();const download=await event,path=join(directory,'collector.tar.age');await download.saveAs(path);await page.waitForFunction(()=>Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='Create encrypted backup'&&!button.disabled));
+  assert.equal(await page.getByLabel('Search stored posts',{exact:true}).inputValue(),'Offline');assert.equal(await page.getByLabel('Search scope',{exact:true}).inputValue(),'body');assert.equal(await page.getByLabel('Read status',{exact:true}).inputValue(),'read');
   app.store.importArchiveBatch(app.store.generation,[post('later')]);
   await page.getByLabel('Encrypted backup file',{exact:true}).setInputFiles(path);await page.getByLabel('Restore passphrase',{exact:true}).fill('wrong password');await page.getByRole('button',{name:'Validate backup',exact:true}).click();await page.getByText('Could not decrypt this backup. Check the passphrase and file integrity.',{exact:true}).waitFor();assert(app.store.getPost('later'));
   await page.getByLabel('Restore passphrase',{exact:true}).fill('backup fixture password');await page.getByRole('button',{name:'Validate backup',exact:true}).click();await page.getByRole('group',{name:'Confirm library replacement'}).waitFor();assert(app.store.getPost('later'));
@@ -41,6 +43,7 @@ test('Settings creates a downloadable encrypted backup and validates before conf
   try{await delay(50);assert.equal(readCompleted,false,'Reads must wait until both the restored database and media are ready');}finally{release();}
   assert.equal((await reading).feeds[0].posts,1);app.media.reload=reload;
   await page.getByText('Library restored. Sync explicitly when ready; the current browser account will be verified.',{exact:true}).waitFor();
+  assert.equal(await page.getByLabel('Search stored posts',{exact:true}).inputValue(),'');assert.equal(await page.getByLabel('Search scope',{exact:true}).inputValue(),'both');assert.equal(await page.getByLabel('Read status',{exact:true}).inputValue(),'all');
   assert.equal(app.store.getPost('later'),null);assert.notEqual(app.store.getPost('abc')!.readAt,null);assert(app.store.isPostExcluded('spam'));assert.equal(app.jobs.state.running,false);assert.equal(app.media.status.requests,0);
   const denied=await fetch(origin+'/api/restore/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});assert.equal(denied.status,403);
  }finally{await browser.close();await app.close();await rm(directory,{recursive:true,force:true});}

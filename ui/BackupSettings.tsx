@@ -1,7 +1,7 @@
 import React,{useRef,useState} from 'react';
 import type {BackupPreview} from '../src/library-backup.ts';
 
-export function BackupSettings({token,changed,setBusy}:{token:string;changed:()=>Promise<void>;setBusy:(busy:boolean)=>void}){
+export function BackupSettings({token,changed,setBusy}:{token:string;changed:(replaced?:boolean)=>Promise<void>;setBusy:(busy:boolean)=>void}){
   const [passphrase,setPassphrase]=useState(''),[repeat,setRepeat]=useState(''),[restorePassword,setRestorePassword]=useState('');
   const [file,setFile]=useState<File|null>(null),[preview,setPreview]=useState<BackupPreview|null>(null),[download,setDownload]=useState('');
   const [message,setMessage]=useState(''),[error,setError]=useState(''),[working,setWorking]=useState(false);
@@ -34,7 +34,7 @@ export function BackupSettings({token,changed,setBusy}:{token:string;changed:()=
     </form>
     {preview&&<div className="backup-preview" role="group" aria-label="Confirm library replacement"><p>{preview.posts.toLocaleString()} posts · {preview.files.toLocaleString()} media files · {(preview.bytes/1_000_000).toFixed(1)} MB</p><p>This replaces your current library, preferences, read states and exclusions. Your browser profile stays in place. Collection remains paused. Validation expires after 10 minutes.</p>
       <button className="button" disabled={working} onClick={()=>void run('Discarding staged backup…',async()=>{await request('restore/discard',json({id:preview.id}),headers);setPreview(null);setMessage('Restore cancelled; current library kept.');})}>Keep current library</button>
-      <button className="button danger" disabled={working} onClick={()=>void run('Restoring library…',async()=>{await request('restore/commit',json({id:preview.id,confirm:true}),headers);setPreview(null);setMessage('Library restored. Sync explicitly when ready; the current browser account will be verified.');await changed();})}>Replace library</button>
+      <button className="button danger" disabled={working} onClick={()=>void run('Restoring library…',async()=>{await request('restore/commit',json({id:preview.id,confirm:true}),headers);setPreview(null);setMessage('Library restored. Sync explicitly when ready; the current browser account will be verified.');await changed(true);})}>Replace library</button>
     </div>}
     {working&&!preview&&<button className="button stop" type="button" onClick={()=>controller.current?.abort()}>Cancel operation</button>}
     {message&&<p role="status" className="muted">{message}</p>}{error&&<p role="alert" className="notice error">{error}</p>}

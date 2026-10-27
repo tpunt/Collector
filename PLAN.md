@@ -5,7 +5,7 @@
 This section records the latest user decisions and takes precedence over older
 planning below. The core offline-content work now includes full post text,
 complete native galleries, archive media metadata and resumable downloads.
-Read tracking, encrypted backup/restore and indexed search scopes and storage management are implemented; the launcher addition below is in progress. Keep the app a compact, on-demand local web reader.
+Read tracking, encrypted backup/restore and indexed search scopes and storage management are implemented; the macOS launcher is implemented. Keep the app a compact, on-demand local web reader.
 
 Request pacing now uses a fresh uniform random 4–6 second delay after response
 readiness, shared by browser, archive and media traffic, including redirects and
@@ -133,7 +133,7 @@ integration or a generic plugin framework in this round.
   orange Not downloaded pill. Other unknown providers retain an original link;
   missing/deleted/denied source content cannot be promised offline.
 
-### 6. Easier launching
+### 6. Easier launching — implemented
 
 - Add a lightweight macOS launcher that starts the existing local server,
   opens the browser and offers Quit. Retain the CLI workflow.

@@ -14,7 +14,8 @@ import {advanceBoundary} from '../src/history.ts';
 import type {Listing} from '../src/extract.ts';
 
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jS9sAAAAASUVORK5CYII=','base64');
-async function until(condition:()=>boolean){const end=Date.now()+4000;while(!condition()){if(Date.now()>end)throw new Error('Feed sync fixture did not settle');await new Promise(resolve=>setTimeout(resolve,2));}}
+// These fixtures persist over 100 files and indexed rows; allow for concurrent disk load.
+async function until(condition:()=>boolean){const end=Date.now()+30_000;while(!condition()){if(Date.now()>end)throw new Error('Feed sync fixture did not settle');await new Promise(resolve=>setTimeout(resolve,2));}}
 async function setup(options:{images?:number;end?:boolean;unsupported?:boolean;fetch?:typeof fetch;discover?:JobDependencies['discoverMedia'];beforeListing?:()=>Promise<void>;ageDays?:number}={}){
  const directory=await mkdtemp(join(tmpdir(),'reader-unified-sync-')),path=join(directory,'reader.sqlite');
  const store=new ReaderStore(path),now=Date.now(),old=now-(options.ageDays??45)*86400000;

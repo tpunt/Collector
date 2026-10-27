@@ -22,14 +22,18 @@ import { STORAGE_CAP_MESSAGE } from './storage-limit.ts';
 import {LibraryBackups,recoverLibraryRestore} from './library-backup.ts';
 import {cleanupCriteria,cleanupPreview,storageBreakdown} from './library-storage.ts';
 import type {CleanupCriteria} from './library-storage.ts';
+import {claimInstance} from './instance.ts';
 
-export function createReaderServer(options: { database?: string; port?: number; backup?:{workFactor?:number}; archive?:{fetch?:typeof fetch}; jobs?: JobDependencies; media?: Partial<Pick<MediaDependencies,'directory'|'fetch'|'maxBytes'|'maxRequests'>> } = {}) {
+export function createReaderServer(options: { database?: string; port?: number; root?:string; onShutdown?:()=>Promise<void>; backup?:{workFactor?:number}; archive?:{fetch?:typeof fetch}; jobs?: JobDependencies; media?: Partial<Pick<MediaDependencies,'directory'|'fetch'|'maxBytes'|'maxRequests'>> } = {}) {
   const database=options.database??databasePath;
+  const lease=claimInstance(database,options.root??resolve(import.meta.dirname,'..'));
+  let startupStore:ReaderStore|undefined;
+  try {
   const temporaryMedia=database===':memory:'&&!options.media?.directory;
   const mediaDirectory=options.media?.directory??(temporaryMedia?join(tmpdir(),'reddit-reader-media-'+randomBytes(12).toString('hex')):options.database?join(dirname(resolve(database)),'media'):join(dataDirectory,'media'));
   const backupDirectory=database===':memory:'?join(tmpdir(),'collector-backups-'+randomBytes(12).toString('hex')):join(dirname(database),'.backup-work');
   recoverLibraryRestore(database,mediaDirectory,backupDirectory);
-  const store = new ReaderStore(database);
+  const store = startupStore = new ReaderStore(database);
   const network = options.jobs?.network ?? new RequestQueue({fromCompletion:true});
   let media: MediaCache;
   let archive:ArchiveFetcher;
@@ -64,15 +68,19 @@ export function createReaderServer(options: { database?: string; port?: number; 
     if (!Number.isSafeInteger(result) || result < 0) throw new Error('Invalid date');
     return result;
   };
-  const server = createServer(async (req, res) => {
+  let closing:Promise<void>|null=null,stopping=false,shutdownRequested=false;
+  const requests=new Set<Promise<void>>();
+  const handle = async (req:IncomingMessage, res:ServerResponse) => {
     res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src https://www.youtube-nocookie.com https://player.vimeo.com; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       if (req.headers.host !== new URL(origin).host || (req.headers.origin && req.headers.origin !== origin) || req.headers['sec-fetch-site'] === 'cross-site') { json(res, { error: 'Local requests only' },403); return; }
       const url = new URL(req.url ?? '/', origin);
+      if(stopping)throw new Error('Collector is stopping');
+      if(url.pathname==='/api/instance'&&req.method==='GET'){json(res,lease?.record??{id:null});return;}
       if(req.method==='GET'&&replacement)await replacement;
-      if(backups.recoveryRequired)throw new Error('Restore recovery requires an application restart; library access is blocked until recovery');
+      if(backups.recoveryRequired&&url.pathname!=='/api/shutdown')throw new Error('Restore recovery requires an application restart; library access is blocked until recovery');
       if (req.method === 'POST') {
         const supplied = String(req.headers['x-reader-token'] ?? '');
         if (supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { json(res,{error:'Invalid local request token'},403); return; }
@@ -96,10 +104,16 @@ export function createReaderServer(options: { database?: string; port?: number; 
         const data = await body(req);
         // Recheck after reading the body: another request may have begun cleanup meanwhile.
         assertCleanupIdle(url.pathname);
+        if(stopping)throw new Error('Collector is stopping');
         const cleansContent=cleanupPaths.has(url.pathname);
         if(cleansContent)cleaningContent=true;
         try {
         switch (url.pathname) {
+          case '/api/shutdown': {
+            if(!options.onShutdown)throw new Error('Stop this app from its terminal');
+            if(!shutdownRequested){shutdownRequested=true;res.once('finish',()=>setImmediate(()=>void options.onShutdown!().catch(error=>console.error('Unable to stop Collector:',error.message))));}
+            json(res,{ok:true});return;
+          }
           case '/api/storage/preview': {
             const criteria=cleanupCriteria(data);if(criteria.feed&&!store.storageFeeds().some(feed=>feed.feed===criteria.feed))throw new Error('Choose a stored feed');
             await quiesce();const inventory=await media.inventory();
@@ -227,7 +241,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
         res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':'attachment; filename="collector.tar.age"','Content-Length':file.bytes,'Cache-Control':'no-store'});
         await pipeline(createReadStream(file.path),res);return;
       }
-      if (url.pathname === '/api/state') { json(res,{ token, sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
+      if (url.pathname === '/api/state') { json(res,{ token, canQuit:Boolean(options.onShutdown), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
         storage:store.storage, import:importer.progress, imports:store.getSetting('imports') ?? [], account:store.getSetting('account') }); return; }
       if (url.pathname === '/api/feed') {
         const media = url.searchParams.get('media') ?? undefined;
@@ -250,19 +264,37 @@ export function createReaderServer(options: { database?: string; port?: number; 
         res.end(content);
       } catch { json(res,{error:'UI missing. Run npm run build first.'},404); }
     } catch (error) { if (!res.headersSent) json(res,{error:error instanceof Error ? error.message : 'Request failed'},400); else res.end(); }
-  });
+  };
+  const server=createServer((req,res)=>{const work=handle(req,res);requests.add(work);void work.finally(()=>requests.delete(work));});
   server.requestTimeout = 60 * 60_000;
-  return { server, store, jobs, importer, media, archive, backups, async listen() {
+  return { server, store, jobs, importer, media, archive, backups, async listen(port=options.port??Number(process.env.PORT??3210)) {
     await media.initialize();
-    await new Promise<void>(resolve => server.listen(options.port ?? Number(process.env.PORT ?? 3210),'127.0.0.1',resolve));
+    await new Promise<void>((resolve,reject)=>{
+      const fail=(error:Error)=>{server.removeListener('listening',ready);reject(error);};
+      const ready=()=>{server.removeListener('error',fail);resolve();};
+      server.once('error',fail);server.once('listening',ready);server.listen(port,'127.0.0.1');
+    });
     const address=server.address(); if (!address || typeof address === 'string') throw new Error('No local address');
-    origin=`http://127.0.0.1:${address.port}`; return origin;
-  }, async close() {await backups.close(); await archive.close();await importer.close(); await jobs.close();await media.close();server.closeAllConnections(); await new Promise<void>(resolve => server.close(()=>resolve()));store.close();if(temporaryMedia)await rm(mediaDirectory,{recursive:true,force:true}); } };
+    origin=`http://127.0.0.1:${address.port}`;lease?.publish(origin);return origin;
+  }, close() {return closing??=(async()=>{
+    stopping=true;
+    const drained=new Promise<void>(resolve=>server.close(()=>resolve()));
+    server.closeAllConnections();
+    const failures:unknown[]=[];
+    for(const close of [()=>backups.close(),()=>archive.close(),()=>importer.close(),()=>jobs.close(),()=>media.close()])try{await close();}catch(error){failures.push(error);}
+    await Promise.allSettled([...requests]);await drained;
+    // Do not release ownership while the primary database is still open, even
+    // if a cache/temporary-file cleanup failed during shutdown.
+    store.close();lease?.release();
+    if(temporaryMedia)try{await rm(mediaDirectory,{recursive:true,force:true});}catch(error){failures.push(error);}
+    if(failures.length)throw new AggregateError(failures,'Collector stopped, but some temporary files could not be cleaned up');
+  })();} };
+  }catch(error){startupStore?.close();lease?.release();throw error;}
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const app=createReaderServer();
-  console.log(`Reddit Reader: ${await app.listen()}`);
-  let closing=false;
-  const stop=async()=>{ if (closing) return; closing=true; await app.close(); process.exit(0); };
+  let closing:Promise<void>|null=null;
+  const stop=()=>closing??=app.close();
+  const app=createReaderServer({onShutdown:stop});
+  try{console.log(`Collector: ${await app.listen()}`);}catch(error){await stop();throw error;}
   process.on('SIGINT',()=>void stop()); process.on('SIGTERM',()=>void stop());
 }

@@ -12,7 +12,8 @@ import type {PostObservation} from '../src/domain.ts';
 
 const png=new Uint8Array([1,2,3]);
 const image=(n:number):PostObservation=>({id:'t3_'+n.toString(36),subreddit:'aww',title:'Offline image '+n,permalink:`/r/aww/comments/${n.toString(36)}/`,created:{epochMs:1700000000000+n*1000,precisionMs:1000},source:'live',observedAt:Date.now(),media:['Image'],attachments:[{kind:'image',url:`https://i.redd.it/offline${n}.png`}]});
-async function settle(jobs:ReaderJobs){const deadline=Date.now()+8000;while(jobs.state.running){if(Date.now()>deadline)throw new Error('Sync did not settle: '+jobs.state.message);await new Promise(resolve=>setTimeout(resolve,5));}}
+// These fixtures persist over 100 files and indexed rows; allow for concurrent disk load.
+async function settle(jobs:ReaderJobs){const deadline=Date.now()+30_000;while(jobs.state.running){if(Date.now()>deadline)throw new Error('Sync did not settle: '+jobs.state.message);await new Promise(resolve=>setTimeout(resolve,5));}}
 async function setup(options:{directory?:string;records?:PostObservation[];fetch?:typeof fetch;discover?:any}={}){
  const directory=options.directory??await mkdtemp(join(tmpdir(),'reader-offline-')),store=new ReaderStore(join(directory,'reader.sqlite'));store.addSubreddit('aww');
  const network=new RequestQueue({intervalMs:0}),visits:string[]=[],requests:string[]=[];let open=false;

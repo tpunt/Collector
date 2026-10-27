@@ -494,3 +494,47 @@ feed grid now constrains its column. The full 158 unit and 50 integration tests
 pass, along with type checking, production build and whitespace checks. The
 unit suite was run separately from the Chrome suite to avoid resource-contention
 timeouts in fixtures saving more than 100 files. No external collection was used.
+
+## macOS launcher and final workflow verification — 27 October 2026
+
+The executable Collector.command and npm run launch build the current UI and
+open the local app. A matching active checkout/library is reused. Independent
+libraries can run together; a busy default port falls back to an available local
+port, while an explicit PORT reports its conflict. Both CLI entry points now
+claim an OS-backed SQLite coordination lock before opening/recovering the primary
+database. A private discovery record supplies instance identity and its local
+address; it is not the lock itself. Concurrent processes cannot acquire ownership,
+and an actual SIGKILL test verifies automatic OS-lock release and stale-record
+replacement. Sharing another checkout's active library is refused. A
+macOS file-ownership check detects legacy processes that predate coordination.
+
+Settings provides Quit app. Shutdown stops listening, aborts collection/imports,
+waits for in-flight handlers, closes the database and releases ownership. It also
+works when restore recovery blocks other library operations. Repeated close is
+safe; quit/relaunch preserves content and starts with zero collection requests.
+The Finder script handles spaces, nvm/Homebrew paths and runtime errors. Missing
+Chrome/FFmpeg produces a collection warning without preventing offline reading;
+no dependencies are installed silently.
+
+The final full run passes 160 unit and 54 integration tests, type checking,
+production build, shell syntax and whitespace checks. Integration coverage adds
+actual UI Quit, authenticated shutdown, starting/build failures, port conflicts,
+isolated libraries, checkout mismatch, legacy-file ownership and crash recovery.
+Browser suite concurrency is capped at two. Disk-heavy 120-file fixtures have a
+30-second test deadline rather than failing under unrelated disk contention;
+production session/request limits are unchanged.
+
+Manual testing used an isolated six-post/two-feed library, with local gallery and
+video fixtures and no Reddit/CDN requests. The real launcher build, scoped
+search, viewport/manual read state, encrypted backup creation, storage inspection,
+cleanup preview/cancel, Quit and relaunch were exercised. This found a backup-
+creation callback that unnecessarily reset reader filters; only restore now
+resets them. The fix passes the six backup/launcher integration cases and was
+rechecked manually. Existing live user data and its running app were untouched.
+The temporary QA app was stopped. The storage screenshot is in the ignored QA
+directory at .local-data/qa/2026-10-27/storage-final.png.
+
+Live-library encryption remains deferred. Backups are encrypted; the working
+SQLite database, media and temporary restore/snapshot staging are not encrypted
+by Collector. Source availability and the agreed online-provider exceptions
+remain as documented in OFFLINE_AUDIT.md.

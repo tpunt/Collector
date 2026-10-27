@@ -2,7 +2,7 @@
 
 A local web app for reading selected subreddits on demand. Uses its own signed-in Chrome profile, Playwright, structured rendered Classic Reddit HTML, React, and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
 
-Viewport-based read tracking, encrypted backup/restore, scoped indexed search, storage management and complete native galleries are implemented. The [next-stage plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records the remaining launcher. Live-library encryption is deferred until after them.
+Viewport-based read tracking, encrypted backup/restore, scoped indexed search, storage management and complete native galleries are implemented. The [implementation plan](PLAN.md#current-scope-and-next-stage--27-october-2026) records the completed additions, including the macOS launcher. Live-library encryption remains deferred.
 
 Read status is local to Collector. A card is marked read after its full visible
 area has been shown for one second while the page is visible and unobscured.
@@ -15,15 +15,22 @@ and Clear remove it with the content.
 
 ## Run
 
+After the initial setup below, double-click **Collector.command** in Finder, or
+run `npm run launch`. It builds the current UI, opens the local web app and reuses
+an already-running instance from this checkout. Use **Settings → Quit app** or
+Ctrl+C in its terminal to stop it; saved files and checkpoints are retained.
+Nothing collects automatically on launch. Missing dependencies are explained;
+the launcher does not install anything silently.
+
+
 Use Node **25.3.0** (`nvm use`). Its built-in SQLite and Zstandard APIs are experimental. Installed Google Chrome is the default browser; Chrome's security sandbox is enabled. Dependencies are locked.
 
 ```sh
 npm ci
-npm run build
-npm start
+npm run launch
 ```
 
-Open **http://127.0.0.1:3210**. The compact dark All subreddits feed filters by subreddit, media type and text. **Media** combines image and video posts, hides text previews, and retains the post title, discussion and local-path controls. Text-only posts are excluded; **Image** and **Video** remain available separately. It is the single combined-feed destination in the sidebar. Post selection and AI summarisation have been removed. Open **Feeds** to view subscriptions, stored counts, per-subreddit sync status and the last successful offline sync time. Add a feed there with a history limit: **1 month** (default), 3 months, 6 months, 1 year, 2 years, 3 years, 5 years, or All time. The same setting is editable beside each subscription. Add & sync starts an explicit session. Sync a feed individually or use Sync all; already active/queued feeds are skipped. Nothing scrapes on application startup.
+The launcher opens the browser; the usual address is **http://127.0.0.1:3210**. The compact dark All subreddits feed filters by subreddit, media type and text. **Media** combines image and video posts, hides text previews, and retains the post title, discussion and local-path controls. Text-only posts are excluded; **Image** and **Video** remain available separately. It is the single combined-feed destination in the sidebar. Post selection and AI summarisation have been removed. Open **Feeds** to view subscriptions, stored counts, per-subreddit sync status and the last successful offline sync time. Add a feed there with a history limit: **1 month** (default), 3 months, 6 months, 1 year, 2 years, 3 years, 5 years, or All time. The same setting is editable beside each subscription. Add & sync starts an explicit session. Sync a feed individually or use Sync all; already active/queued feeds are skipped. Nothing scrapes on application startup.
 
 **Sync** combines new-post catch-up, unfinished history and supported media downloads. A feed shows **Saved offline** and advances **Last successful sync** only after all page scans in that run finish and every supported media item is validated and stored locally. **Incomplete** means a page or file still needs work; **Resume** checks newer posts and continues the saved checkpoints without downloading cached files again. Unavailable media, omitted extractions and the end of Reddit's listing are reported as **Completed with gaps**, with a separate Last completed timestamp. Neither partial progress nor completion with gaps advances the successful timestamp. This describes the requested sync, not a guarantee of every historical post or comment; discussions are still fetched explicitly when requested.
 
@@ -41,7 +48,9 @@ App data defaults to `.local-data/` inside this checkout, anchored to the source
 REDDIT_READER_DATA_DIR="/absolute/path/to/other-clone/.local-data" npm start
 ```
 
-Run only one instance at a time when sharing a data folder. Independently running clones need separate data folders and ports; `PORT` changes the default 3210. Existing data in the previous per-user folder is left in place, with no automatic copying. To keep using the previous macOS location, run `REDDIT_READER_DATA_DIR="$HOME/Library/Application Support/Reddit Reader" npm start`.
+Only one running app may own a data folder; an instance lease enforces this for both launch methods. Sharing with a different checkout requires quitting its current instance first. Independently running clones use their own data folders. The launcher tries port 3210, then an available local port if it is busy; it opens the actual address. An explicit `PORT` uses only that port and reports conflicts. `npm start` keeps its explicit-port behavior and requires the prior build. Existing data in the previous per-user folder is left in place, with no automatic copying. To keep using the previous macOS location, run `REDDIT_READER_DATA_DIR="$HOME/Library/Application Support/Reddit Reader" npm start`.
+
+The data folder also contains `.collector-lock.sqlite` and a private instance record for process coordination. Leave them in place while Collector may be running; stale ownership is recovered after a crash. Library backups exclude these files.
 
 The server binds only to `127.0.0.1`, validates Host/Origin and requires a per-launch token for mutations. It is a personal local app, not a hosted multiuser service.
 

@@ -16,7 +16,7 @@ import type { StorageStatus } from '../src/storage-limit.ts';
 import './style.css';
 
 type Feed = FeedSource & { offline:OfflineMediaCounts; status: 'idle' | 'queued' | 'syncing' | 'stopping' };
-type State = {token:string;sources:string[];feeds:Feed[];targets:HistoryTarget[];storage:StorageStatus;stats:{posts:number;snapshots:number;mediaPosts:number;contentRevision:number;databaseBytes:number};
+type State = {token:string;canQuit:boolean;sources:string[];feeds:Feed[];targets:HistoryTarget[];storage:StorageStatus;stats:{posts:number;snapshots:number;mediaPosts:number;contentRevision:number;databaseBytes:number};
   job:{running:boolean;manual:boolean;queued:number;subreddit:string|null;message:string;requests:{released:number;suppressed:number;sessionTotal:number};accessPause:{reason:string;notBefore:number|null}|null};
   media:{pending:number;bytes:number;requests:number;revision:number};import:{state:string;lines:number;accepted:number;omitted:number;bytes:number;reason:string|null}|null;imports:unknown[];archives:(ArchiveFetchState&{offline:OfflineMediaCounts})[];account:string|null};
 type Thread = {post:StoredPost;snapshot:ThreadSnapshot|null};
@@ -50,6 +50,7 @@ function Modal({title,close,children,wide=false}:{title:string;close:()=>void;ch
 }
 
 function App() {
+  const [stopped,setStopped]=useState(false),stoppedRef=useRef(false);
   const [state,setState]=useState<State|null>(null),[posts,setPosts]=useState<StoredPost[]>([]),[next,setNext]=useState<string|null>(null);
   const [view,setView]=useState(location.hash==='#feeds'?'feeds':'posts');
   const [source,setSource]=useState(''),[media,setMedia]=useState(''),[search,setSearch]=useState('');
@@ -82,12 +83,12 @@ function App() {
   async function loadState(){
     const version=++stateVersion.current;
     const value=await get<State>('/api/state');
-    if(version!==stateVersion.current)return{...value,contentChanged:false};
+    if(stoppedRef.current||version!==stateVersion.current)return{...value,contentChanged:false};
     const revision=JSON.stringify([value.stats.posts,value.stats.snapshots,value.stats.mediaPosts,value.stats.contentRevision,value.feeds.map(feed=>[feed.name,feed.postCount,feed.sync.lastSuccessAt])]);
     const contentChanged=revision!==pollVersion.current;pollVersion.current=revision;
     token.current=value.token;setState(value);return{...value,contentChanged};
   }
-  async function loadFeed(append=false){const version=++feedVersion.current,key=currentQuery.current,q=new URLSearchParams(key);if(append&&next)q.set('cursor',next);const result=await get<{posts:StoredPost[];next:string|null}>('/api/feed?'+q);if(version===feedVersion.current&&key===currentQuery.current){setPosts(old=>append?[...old,...result.posts.filter(post=>!old.some(item=>item.id===post.id))]:result.posts);setNext(result.next);}}
+  async function loadFeed(append=false){const version=++feedVersion.current,key=currentQuery.current,q=new URLSearchParams(key);if(append&&next)q.set('cursor',next);const result=await get<{posts:StoredPost[];next:string|null}>('/api/feed?'+q);if(!stoppedRef.current&&version===feedVersion.current&&key===currentQuery.current){setPosts(old=>append?[...old,...result.posts.filter(post=>!old.some(item=>item.id===post.id))]:result.posts);setNext(result.next);}}
   async function action(path:string,data:unknown={}){
     setError('');setBusy(true);
     try{const response=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token.current},body:JSON.stringify(data)});const value=await response.json();if(!response.ok)throw new Error(value.error);if(value.warning)setError(value.warning);await loadState();await loadFeed();return value;}
@@ -100,19 +101,19 @@ function App() {
     setPosts(old=>old.map(post=>post.id===id?{...post,readAt:value.post.readAt}:post));
     setThread(old=>old?.post.id===id?{...old,post:{...old.post,readAt:value.post.readAt}}:old);
   },[]);
-  useReadTracking(view==='posts'&&!modal&&!thread&&!removeFeed&&!clearFeed&&!postToDelete&&Boolean(state),markRead,suppressedReads.current);
+  useReadTracking(!stopped&&view==='posts'&&!modal&&!thread&&!removeFeed&&!clearFeed&&!postToDelete&&Boolean(state),markRead,suppressedReads.current);
   useEffect(()=>setReadBefore(Date.now()),[source,media,search,searchScope]);
   useEffect(()=>{const timer=setTimeout(()=>void loadFeed().catch(e=>setError(e.message)),200);return()=>clearTimeout(timer);},[source,media,search,searchScope,readFilter,readBefore]);
   useEffect(()=>{
     let pending=false,disposed=false;
     const timer=setInterval(()=>{
-      if(pending)return;pending=true;
+      if(pending||stoppedRef.current)return;pending=true;
       void loadState().then(async value=>{
-        if(disposed)return;
+        if(disposed||stoppedRef.current)return;
         if(value.contentChanged)await loadFeed();
         const id=threadId.current;
         if(id){const result=await get<Thread>('/api/post/'+id);if(threadId.current===id){if(result.post)setThread(result);else{setThread(null);threadId.current=null;}}}
-      }).catch(e=>{if(!disposed)setError(e.message);}).finally(()=>{pending=false;});
+      }).catch(e=>{if(!disposed&&!stoppedRef.current)setError(e.message);}).finally(()=>{pending=false;});
     },2000);
     return()=>{disposed=true;clearInterval(timer);};
   },[]);
@@ -124,6 +125,12 @@ function App() {
       const response=await fetch('/api/import?'+q,{method:'POST',headers:{'X-Reader-Token':token.current},body:upload});const value=await response.json();if(!response.ok)throw new Error(value.error);if(value.state==='paused')setError(value.reason);await loadState();await loadFeed();
     }catch(e){setError((e as Error).message);}finally{setImportBusy(false);}
   }
+  async function quit(){
+    setBusy(true);setError('');
+    try{const response=await fetch('/api/shutdown',{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token.current},body:'{}'});const value=await response.json();if(!response.ok)throw new Error(value.error);stoppedRef.current=true;stateVersion.current++;feedVersion.current++;setStopped(true);}
+    catch(error){setError((error as Error).message);}finally{setBusy(false);}
+  }
+  if(stopped)return <div className="empty-state" role="status"><h1>Collector stopped</h1><p>Close this tab, or relaunch Collector.command to keep reading.</p></div>;
   const feedSync=(feed:Feed)=>syncing(feed)?<button className="button stop" disabled={busy||feed.status==='stopping'} onClick={()=>void action('pause',{name:feed.name})} aria-label={'Stop r/'+feed.name}>{feed.status==='stopping'?'Stopping…':'Stop'}</button>:
     <button className="button" disabled={busy||Boolean(state?.job.manual)} onClick={()=>void action('sync',{names:[feed.name]})} aria-label={syncLabel(feed)+' r/'+feed.name}>{syncLabel(feed)}</button>;
   return <div className="app">
@@ -221,7 +228,7 @@ function App() {
         <p className="muted">{storedSize(state?.storage.usedBytes??0)} stored. Includes the database and saved media. Browser profile and temporary files are excluded.</p>
         <p className="muted">Sync and imports pause at the cap. Lowering it keeps existing content. Raise it, then Resume to continue saving.</p>
         <div className="settings-save"><button className="button primary" disabled={busy||!state}>Save cap</button>{storageSaved&&<span role="status">Saved</span>}</div>
-      </form><p><button className="button" disabled={busy} onClick={()=>{setError('');setModal('storage');}}>Manage storage</button></p><BackupSettings token={token.current} setBusy={setBusy} changed={async()=>{await loadState();setSource('');setMedia('');setSearch('');setSearchScope('both');setReadFilter('all');setReadBefore(Date.now());setThread(null);threadId.current=null;}}/><div className="settings-account"><p>{state?.account?'Signed in as '+state.account:'Account verified on collection'}</p><button className="button" disabled={busy} onClick={()=>void action(state?.job.manual?'sign-in/finish':'sign-in')}>{state?.job.manual?'Finish sign-in':'Open sign-in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setModal('clear');}}>Clear collected content</button></div></>}
+      </form><p><button className="button" disabled={busy} onClick={()=>{setError('');setModal('storage');}}>Manage storage</button></p><BackupSettings token={token.current} setBusy={setBusy} changed={async(replaced)=>{await loadState();if(!replaced)return;setSource('');setMedia('');setSearch('');setSearchScope('both');setReadFilter('all');setReadBefore(Date.now());setThread(null);threadId.current=null;}}/><div className="settings-account"><p>{state?.account?'Signed in as '+state.account:'Account verified on collection'}</p><button className="button" disabled={busy} onClick={()=>void action(state?.job.manual?'sign-in/finish':'sign-in')}>{state?.job.manual?'Finish sign-in':'Open sign-in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setModal('clear');}}>Clear collected content</button></div>{state?.canQuit&&<div className="settings-account"><p>Quit stops collection and preserves saved files and checkpoints.</p><button className="button" disabled={busy} onClick={()=>void quit()}>Quit app</button></div>}</>}
       {modal==='source'&&<form onSubmit={e=>{e.preventDefault();void action('sources',{name,historyMonths:months}).then(result=>{if(result){setModal(null);setName('');}});}}>
         <label>Subreddit<input required placeholder="e.g. python or r/aww" value={name} onChange={e=>setName(e.target.value)}/></label><label>History limit<select value={months} onChange={e=>setMonths(Number(e.target.value) as HistoryMonths)}>{HISTORY_OPTIONS.map(option=><option key={option.months} value={option.months}>{option.label}</option>)}</select></label>
         <p className="muted">Saves recent posts, history and supported media locally, up to 60 minutes and 120 requests per session. Stop anytime and Resume from saved progress.</p><button className="button primary" disabled={busy}>Add &amp; sync</button>

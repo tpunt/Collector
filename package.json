@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=25.3.0"
   },
   "scripts": {
     "probe": "node src/probe.ts",
@@ -14,8 +14,9 @@
     "test:network": "node --test tests/network.integration.ts",
     "build": "vite build",
     "start": "node src/server.ts",
+    "launch": "node src/launcher.ts",
     "dev": "vite build --watch",
-    "test:browser": "node --test tests/*.integration.ts"
+    "test:browser": "node --test --test-concurrency=2 tests/*.integration.ts"
   },
   "dependencies": {
     "age-encryption": "^0.3.1",
