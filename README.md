@@ -1,11 +1,18 @@
 # Collector
 
-A local web app for reading selected subreddits on demand. Uses its own signed-in Chrome profile, Playwright, structured rendered Classic Reddit HTML, React, and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
+A local web app for collecting posts and media for offline reading. Reddit is the first supported source. Its collector uses its own signed-in Chrome profile, Playwright and structured rendered Classic Reddit HTML; the app uses React and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
+
+The sidebar groups feeds by platform, with subreddits indented under **Reddit**.
+**All feeds**, search, read tracking and favourites are shared views. Each post
+shows its platform and feed; **Archive** separately identifies its provenance.
+Reddit display labels come from a small presentation adapter. A future source
+such as Tumblr can supply its own platform/feed labels to the shared post view;
+adding its collector and namespaced persistence remains future work.
 
 Star a post to save it in **Favourite posts**, or star the author beside their
 username to add them to **Favourite users**. Both views work offline with the
-usual search, read-status, media and subreddit filters. Favourite users shows
-all locally collected posts by those authors across subreddits; select a username
+usual search, read-status, media and feed filters. Favourite users shows
+all locally collected posts by those authors across feeds; select a username
 to narrow it to one author. Future synced/imported posts by a favourite author
 appear automatically. These actions do not follow accounts or make requests to
 Reddit. Posts and cached media from removed subscriptions remain available in
@@ -47,7 +54,7 @@ npm ci
 npm run launch
 ```
 
-The launcher opens the browser; the usual address is **http://127.0.0.1:3210**. The compact dark All subreddits feed filters by subreddit, media type and text. **Media** combines image and video posts, hides text previews, and retains the post title, discussion and local-path controls. Text-only posts are excluded; **Image** and **Video** remain available separately. It is the single combined-feed destination in the sidebar. Post selection and AI summarisation have been removed. Open **Feeds** to view subscriptions, stored counts, per-subreddit sync status and the last successful offline sync time. Add a feed there with a history limit: **1 month** (default), 3 months, 6 months, 1 year, 2 years, 3 years, 5 years, or All time. The same setting is editable beside each subscription. Add & sync starts an explicit session. Sync a feed individually or use Sync all; already active/queued feeds are skipped. Nothing scrapes on application startup.
+The launcher opens the browser; the usual address is **http://127.0.0.1:3210**. The compact dark All feeds feed filters by subreddit, media type and text. **Media** combines image and video posts, hides text previews, and retains the post title, discussion and local-path controls. Text-only posts are excluded; **Image** and **Video** remain available separately. It is the single combined-feed destination in the sidebar. Post selection and AI summarisation have been removed. Open **Feeds** to view subscriptions, stored counts, per-subreddit sync status and the last successful offline sync time. Add a feed there with a history limit: **1 month** (default), 3 months, 6 months, 1 year, 2 years, 3 years, 5 years, or All time. The same setting is editable beside each subscription. Add & sync starts an explicit session. Sync a feed individually or use Sync all; already active/queued feeds are skipped. Nothing scrapes on application startup.
 
 Search, title/body scope, read status and subreddit selection live in the sidebar and apply automatically. **Read+Unread** shows both read states. Subreddit choices filter the current feed or favourites view; the Collector logo returns to the combined feed. Changing a sidebar filter from Feeds opens the post feed.
 

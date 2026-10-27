@@ -12,7 +12,7 @@ test('an empty library shows its normal empty state without collection or error 
   page.on('request',request=>{if(request.method()!=='GET')mutations.push(request.url());if(!request.url().startsWith(origin))remote.push(request.url());});
   await page.goto(origin+'/#feeds');await page.waitForResponse(response=>response.url()===origin+'/api/state');
   assert.equal(await page.getByRole('heading',{name:'No feeds yet',exact:true}).count(),1);assert.equal(await page.getByRole('button',{name:'Sync all',exact:true}).isDisabled(),true);
-  await page.getByRole('button',{name:/^All subreddits/}).click();await page.getByRole('button',{name:'Manage feeds',exact:true}).waitFor();
+  await page.getByRole('button',{name:/^All feeds/}).click();await page.getByRole('button',{name:'Manage feeds',exact:true}).waitFor();
   assert.equal(await page.getByRole('alert').count(),0);assert.deepEqual(mutations,[]);assert.deepEqual(remote,[]);assert.equal(app.jobs.state.requests.sessionTotal,0);
  }finally{await browser.close();await app.close();}
 });
