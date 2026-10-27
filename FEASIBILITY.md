@@ -1,0 +1,214 @@
+# First milestone evidence — 30 September 2026
+
+The plan is ready to implement. This milestone supplies runnable storage/pacing modules and a bounded DOM probe; it does not establish a supported Reddit extractor.
+
+- Node 25.3.0, installed Playwright 1.63.0 (locked dependencies). Built-in `node:sqlite` is experimental in this runtime.
+- The Playwright Chromium download failed repeatedly with an installer directory-lock error. No dependency internals were patched. Installed Google Chrome successfully launched under Playwright in a fresh, app-owned profile using `--channel chrome`.
+- One public, headless inventory attempt for `r/python`: `old.reddit.com/r/python/new/` returned 302 to `/login/`, then HTTP 403. No post hosts, absolute times or Next links were available. The limiter paused; the modern layout was not attempted after the block. No feed was collected.
+- Authenticated profile reuse, post/comment extraction, media categories, pagination/restart and actual reachable history depth remain unverified. The next live check requires manual sign-in/access in the dedicated visible browser. No AI or bypass technique is used to recover access.
+
+Run the visible check from an interactive terminal:
+
+```sh
+npm run probe -- --channel chrome --login --subreddit python
+```
+
+If Reddit blocks that initial navigation, the browser stays open for manual inspection/sign-in; the probe remains paused and prints its result when Enter is pressed. A later run is explicit. The probe never asserts programmatic session validation from a cookie or a login redirect.
+
+Codex self-review found no planning blocker. Storage tests exercise real SQLite transactions/restarts; limiter tests exercise shared serialization, readiness spacing, blocked queues and explicit cooldown/revalidation. Clear also retains minimal known-deletion protection for followed namespaces, without retaining their bodies. These checks do not substitute for live layout evidence.
+
+Quick Claude Opus 5.5 code review: actual model `claude-opus-5-5`, session `095782a0-c33c-423a-b559-d0962b4cc496`, input SHA-256 `acdbdc25b3aa9408b9c2691a0dabcf5f2c0aca8070aa4b26dbbdee7f6ee061bf` before review fixes. Verdict: ready for feasibility after fixing login-pause reporting. That fix is incorporated, along with separate headless/manual-login profiles, clear unknown-subreddit errors and a bounded DOM inventory. Codex also checked that a later partial head observation cannot reinstate a removed body without explicit live availability evidence.
+
+## Request-limit warning and correction
+
+The visible sign-in probe was launched later and remained waiting for user input. The user reported Reddit's too-many-requests message; Codex immediately cancelled the probe and closed its browser. There had been two app-initiated navigations across both live runs (head listing and login), plus the first run's automatic redirect. Browser-generated HTTP requests were not counted in those versions, so the historical total is unknown. No subsequent live Reddit request was made for this correction.
+
+The previous action limiter did not limit the HTTP resources a page loads. A browser request-stage gate now releases at most one intercepted HTTP request per five seconds globally, independently of the existing 10/5-second action pacing. A local-only Chromium fixture verifies redirects, scripts, fetches, frames, worker requests and multiple tabs; shortened intervals in that integration fixture avoid hitting any website. A separate deterministic queue test verifies the production five-second interval. Request counts appear in completion/cancellation reports. Any block/429 also stops pending requests; no automatic retry or website restart after this warning.
+
+## Sign-in attempt — 22 October 2026
+
+The user reached the sign-in form after a long load, then reported Reddit's generic extensions/browser error. They also reported Chrome's `--no-sandbox` warning. The probe was stopped: one automated navigation, 58 browser-observed HTTP requests and 59 interception events, with 37 releases and 22 cancellations. Browser request events and interception events have different counts; these are operational observations, not a reconstructed server access log.
+
+The installed Playwright launcher adds `--no-sandbox` unless `chromiumSandbox` is explicitly true. The shared launch options now enable the sandbox, and a local-only test inspects Chrome's actual arguments. Extensions were already disabled by Playwright. Reddit's generic message does not prove an extension or sandbox caused the rejection. Queueing all assets and authentication requests five seconds apart may disrupt time-sensitive sign-in; this remains a hypothesis. The user's request cap remains unchanged, and no additional live sign-in attempt is made as part of the sandbox fix.
+
+## Authenticated session verified — 22 October 2026
+
+The user subsequently authorised an agent-driven sign-in by supplying credentials. One login form submission was made using the native rendered inputs and button. Credentials entered through non-echoing stdin were kept out of project files and application diagnostics. No password was entered during the later verification run, and no cookies, hidden session state or response bodies were read for authentication evidence.
+
+The first form-loading run made no submission because its username selector matched both a web-component wrapper and the native input. The corrected helper matched the native input, submitted once, and observed a redirect to the home page. That redirect alone was not treated as proof of authentication.
+
+A subsequent browser restart reused the app-owned profile. On `old.reddit.com/r/python/new/`, the visible account header and its profile link both matched the expected identity, confirming sign-in and saved-session reuse. The listing exposed 25 post hosts, 26 absolute-time elements and one Next control. These are observed DOM counts, not a completeness claim or a validated creation-time/media/comment extractor. Actual Next navigation, comment/media extraction and reachable historical depth still need bounded tests.
+
+The five-second HTTP cap stayed enabled throughout. Request-gate counters for these three runs:
+
+| Run | Form submitted | Intercepted | Released | Cancelled |
+| --- | --- | --- | --- | --- |
+| Initial form readiness | No | 83 | 71 | 12 |
+| Corrected sign-in | Once | 98 | 64 | 34 |
+| Saved-session verification | No | 31 | 16 | 15 |
+
+The browser was closed after verification. Passwords were not added to application settings, source or fixtures. Remaining browser work can use the saved session without retaining the supplied password.
+
+## Web app implementation and bounded live checks — 22 October 2026
+
+Classic Reddit is the implemented adapter. The collector disables page JavaScript and suppresses scripts, images, media, fonts, XHR/fetch, pings and miscellaneous assets before dispatch. CSS remains enabled so extraction can reject hidden elements. Interactive login uses the same saved profile with JavaScript enabled and normal resources still paced.
+
+The structured extractor accepted 25 posts per observed page with zero omissions in the successful Python checks. Creation times were distinguished from edited timestamps. It followed the actual rendered Next URL to distinct older content, then read one thread containing 37 comments with resolved parents. No screenshots, hidden state, Reddit JSON/API endpoint, response body or AI was used to collect content.
+
+Early checks read before HTML readiness, then pagination timed out because queued resources from the preceding page remained. Collection now waits for the paced page load before following Next (bounded at 180 seconds). These failures were not retried automatically by the application; development reruns were explicit and bounded.
+
+| Live check in this implementation session | Released HTTP requests | Outcome |
+| --- | ---: | --- |
+| Initial Classic DOM readiness inspection | 2 | Read too early; browser closed |
+| Corrected DOM readiness inspection | 2 | Structured attributes and Next observed |
+| First pagination extraction check | 10 | First 25 posts validated; Next timed out; browser closed |
+| Corrected listing/listing/thread check | 16 | Two distinct 25-post pages and 37-comment thread validated |
+| Add & collect through the running web UI | 15 | 75 posts stored; zero omissions; inferred requested date crossing |
+| Read discussion through the running web UI | 13 | 37 comments saved, actual best sort, resolved parent IDs |
+
+These recorded checks total **58 dispatches**, excluding earlier sign-in/probe runs documented above. Counts are interception releases, not reconstructed Reddit server logs or API calls. Every run retained five-second dispatch spacing. Before the final app checks, a local-only network fixture exposed delayed arrivals bunching at the server. The gate was strengthened to wait for response readiness and then five seconds before the next request. It observes only operational lifecycle/status metadata, never response bodies. Redirects and owning-frame worker requests require response-stage continuation to avoid deadlock; the local fixture verifies those paths. The final app checks used that stronger policy and saw no 429 or access pause.
+
+The running app stores 75 real r/Python posts and one 37-comment live snapshot. This is a small empirical sample, not proof of deep listing reachability or complete history. Media URL classification and hidden/invalid-card handling are tested with local fixtures; live image/video communities have not yet been sampled. The thread's Top control was hidden with scripts disabled, so extraction records the actual visible best sort rather than following a hidden link.
+
+Local verification covers real SQLite transactions/restarts, generation and deletion safeguards, conservative date boundaries, archive provenance, streamed JSONL/Zstandard handling, complete compressed-frame checks, oversized decoder windows, UTF-8/truncation failures, citation validation, provider cooldown/cache behavior via stub, local API origin/token checks, real browser UI filtering/uploads, mobile overflow, sandbox flags and actual paced network requests. Real paid summary calls remain untested and disabled until provider/model/key configuration.
+
+The latest requested Opus 5.5 implementation review **did not run**: the installed Claude CLI reported `OAuth session expired and could not be refreshed` with no model usage. Codex reviewed and tested the implementation; earlier successful Opus planning/foundation reviews do not cover this code. One automatic permission-review attempt timed out before execution; a later approved attempt reached the CLI and established the authentication failure. No credentials or browser profile data were sent for review.
+
+A final application restart retained all 75 posts and the 37-comment discussion, with zero website requests after restart and no browser UI errors. The oldest observed post in that bounded scan was 30 September 2026, 12:34:35 UTC. The app was left running and idle at `http://127.0.0.1:3210`. Final checks: TypeScript check/build, 30 unit/storage/streaming/provider tests and five local browser/API integration tests passed. Media filters include explicit Reddit gallery, direct image/video, YouTube video and Vimeo video URL rules; a channel link remains Link.
+
+## Compact dark UI and multiple feeds — 22 October 2026
+
+The user requested a dark theme, higher information density, removal of the From/To reading filters and marketing copy, and a dedicated subscription-management page. These changes are implemented. Feeds now shows per-subreddit stored counts, last successful refresh, current/queued/stopping state, individual/all refresh, Stop, Add feed and confirmed removal. A successful newest-page checkpoint updates its refresh timestamp in the same transaction as the content; scheduling, failed/stopped attempts and older-page progress do not masquerade as a refresh. These timestamps persist after restart. Removing a feed keeps stored content/history, stops its work and excludes it from subscribed post queries.
+
+A bounded live test added **r/aww**, which produced **25 posts: 20 Image and 5 Video**, alongside the existing 75 Python posts. Refresh all queued Python while Aww was already active, without duplicating Aww. After the first Aww page committed, its history work was stopped independently and Python continued to finish. Both successful refresh timestamps were visible; Aww retained a saved Next checkpoint and stopped state. The test released **16 HTTP requests**, still at the established five-second response-aware spacing, with no 429/access pause and no UI errors. Image filtering rendered all 20 expected image cards. The app was left idle rather than crawling Aww’s high-volume seven-day history.
+
+Local tests exercise stopping active versus queued feeds, preserving checkpoint/timestamp state, unrelated feeds continuing, last-success atomicity and restart persistence, refresh selection scope, removal requiring explicit confirmation, the real confirmation dialog’s Keep/Remove paths, add/remove controls, dark styling, subreddit filters and mobile overflow. These local fixtures make no Reddit requests.
+
+The final read-only UI checks also exercised the five saved video posts and retaining expanded pages across status polling. A polling-initialisation bug found during that check was fixed and covered by a browser regression test. The user’s existing in-app tab was reloaded into the new dark UI and opened on Feeds, showing both communities, their separate refresh times, stopped Aww history and completed Python refresh. Final verification for this revision: 34 unit/storage/scheduler/provider tests and eight local browser/API integration tests, plus TypeScript/build checks.
+
+## Per-feed history windows and a real listing-end test — 22 October 2026
+
+Implemented per-feed calendar presets: 1 month (default), 3 months, 6 months, 1 year, 2 years, 3 years, 5 years and All time. The picker is on each Feeds row and in Add feed. Expanding starts a saved backfill automatically; contraction stops wider work, keeps all stored content, and makes no new collection request. Preferences and checkpoints persist across restart. Feeds shows stored counts, oldest/newest dates, live/archive counts, known omissions and distinct selected-range/listing-end/paused outcomes. Page overscan is retained.
+
+The deeper live test used r/Python, the saved login and the unchanged response-aware five-second HTTP limiter:
+
+| Operation | Python posts stored after the operation | Oldest observed post | HTTP releases |
+| --- | ---: | --- | ---: |
+| Fetch one month from the saved September checkpoint | 125 | 11 September 2026 | 13 |
+| Expand one month → three months (automatic backfill) | 300 | 5 July 2026 | 18 |
+| Expand three months → All time, including fresh catch-up before older continuation | 954 | 23 February 2026, 12:30:54 UTC | 41 |
+
+The All time run followed real visible Next links until Reddit served a final listing page with no Next link. Completion is recorded as **listing-end**, not complete lifetime coverage. No artificial 1,000-post bound was built into the crawler; this observed traversal accepted 954 distinct posts. No extraction omissions, 429 or access pause were observed. The three live phases released **72 HTTP requests** in total. Restarting between phases made no website request until the next explicit action.
+
+This proves the website adapter can traverse and checkpoint an extended reachable listing. It also establishes the limitation: the tested Reddit listing did not expose older history beyond February 2026. All time in this app means what that browser listing serves; older lifetime coverage requires archive input and remains subject to source gaps. The importer exists, but automatic archive acquisition is not enabled.
+
+Local tests cover the calendar choices/month-end/leap-year bounds, known-ID replay without premature stopping, one-month/three-month/all-time traversal through a realistic multi-page fixture, sparse ancient archives not moving browser progress, checkpoint reuse, persistent fresh-catch-up dependencies before older work, disconnected rolling windows after a long absence, and contraction preserving content without fetching. The current suite contains 39 unit/storage/scheduler/provider tests and ten local browser/API integration tests, plus TypeScript/build checks.
+
+A final live contraction from All time back to one month retained all 954 Python posts and their oldest date. The request counter stayed at 41 before/after contraction and collection remained idle. There are 979 stored posts overall (954 Python, 25 Aww), plus the earlier 37-comment snapshot. Both feeds were left on the one-month default.
+
+
+## Inline media and timestamp validation — 22 October 2026
+
+Feeds now shows each timestamp beside its label, Newest before Oldest with full date/time, and bordered Fetch/Continue history buttons. Verified in the running local app, including the narrow layout.
+
+The Aww test collection now has 53 saved posts (954 Python posts retained). Four direct image downloads were cached and displayed in the real feed. The native-video test used `t3_1xcihd9`: the initial resolver selected a low-resolution preview; the live check caught this and the corrected resolver uses the player’s observed DASH manifest. Post text remains rendered-DOM-only. Media manifest/file bodies are the explicit binary-media exception, never Reddit API or hidden post state. The manifest is bounded and parsed with fast-xml-parser; explicit video/audio BaseURL entries are validated against the owning CDN directory. Native preview and manifest/MP4 requests are suppressed before browser dispatch and downloaded through the shared paced queue.
+
+The final native-video run recorded 20 browser releases plus three CDN requests (manifest, main video, audio), with no access pause/429. FFmpeg produced a local file containing H.264 video at 360 × 640 and AAC audio. Actual UI playback reached currentTime > 0 with no media error, duration 10.959833 seconds; playback ended normally. Local file playback did not issue CDN requests. Final job queue and media queue were idle.
+
+Recorded releases across this media investigation: Classic listing/thread inspection 14; current-layout checks 2 + 3 + 2 (no usable media DOM); normal-player inspection 22 + 22; bounded Aww refresh 14; initial image/preview run 25; final manifest run 23. Each collector used the five-second request gate. Local automated tests make no Reddit requests. These are per-run recorded HTTP-release counters, not counts of UI navigations.
+
+Validation: TypeScript check, production build, 45 unit/storage/limiter tests and 13 browser/API/network integration tests pass. The focused media regression also verifies pacing between manifest/video/audio/image requests, local byte-range playback, cache reuse, rendered gallery extraction and rejection of unrelated/hidden media. Screenshots: `/private/tmp/reddit-reader-timestamps-actual.png` and `/private/tmp/reddit-reader-inline-media-actual.png` contain real local app data. Gallery expansion currently collects rendered slides only; complete gallery traversal and external embedded providers are not claimed.
+
+## Media saved by sync — 22 October 2026
+
+Refresh/history work now includes a persistent media backlog. Reading posts and GET status/file endpoints make no remote download requests; per-post download/discovery mutation routes and the Load media button are removed. Existing missing media is included, even if the post history target is already complete. Known direct files within each batch are saved before slower browser discovery. Feeds reports media posts ready/pending/failed/unavailable; stopped/interrupted files remain pending for explicit Continue or Refresh. The browser and CDN share the same five-second completion-based queue and 120-actual-request session budget. Restart reconciles local cached files without starting network work. Files are retained without automatic eviction or an aggregate cache cap, with per-file bounds and a pause on disk exhaustion.
+
+A live gallery investigation recorded 20 Classic browser releases, then 57 current-layout releases before its bounded navigation timed out. The current layout did not provide verified complete gallery traversal. A subsequent bounded backlog run recorded 21 browser releases before stopping. These checks were all paced; no bypass or API fallback was used. Galleries are now explicitly unavailable rather than treating a rendered first slide as a complete offline gallery. Unsupported-provider errors do not stop unrelated media; access/rate-limit failures still stop the entire sync.
+
+The final bounded sync saved `t3_1xcj266` (The cute Bailey from our shelter) automatically while the app remained on Feeds, using exactly one CDN request and zero browser requests. The file is 85,689 bytes. The check stopped immediately after the first additional post became ready; Aww now has 7/53 media posts offline, with remaining work preserved. Local viewing does not fetch that file again. The app is running and idle at `http://127.0.0.1:3210`.
+
+Validation: TypeScript check, production build, 52 unit/storage/workflow tests and 14 local browser/API/network integration tests pass. Workflow coverage includes more than one backlog chunk, native-video discovery, shared request budgets, interrupted restart/resume after completed history, per-file failures, connectivity loss, stop/clear and rejecting incomplete gallery coverage. Browser checks verify images/playable native video from local files, no remote requests on viewing/reload, and no per-post Load media control. Tests use local fixtures/stubs, not Reddit. Browser tests require the documented installed-Chrome channel (`REDDIT_READER_BROWSER_CHANNEL=chrome`).
+
+## Storage cap and combined-feed navigation — 22 October 2026
+
+Removed the duplicate Posts sidebar link; All subreddits is the combined feed, including on mobile. Settings now saves Max stored size in GB, default 10 GB. Usage includes the allocated database and saved media/cache metadata, excluding browser profile, journals and temporary working files. Sidebar shows both percent used and used/cap sizes. Capacity checks cover live batches/checkpoints, imported batches, discussions, summaries and media headers/streams/publication. Lowering the cap preserves posts and offline files; raising it requires an explicit collection action. Clear compacts the database.
+
+Validation: TypeScript check, production build, 55 unit/storage/workflow tests and 16 local browser/API/network integration tests pass. New checks verify cap validation/authentication/persistence, rollback of oversized batches without advancing checkpoints, partial-file cleanup, offline-file preservation after lowering/restart, blocking collection before network requests at capacity, database space reclamation by Clear, sidebar percentages and mobile navigation. All tests use local fixtures/stubs.
+
+The running app was restarted and Settings saved 10 GB successfully. Actual status: 3,971,205 bytes stored (0.03971205%, displayed 0.04%), all 1,007 posts retained, idle queue and zero Reddit/CDN requests in this app session. Screenshots: `/private/tmp/reddit-reader-storage-settings-actual.png` and `/private/tmp/reddit-reader-storage-sidebar-actual.png`.
+
+## Review fixes and live verification — 23 October 2026
+
+All six confirmed review findings are fixed: repeated pages no longer contribute to history completion (including repeated listing ends); media discovery has separate URL evidence without replacing archive text/provenance; native-video 403 failures persist rediscovery for explicit Continue across restart; a failed VACUUM reports a warning without skipping media cleanup; orphan/corrupt cache entries count toward capacity; delayed polls/feed responses cannot replace the selected filter. Media status now says whether it is downloading, queued in a running sync, unavailable, failed, or not downloaded while stopped.
+
+Further review bounded aggregate archive-comment samples to four million characters with omission counts, and made shutdown await aborted imports. Successful discussion retries clear stale feed errors. Thread extraction selects the exact visible post rather than the first card, which may be unrelated or hidden.
+
+Actual use exposed a moderator-removed Python OP (`t3_1xcdh70`) that renders a discussion but no post ID attribute. A bounded DOM diagnostic confirmed this specific Classic layout. The reader now accepts that case only with the matching thread URL, a unique visible unlabelled post and an explicit removal marker. The final live read saved **12 comments**, reply ancestry and the observed **best** sort, while marking the OP removed and hiding its body/media. The result survives restart.
+
+The live Aww refresh fetched **25 new posts** (53 → 78) and automatically saved media for **14 additional posts** (7 → 21 offline) without opening those posts. Total stored posts: **1,032**. The actual app was also used to filter by subreddit/type/text, save the 10 GB setting, play the existing local native video (10.959833 seconds; playback advanced to 7.289763 seconds), and copy its exact local path. The native video reports no playback error and uses `/media/…`, not a remote source. The idle wording no longer claims an active pending sync.
+
+Live checks made **78 actual Reddit/CDN requests in total across the bounded runs**: 39 in the initial refresh/discussion session, 13 in the selector retry, 13 in the public-DOM diagnostic, and 13 in the final successful discussion read. The shared five-second completion-based limiter remained enabled. No block/429 occurred and there were no automatic retries. The app was restarted afterward and left running idle; per-launch request counts reset on restart. Unfinished Aww history/media remain saved for an explicit Continue/Refresh.
+
+Validation: **62 unit/workflow tests and 18 local Chrome/API/network integration tests pass**, together with TypeScript and the production build. Focused checks were repeated after the final stale-error and summary-mode changes. No Reddit requests or paid summary calls are made by these tests.
+
+| Feature | Verification |
+| --- | --- |
+| Saved sign-in and identity checks | Actual Aww refresh and Python discussion read; account identity checked in the collector. Interactive sign-in was not repeated because the saved session works. |
+| Multiple subscriptions, add/remove confirmation, individual/all refresh, Stop | Real Chrome against an isolated app with controlled listings; actual two-feed UI and Aww refresh also exercised. Removal preserves stored posts. |
+| History presets/default/expansion/contraction/all time | UI and job fixtures cross month/year boundaries, resume committed checkpoints, catch a newer gap, reject repeats, preserve content on shrink and report listing exhaustion. No claim of lifetime completeness. |
+| Older external history | JSONL and Zstandard fixtures, including older posts, comment ancestry, truncation, bounded samples, deduplication and interrupted shutdown. The UI streaming-upload path is exercised. Beyond Reddit's reachable listing, this still requires a user-provided archive export. |
+| Text/image/video filters, search, pagination | Actual stored feed plus browser fixtures; delayed responses tested explicitly. Polling preserves loaded pages when content has not changed. |
+| Offline media and local paths | Actual automatic downloads, video playback and clipboard path; fixture image/video/audio mux, byte ranges, reload without remote requests, cap failures, Stop/restart and expired-manifest recovery. |
+| Thread reading and removals | Actual removed-OP discussion plus fixtures with hidden/unrelated cards and mismatched identities. |
+| Summaries/digest | Real UI and server pipeline with a local provider stub, citation validation and cached output; unit checks also cover digest mode, stale results and provider cooldown. Paid provider remains unconfigured in the actual app. |
+| Storage settings and Clear | Actual 10 GB save; isolated UI/API tests lower/raise caps and exercise confirmed Clear, including injected compaction failure, orphan cache files and no data pruning. |
+| Dark compact UI/mobile | Actual desktop UI; real Chrome fixtures at desktop and 390-pixel width. |
+
+Remaining product limits are explicit: complete gallery traversal and unsupported external embeds are unavailable; the browser cannot guarantee complete lifetime history; archive import is manual; summaries need a configured provider. These are not reported as verified supported features.
+
+
+## Per-subreddit Clear — 23 October 2026
+
+Added Clear data to each row on Feeds, with named confirmation and a Keep data cancellation action. It stops only that feed's queued/active work and matching importer. A transaction removes its posts and observations (including deletion state), comments/discussions, affected summaries and mixed digests, import records and refresh/history checkpoints. Subscription and selected history limit remain. Other feeds' content and work remain intact.
+
+Cache ownership is tracked by subreddit, including superseded media references, and migrated from existing saved observations. Exclusive files and metadata are removed; files owned by another subreddit remain playable. Per-source revisions prevent late media/model results from restoring cleared data without invalidating other feeds' work. Aborted queued media does not make Clear wait for another feed's in-flight request. Clear still completes logical/file cleanup if database compaction fails.
+
+The actual app's confirmation was opened and cancelled; all 1,032 real stored posts remain. No Reddit/CDN requests were made for this feature. Confirmed deletion is exercised against isolated local fixture data, including cancellation, preserved preferences, shared/superseded media, stopped imports, late summaries, active/queued syncs and mobile layout. Screenshot: /private/tmp/reddit-reader-clear-subreddit-confirmation.png.
+
+Validation for per-subreddit Clear: TypeScript check, production build, 68 unit/workflow checks and 21 local Chrome/API/network integration checks pass (89 total).
+
+
+## Persistent individual-post deletion — 23 October 2026
+
+Added a trash button to each feed card and Delete post in the thread drawer, both behind a confirmation naming the post. It is explicitly local: no Reddit moderation/reporting action occurs. The transaction removes the post, observations, saved discussion/comment state, media ledger and all summaries/digests that include it. Other posts and history checkpoints remain intact. Files are removed only when no remaining post owns them, including sharing within the same subreddit and superseded media references. Existing observations are migrated into per-post media ownership.
+
+A minimal persisted exclusion stores only post ID, subreddit and deletion time. Live batches and archive ingestion skip excluded IDs. Pages containing only excluded posts still advance checkpoints. Late discussion/media/model results cannot restore the deleted post. Exclusions survive application restart, per-subreddit Clear and global Clear. Active or queued work for that post is cancelled without stopping another post's work. Deletion remains usable at the storage cap.
+
+Validation: 74 unit/workflow tests and 24 local Chrome/API/network integration tests pass (98 total), with TypeScript and production build. New coverage exercises confirmation/cancellation, feed and drawer actions, refresh/reload/import exclusion, persisted exclusions after both Clear actions, derived-summary cleanup, buffered imports, skipped-only history pages, late thread results, queued media, shared/superseded files and deletion at capacity. The real app's confirmation was opened and cancelled; all 1,032 saved posts remain. No Reddit/CDN requests were made for this feature. Screenshot: /private/tmp/reddit-reader-delete-post-confirmation.png.
+
+
+## Offline feed simplification — 23 October 2026
+
+Removed post-selection checkboxes, the selection toolbar, summary dialogs/actions and provider status from Settings. The summary generation module, HTTP endpoint and runtime provider configuration are removed. Previous summary evidence above is historical and no longer describes an available feature. Existing legacy cache cleanup remains covered by post/source/Clear tests, without deleting any stored user content during this change.
+
+Archive comment imports retain their bounded behavior through an optional post-ID field in the import dialog, rather than feed selection. The combined offline feed, saved discussions, filters, syncing, history, media and deletion controls remain in place. Verification uses local fixtures; no Reddit/CDN or model calls are required.
+
+Validation: TypeScript and production build pass, with 71 unit/workflow checks and 24 local Chrome/API/network integration checks (95 total). The actual app was restarted and reloaded: zero feed checkboxes or summary buttons, Settings has no provider status, saved images still render, and all 1,032 real posts remain. Session requests stayed at zero. Screenshot: /private/tmp/reddit-reader-offline-feed.png.
+
+
+## Direct archive fetching — 23 October 2026
+
+The archive dialog now defaults to a subreddit and inclusive UTC date range, with an all-available-history option. Direct Arctic Shift API collection is programmatic, without Reddit credentials or AI. Jobs persist content/cursor/counters/boundary IDs/media phase atomically, save supported media through the existing worker, and support explicit Stop/Resume after restart. All archive/browser/CDN HTTP dispatch shares the completion-based five-second queue. No automatic startup work or failed-request retries. 429 cooldowns accept Retry-After, reset seconds, and reset-at timestamps in seconds or milliseconds. Invalid ordering, source/range mismatches, redirects and unsupported formats pause without advancing progress. Same-second boundaries replay and deduplicate; an unpageable saturated timestamp is reported explicitly without claiming completion.
+
+Removed the former 2 GiB input, 8 GiB decoded and one-million-record total limits from streamed file imports. Per-record and decoder-memory guards and the user’s combined storage cap remain. A streamed 1,000,001-record fixture completes without retaining the whole input. File upload remains a secondary path for bulk exports and bounded comment samples.
+
+Validation: 82 unit/workflow checks and 27 local Chrome/API/network integration checks pass (109 total), alongside TypeScript and the production build. New tests cover tied timestamps, atomic rollback at capacity, exclusion/live precedence, restart during the media phase, late results after Stop/Clear, rate cooldowns, automatic local images, authentication, new subscriptions and mobile layout. The in-app browser live check exposed date inputs whose edits were not retained; using input events fixes the issue and the focused Chrome workflow was repeated successfully.
+
+Live app check: r/python, 1 January 2010, imported four new posts across two archive requests. No Reddit or CDN requests were needed for these link/text posts. Original 1,032 posts remain, for 1,036 total. The app is idle after completion. Live provider-boundary probes independently confirmed strict lower-date handling and millisecond overlap. Screenshot: /private/tmp/reddit-reader-direct-archive.png. This bounded success does not establish complete lifetime archive coverage or test every historical media host.
+
+
+## Feeds layout redesign — 23 October 2026
+
+Replaced the responsive faux table with labelled feed cards: identity/counts and status/Refresh in the header, aligned Activity and Stored history facts, readable error notices, and a footer grouping history settings and Clear/Remove controls. Cards use two columns when space allows and stack their details on small screens. Obsolete table/breakpoint rules were removed. Timestamp precision and all collection/deletion behavior are retained.
+
+TypeScript and the production build pass. Fifteen local browser/API integration checks pass, with a focused Feeds check repeated after the final responsive grid change. Desktop (1280 px), mobile (390 px), and the real in-app browser were visually inspected without horizontal overflow. Real Clear/Remove confirmations were opened and cancelled; all 1,036 saved posts remain and session requests stayed at two (unchanged from the prior archive test). Screenshot: /private/tmp/reddit-reader-feeds-redesign.png.

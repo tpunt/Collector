@@ -1,0 +1,112 @@
+import type {DatabaseSync} from 'node:sqlite';
+
+export const SCHEMA_VERSION=1;
+const APPLICATION_ID=0x52524452;
+
+const SCHEMA=`
+CREATE TABLE metadata (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+INSERT INTO metadata VALUES ('generation',0),('content_revision',0),('media_sync_revision',0);
+CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL CHECK(json_valid(value)));
+CREATE TABLE feeds (
+  name TEXT PRIMARY KEY, subscribed INTEGER NOT NULL DEFAULT 1 CHECK(subscribed IN (0,1)),
+  history_months INTEGER NOT NULL DEFAULT 1 CHECK(history_months IN (0,1,3,6,12,24,36,60)),
+  history_target_id TEXT REFERENCES targets(id) ON DELETE SET NULL,
+  requested_ms INTEGER CHECK(requested_ms>=0)
+);
+CREATE TABLE posts (
+  id TEXT PRIMARY KEY, subreddit TEXT NOT NULL REFERENCES feeds(name), permalink TEXT NOT NULL,
+  created_ms INTEGER NOT NULL, precision_ms INTEGER NOT NULL,
+  live_availability TEXT CHECK(live_availability IN ('available','removed','deleted')), live_state_at INTEGER
+);
+CREATE TABLE observations (
+  post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  source_key TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('live','archive')), export_id TEXT,
+  title TEXT NOT NULL, body TEXT, media TEXT CHECK(media IS NULL OR json_valid(media)),
+  availability TEXT NOT NULL CHECK(availability IN ('available','removed','deleted')),
+  observed_at INTEGER NOT NULL, captured_at INTEGER,
+  attachments TEXT CHECK(attachments IS NULL OR json_valid(attachments)), outbound TEXT,
+  PRIMARY KEY(post_id,source_key)
+);
+CREATE INDEX feed_order ON posts(created_ms DESC,id DESC);
+CREATE INDEX source_post_order ON posts(subreddit,created_ms DESC,id DESC);
+CREATE INDEX archive_observations ON observations(export_id,post_id);
+CREATE TABLE targets (
+  id TEXT PRIMARY KEY, subreddit TEXT NOT NULL REFERENCES feeds(name), lower_ms INTEGER, upper_ms INTEGER NOT NULL,
+  continuation TEXT, last_page TEXT, anchor_ms INTEGER NOT NULL,
+  depends_on TEXT REFERENCES targets(id), started_at_head INTEGER NOT NULL DEFAULT 0 CHECK(started_at_head IN (0,1)),
+  completion TEXT CHECK(completion IN ('date-boundary','listing-end','prior-scan')),
+  observed_count INTEGER NOT NULL DEFAULT 0, omission_count INTEGER NOT NULL DEFAULT 0, oldest_ms INTEGER,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','paused','done','cancelled')), reason TEXT,
+  boundary TEXT NOT NULL DEFAULT '{"olderIds":[],"batches":0,"lastSignature":null,"repeats":0}' CHECK(json_valid(boundary)),
+  CHECK(lower_ms IS NULL OR (lower_ms>=0 AND lower_ms<=upper_ms)),
+  CHECK((status='done')=(completion IS NOT NULL))
+);
+CREATE TABLE target_posts (
+  target_id TEXT NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+  post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE, PRIMARY KEY(target_id,post_id)
+);
+CREATE INDEX target_post_lookup ON target_posts(post_id);
+CREATE TABLE target_batches (
+  target_id TEXT NOT NULL REFERENCES targets(id) ON DELETE CASCADE, signature TEXT NOT NULL, PRIMARY KEY(target_id,signature)
+);
+CREATE TABLE feed_sync (
+  subreddit TEXT PRIMARY KEY REFERENCES feeds(name), run_id TEXT NOT NULL, targets TEXT NOT NULL CHECK(json_valid(targets)),
+  state TEXT NOT NULL CHECK(state IN ('running','incomplete','complete','gaps')), started_ms INTEGER NOT NULL,
+  last_success_ms INTEGER, last_completed_ms INTEGER, reason TEXT, gap_count INTEGER NOT NULL DEFAULT 0,
+  CHECK(state<>'complete' OR (last_success_ms IS NOT NULL AND last_completed_ms IS NOT NULL)),
+  CHECK(state<>'gaps' OR last_completed_ms IS NOT NULL)
+);
+CREATE TABLE thread_snapshots (
+  id TEXT PRIMARY KEY, post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  observed_at INTEGER NOT NULL, source TEXT NOT NULL CHECK(source IN ('live','archive')), data TEXT NOT NULL CHECK(json_valid(data))
+);
+CREATE INDEX snapshot_post ON thread_snapshots(post_id,observed_at DESC);
+-- Removal evidence is independent of stored post content and survives global Clear.
+CREATE TABLE comment_states (
+  id TEXT PRIMARY KEY, post_id TEXT NOT NULL,
+  availability TEXT NOT NULL CHECK(availability IN ('available','removed','deleted')), observed_at INTEGER NOT NULL
+);
+CREATE INDEX comment_state_post ON comment_states(post_id);
+CREATE TABLE archive_fetches (
+  id TEXT PRIMARY KEY, subreddit TEXT NOT NULL REFERENCES feeds(name), updated_ms INTEGER NOT NULL, data TEXT NOT NULL CHECK(json_valid(data))
+);
+CREATE TABLE media_sync (
+  post_id TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','downloading','ready','failed','unavailable')),
+  reason TEXT, signature TEXT NOT NULL, session TEXT
+);
+CREATE INDEX media_sync_status ON media_sync(status,session);
+CREATE TABLE media_evidence (
+  post_id TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE, attachments TEXT NOT NULL CHECK(json_valid(attachments)), observed_at INTEGER NOT NULL
+);
+CREATE TABLE post_media (
+  key TEXT NOT NULL, post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE, PRIMARY KEY(key,post_id)
+);
+CREATE INDEX media_owner_post ON post_media(post_id);
+CREATE TABLE excluded_posts (post_id TEXT PRIMARY KEY, subreddit TEXT NOT NULL, deleted_at INTEGER NOT NULL);
+`;
+
+/** Only this schema is supported. An existing incompatible database is never upgraded or rewritten. */
+export function initializeSchema(db:DatabaseSync):void {
+  const version=Number(db.prepare('PRAGMA user_version').get()!.user_version);
+  const application=Number(db.prepare('PRAGMA application_id').get()!.application_id);
+  const empty=!db.prepare("SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").get();
+  if(!(version===0&&application===0&&empty)&&!(version===SCHEMA_VERSION&&application===APPLICATION_ID))
+    throw new Error(`Unsupported reader database schema (${version}). Back up and move aside reader.sqlite and its WAL/SHM files, then restart to create a fresh database.`);
+  db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;');
+  if(empty){
+    db.exec('BEGIN IMMEDIATE');
+    try{db.exec(SCHEMA);db.exec(`PRAGMA application_id=${APPLICATION_ID}; PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`);}
+    catch(error){db.exec('ROLLBACK');throw error;}
+  }
+}
+
+/** Crash/shutdown recovery for current-schema work. Startup never starts network requests. */
+export function recoverInterruptedWork(db:DatabaseSync):void {
+  db.exec(`BEGIN IMMEDIATE;
+    UPDATE targets SET status='paused',reason='Application restarted; Resume to continue' WHERE status='queued';
+    UPDATE media_sync SET status='pending',reason='Sync interrupted; Resume to finish saving this feed' WHERE status='downloading';
+    UPDATE feed_sync SET state='incomplete',reason='Application restarted; Resume to finish saving this feed' WHERE state='running';
+    UPDATE archive_fetches SET data=json_set(data,'$.state','paused','$.reason','Application restarted; Resume to continue') WHERE json_extract(data,'$.state')='running';
+    COMMIT;`);
+}

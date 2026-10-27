@@ -1,0 +1,239 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import type { StoredPost, HistoryTarget, FeedSource, OfflineMediaCounts } from '../src/store.ts';
+import type { ThreadSnapshot } from '../src/extract.ts';
+import type { ArchiveFetchState } from '../src/archive-fetch-state.ts';
+import { historyLowerBound } from '../src/history-window.ts';
+import { HISTORY_OPTIONS } from '../src/history-window.ts';
+import type { HistoryMonths } from '../src/history-window.ts';
+import { PostMedia } from './Media.tsx';
+import { GB } from '../src/storage-limit.ts';
+import type { StorageStatus } from '../src/storage-limit.ts';
+import './style.css';
+
+type Feed = FeedSource & { offline:OfflineMediaCounts; status: 'idle' | 'queued' | 'syncing' | 'stopping' };
+type State = {token:string;sources:string[];feeds:Feed[];targets:HistoryTarget[];storage:StorageStatus;stats:{posts:number;snapshots:number;mediaPosts:number;contentRevision:number;databaseBytes:number};
+  job:{running:boolean;manual:boolean;queued:number;subreddit:string|null;message:string;requests:{released:number;suppressed:number;sessionTotal:number};accessPause:{reason:string;notBefore:number|null}|null};
+  media:{pending:number;bytes:number;requests:number;revision:number};import:{state:string;lines:number;accepted:number;omitted:number;bytes:number;reason:string|null}|null;imports:unknown[];archives:(ArchiveFetchState&{offline:OfflineMediaCounts})[];account:string|null};
+type Thread = {post:StoredPost;snapshot:ThreadSnapshot|null};
+const date=(ms:number)=>new Date(ms).toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'});
+const timestamp=(ms:number|null)=>ms===null?'Never':new Date(ms).toLocaleString(undefined,{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+const syncing=(feed:Feed)=>feed.status!=='idle';
+const syncLabel=(feed:Feed)=>feed.sync.state==='incomplete'?'Resume':'Sync';
+const syncState=(feed:Feed)=>feed.status==='syncing'?'Syncing':feed.status==='queued'?'Queued':feed.status==='stopping'?'Stopping':
+  feed.sync.state==='complete'?'Saved offline':feed.sync.state==='gaps'?'Completed with gaps':feed.sync.state==='incomplete'?'Incomplete':'Not synced';
+const storedSize=(bytes:number)=>bytes>=GB?`${(bytes/GB).toLocaleString(undefined,{maximumFractionDigits:2})} GB`:`${(bytes/1_000_000).toFixed(1)} MB`;
+
+
+function Modal({title,close,children,wide=false}:{title:string;close:()=>void;children:React.ReactNode;wide?:boolean}) {
+  const ref=useRef<HTMLElement>(null);
+  useEffect(()=>{
+    const previous=document.activeElement as HTMLElement|null;
+    ref.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    const trap=(event:KeyboardEvent)=>{
+      if(event.key!=='Tab')return;
+      const elements=Array.from(ref.current?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled)')??[]);
+      const first=elements[0],last=elements.at(-1);
+      if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
+      else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}
+    };
+    ref.current?.addEventListener('keydown',trap);
+    return()=>{ref.current?.removeEventListener('keydown',trap);previous?.focus();};
+  },[]);
+  return <div className="modal-backdrop"><section ref={ref} className={'modal '+(wide?'wide':'')} role="dialog" aria-modal="true" aria-label={title}>
+    <div className="modal-top"><h2>{title}</h2><button aria-label="Close dialog" onClick={close}>×</button></div>{children}
+  </section></div>;
+}
+
+function App() {
+  const [state,setState]=useState<State|null>(null),[posts,setPosts]=useState<StoredPost[]>([]),[next,setNext]=useState<string|null>(null);
+  const [view,setView]=useState(location.hash==='#feeds'?'feeds':'posts');
+  const [source,setSource]=useState(''),[media,setMedia]=useState(''),[search,setSearch]=useState('');
+  const [error,setError]=useState(''),[busy,setBusy]=useState(false),[modal,setModal]=useState<'source'|'history'|'import'|'clear'|'settings'|null>(null),[removeFeed,setRemoveFeed]=useState<string|null>(null);
+  const [clearFeed,setClearFeed]=useState<string|null>(null);
+  const [postToDelete,setPostToDelete]=useState<Pick<StoredPost,'id'|'title'|'subreddit'>|null>(null);
+  const [storageGb,setStorageGb]=useState('10'),[storageSaved,setStorageSaved]=useState(false);
+  const [name,setName]=useState(''),[months,setMonths]=useState<HistoryMonths>(1);
+  const [thread,setThread]=useState<Thread|null>(null);
+  const [upload,setUpload]=useState<File|null>(null),[importSource,setImportSource]=useState(''),[importPostIds,setImportPostIds]=useState(''),[importBusy,setImportBusy]=useState(false);
+  const [archiveMode,setArchiveMode]=useState<'fetch'|'file'>('fetch'),[archiveName,setArchiveName]=useState('');
+  const [archiveFrom,setArchiveFrom]=useState(()=>new Date(historyLowerBound(1,Date.now())!).toISOString().slice(0,10)),[archiveTo,setArchiveTo]=useState(()=>new Date().toISOString().slice(0,10));
+  const token=useRef(''),feedVersion=useRef(0),threadId=useRef<string|null>(null),pollVersion=useRef(''),stateVersion=useRef(0),currentQuery=useRef('');
+  const params=new URLSearchParams();if(source)params.set('subreddit',source);if(media)params.set('media',media);if(search)params.set('q',search);
+  if(currentQuery.current!==params.toString()){currentQuery.current=params.toString();feedVersion.current++;}
+  const feeds=state?.feeds??[],activeFeeds=feeds.filter(syncing),pending=state?.targets.filter(target=>['queued','paused'].includes(target.status))??[];
+  const count=source?feeds.find(feed=>feed.name===source)?.postCount??0:feeds.reduce((sum,feed)=>sum+feed.postCount,0);
+  const currentFeed=feeds.find(feed=>feed.name===source);
+  const archiveActive=state?.archives.find(job=>job.state==='running');
+  function openArchives(){setArchiveName(old=>old||source||state?.sources[0]||'');setError('');setModal('import');}
+  function navigate(nextView:string){location.hash=nextView==='feeds'?'feeds':'posts';setView(nextView);}
+  function filterSource(name:string){setSource(name);navigate('posts');}
+  function openSettings(){setStorageGb(String((state?.storage.limitBytes??10*GB)/GB));setStorageSaved(false);setError('');setModal('settings');}
+  async function get<T>(path:string):Promise<T>{const response=await fetch(path);const value=await response.json();if(!response.ok)throw new Error(value.error);return value;}
+  async function loadState(){
+    const version=++stateVersion.current;
+    const value=await get<State>('/api/state');
+    if(version!==stateVersion.current)return{...value,contentChanged:false};
+    const revision=JSON.stringify([value.stats.posts,value.stats.snapshots,value.stats.mediaPosts,value.stats.contentRevision,value.feeds.map(feed=>[feed.name,feed.postCount,feed.sync.lastSuccessAt])]);
+    const contentChanged=revision!==pollVersion.current;pollVersion.current=revision;
+    token.current=value.token;setState(value);return{...value,contentChanged};
+  }
+  async function loadFeed(append=false){const version=++feedVersion.current,key=currentQuery.current,q=new URLSearchParams(key);if(append&&next)q.set('cursor',next);const result=await get<{posts:StoredPost[];next:string|null}>('/api/feed?'+q);if(version===feedVersion.current&&key===currentQuery.current){setPosts(old=>append?[...old,...result.posts.filter(post=>!old.some(item=>item.id===post.id))]:result.posts);setNext(result.next);}}
+  async function action(path:string,data:unknown={}){
+    setError('');setBusy(true);
+    try{const response=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token.current},body:JSON.stringify(data)});const value=await response.json();if(!response.ok)throw new Error(value.error);if(value.warning)setError(value.warning);await loadState();await loadFeed();return value;}
+    catch(e){setError((e as Error).message);return null;}finally{setBusy(false);}
+  }
+  useEffect(()=>{void loadState().catch(e=>setError(e.message));const hash=()=>setView(location.hash==='#feeds'?'feeds':'posts');window.addEventListener('hashchange',hash);return()=>window.removeEventListener('hashchange',hash);},[]);
+  useEffect(()=>{const timer=setTimeout(()=>void loadFeed().catch(e=>setError(e.message)),200);return()=>clearTimeout(timer);},[source,media,search]);
+  useEffect(()=>{
+    let pending=false,disposed=false;
+    const timer=setInterval(()=>{
+      if(pending)return;pending=true;
+      void loadState().then(async value=>{
+        if(disposed)return;
+        if(value.contentChanged)await loadFeed();
+        const id=threadId.current;
+        if(id){const result=await get<Thread>('/api/post/'+id);if(threadId.current===id){if(result.post)setThread(result);else{setThread(null);threadId.current=null;}}}
+      }).catch(e=>{if(!disposed)setError(e.message);}).finally(()=>{pending=false;});
+    },2000);
+    return()=>{disposed=true;clearInterval(timer);};
+  },[]);
+  useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key==='Escape'){setModal(null);setRemoveFeed(null);setClearFeed(null);setPostToDelete(null);setThread(null);threadId.current=null;}};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close);},[]);
+  async function openThread(id:string){threadId.current=id;try{const value=await get<Thread>('/api/post/'+id);if(threadId.current===id&&value.post)setThread(value);}catch(e){if(threadId.current===id)setError((e as Error).message);}}
+  async function importFile(){
+    if(!upload)return;setImportBusy(true);setError('');
+    try{const q=new URLSearchParams({subreddit:importSource||state?.sources[0]||'',filename:upload.name,size:String(upload.size),modified:String(upload.lastModified),postIds:importPostIds.trim().split(/[\s,]+/).filter(Boolean).join(',')});
+      const response=await fetch('/api/import?'+q,{method:'POST',headers:{'X-Reader-Token':token.current},body:upload});const value=await response.json();if(!response.ok)throw new Error(value.error);if(value.state==='paused')setError(value.reason);await loadState();await loadFeed();
+    }catch(e){setError((e as Error).message);}finally{setImportBusy(false);}
+  }
+  const feedSync=(feed:Feed)=>syncing(feed)?<button className="button stop" disabled={busy||feed.status==='stopping'} onClick={()=>void action('pause',{name:feed.name})} aria-label={'Stop r/'+feed.name}>{feed.status==='stopping'?'Stopping…':'Stop'}</button>:
+    <button className="button" disabled={busy||Boolean(state?.job.manual)} onClick={()=>void action('sync',{names:[feed.name]})} aria-label={syncLabel(feed)+' r/'+feed.name}>{syncLabel(feed)}</button>;
+  return <div className="app">
+    <aside className="sidebar">
+      <a className="brand" href="#posts" onClick={()=>navigate('posts')}><span className="brand-mark">r/</span> reader</a>
+      <nav aria-label="Main navigation"><button className={'nav-item '+(view==='feeds'?'active':'')} onClick={()=>navigate('feeds')}>Feeds <span>{feeds.length}</span></button></nav>
+      <div className="source-nav"><p className="sidebar-label">SUBREDDITS</p><button className={'source-item '+(!source&&view==='posts'?'selected':'')} onClick={()=>filterSource('')}><span>All subreddits</span><span className="source-count">{feeds.reduce((sum,feed)=>sum+feed.postCount,0)}</span></button>
+        {feeds.map(feed=><button className={'source-item '+(source===feed.name&&view==='posts'?'selected':'')} key={feed.name} onClick={()=>filterSource(feed.name)}>
+          <span>r/{feed.name}</span>{syncing(feed)?<span className={'status-dot '+(feed.status==='syncing'?'pulse':'')} title={feed.status}/>:<span className="source-count">{feed.postCount}</span>}
+        </button>)}
+      </div>
+      <div className="sidebar-bottom"><dl className="sidebar-stats" aria-label="Storage and requests">
+        <div className={'storage-stat '+(state?.storage.full?'at-cap':'')}><dt>Stored</dt><dd><span>{(state?.storage.percentUsed??0).toFixed(2)}% used</span><small>{storedSize(state?.storage.usedBytes??0)} / {storedSize(state?.storage.limitBytes??10*GB)}</small></dd></div>
+        <div title="At most one Reddit/CDN request every five seconds"><dt>Request limit</dt><dd>0.2 req/s</dd></div>
+        <div><dt>Session requests</dt><dd>{(state?.job.requests.sessionTotal??0).toLocaleString()}</dd></div>
+      </dl><button onClick={()=>setModal('history')}>Collection history <span>{pending.length||''}</span></button><button onClick={openArchives}>Import an archive</button>
+        <button className="settings-button" onClick={openSettings}>Settings</button>
+      </div>
+    </aside>
+    <main>
+      <header className="page-header"><div><h1>{view==='feeds'?'Feeds':source?'r/'+source:'All subreddits'}</h1><span className="header-meta">{view==='feeds'?`${feeds.length} subscribed feeds`:`${count.toLocaleString()} stored posts`}</span></div>
+        <div className="header-actions">{state?.job.manual?<button className="button primary" disabled={busy} onClick={()=>void action('sign-in/finish')}>Finish sign-in</button>:<>
+          {activeFeeds.length>0&&<button className="button stop" disabled={busy} onClick={()=>void action('pause')}>Stop all</button>}
+          {view==='posts'&&currentFeed?feedSync(currentFeed):<button className="button" disabled={busy||!feeds.length||feeds.every(syncing)} onClick={()=>void action('sync')}>Sync all</button>}
+        </>}{view==='feeds'&&<button className="button primary" onClick={()=>{setName('');setMonths(1);setModal('source');}}>＋ Add feed</button>}</div>
+      </header>
+      {error&&!modal&&!removeFeed&&!clearFeed&&!postToDelete&&<div className="notice error" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={()=>setError('')}>×</button></div>}
+      {state?.storage.full&&<div className="notice"><span>Storage cap reached. Existing content is kept; increase the cap to continue collecting.</span><button className="button" onClick={openSettings}>Storage settings</button></div>}
+      {state?.job.accessPause&&<div className="notice">{state.job.accessPause.reason}<button className="button" disabled={busy} onClick={()=>void action('sync')}>Resume sync</button></div>}
+      {archiveActive&&<div className="sync-bar archive-sync" role="status"><span className="status-dot pulse"/><span>r/{archiveActive.subreddit} · {archiveActive.phase==='media'?'Saving archive media':'Fetching archive'} · {archiveActive.observed.toLocaleString()} posts checked</span><button onClick={openArchives}>Progress</button><button disabled={busy} onClick={()=>void action('archive/stop',{id:archiveActive.id})}>Stop archive</button></div>}
+      {(state?.job.running||Boolean(state?.media.pending))&&<div className="sync-bar" role="status"><span className="status-dot pulse"/><span>{state!.job.running?state!.job.message:`Loading media · ${state!.media.pending} files queued`}</span>{state!.job.queued>0&&<span className="muted">{state!.job.queued} queued</span>}
+        {state!.job.subreddit&&<button onClick={()=>void action('pause',{name:state!.job.subreddit})} disabled={busy}>Stop r/{state!.job.subreddit}</button>}
+      </div>}
+      {view==='feeds'?<section className="feeds-page" aria-label="Subscribed feeds">
+        {feeds.length?<><div className="feed-list">
+          {feeds.map(feed=><article className="feed-card" key={feed.name} data-feed={feed.name} aria-labelledby={'feed-title-'+feed.name}>
+            <header className="feed-card-header">
+              <div className="feed-identity"><h2 id={'feed-title-'+feed.name}><button onClick={()=>filterSource(feed.name)}>r/{feed.name}</button></h2><p><span>{feed.postCount.toLocaleString()} posts</span><span className="feed-provenance">{feed.liveCount.toLocaleString()} live{feed.archiveCount>0?` · ${feed.archiveCount.toLocaleString()} archive`:''}{feed.historyTarget?.omissionCount?` · ${feed.historyTarget.omissionCount} omitted`:''}</span></p></div>
+              <div className="feed-header-actions"><span className={'status-label '+(syncing(feed)?feed.status:feed.sync.state==='incomplete'||feed.sync.state==='gaps'?'stopped':'')}><i/>{syncState(feed)}</span>{feedSync(feed)}</div>
+            </header>
+            <div className="feed-card-body">
+              <section className="feed-detail-group" aria-label={'Activity for r/'+feed.name}><h3>Activity</h3><dl className="feed-facts">
+                <div><dt>Last successful sync:</dt><dd><time dateTime={feed.sync.lastSuccessAt?new Date(feed.sync.lastSuccessAt).toISOString():undefined}>{timestamp(feed.sync.lastSuccessAt)}</time></dd></div>
+                {feed.sync.lastCompletedAt&&feed.sync.lastCompletedAt!==feed.sync.lastSuccessAt&&<div><dt>Last completed:</dt><dd><time dateTime={new Date(feed.sync.lastCompletedAt).toISOString()}>{timestamp(feed.sync.lastCompletedAt)}</time></dd></div>}
+                {feed.sync.startedAt&&<div><dt>Last attempt:</dt><dd><time dateTime={new Date(feed.sync.startedAt).toISOString()}>{timestamp(feed.sync.startedAt)}</time></dd></div>}
+              </dl>{feed.offline.total>0&&<p className="feed-media-note" title={`${feed.offline.pending} pending · ${feed.offline.failed} failed · ${feed.offline.unavailable} unavailable`}>Media {feed.offline.ready}/{feed.offline.total} offline{feed.offline.failed>0?` · ${feed.offline.failed} failed`:''}{feed.offline.unavailable>0?` · ${feed.offline.unavailable} unavailable`:''}</p>}</section>
+              <section className="feed-detail-group" aria-label={'Stored history for r/'+feed.name}><h3>Stored history</h3>{feed.oldestMs!==null?<dl className="feed-facts">
+                <div><dt>Newest:</dt><dd><time dateTime={new Date(feed.newestMs!).toISOString()}>{timestamp(feed.newestMs!)}</time></dd></div>
+                <div><dt>Oldest:</dt><dd><time dateTime={new Date(feed.oldestMs).toISOString()}>{timestamp(feed.oldestMs)}</time></dd></div>
+              </dl>:<p className="feed-no-history">No history collected</p>}</section>
+            </div>
+            {feed.sync.reason&&!syncing(feed)&&<p className="feed-issue"><span aria-hidden="true">!</span>{feed.sync.reason}</p>}
+            <footer className="feed-card-footer">
+              <div className="feed-history-settings"><div className="feed-history-controls"><label htmlFor={'history-'+feed.name}>History limit</label><select id={'history-'+feed.name} aria-label={'History limit for r/'+feed.name} aria-describedby="feed-history-note" value={feed.historyMonths} disabled={busy||state?.job.manual} onChange={e=>void action('history',{name:feed.name,months:Number(e.target.value)})}>{HISTORY_OPTIONS.map(option=><option key={option.months} value={option.months}>{option.label}</option>)}</select>
+              </div></div>
+              <div className="feed-row-actions" role="group" aria-label={'Manage r/'+feed.name}><button disabled={busy} aria-label={'Clear data for r/'+feed.name} onClick={()=>{setError('');setClearFeed(feed.name);}}>Clear data</button><button disabled={busy} aria-label={'Remove r/'+feed.name} onClick={()=>setRemoveFeed(feed.name)}>Remove feed</button></div>
+            </footer>
+          </article>)}
+        </div><p className="feed-page-note" id="feed-history-note">Sync saves recent posts, unfinished history and supported media locally. Expanding the history limit starts a sync; reducing it keeps saved posts. Older archives and stored date ranges may have gaps.</p></>:<div className="empty-state"><h2>No feeds yet</h2><button className="button primary" onClick={()=>{setName('');setMonths(1);setModal('source');}}>Add a feed</button></div>}
+      </section>:<>
+        <section className="feed-tools" aria-label="Feed filters"><div className="type-tabs">{['','Text','Image','Video','Link','Unknown'].map(type=><button key={type} className={media===type?'selected':''} onClick={()=>setMedia(type)}>{type||'All posts'}</button>)}</div>
+          <div className="filter-inputs"><select aria-label="Filter by subreddit" value={source} onChange={e=>setSource(e.target.value)}><option value="">All subreddits</option>{feeds.map(feed=><option key={feed.name} value={feed.name}>r/{feed.name}</option>)}</select><input className="search" aria-label="Search stored posts" placeholder="Search posts…" value={search} onChange={e=>setSearch(e.target.value)}/></div>
+        </section>
+        <div className="feed-meta"><span>Newest first</span>{currentFeed?<span>Last successful sync: {timestamp(currentFeed.sync.lastSuccessAt)} · {syncState(currentFeed)}{currentFeed.offline.total>0&&` · Media ${currentFeed.offline.ready}/${currentFeed.offline.total} offline`}</span>:<button onClick={()=>navigate('feeds')}>Manage feeds &amp; sync status →</button>}</div>
+        <div className="feed">{posts.map(post=><article className="post-card" key={post.id}>
+          <div className="post-content"><PostMedia post={post} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===post.subreddit)&&syncing(feeds.find(feed=>feed.name===post.subreddit)!))}>
+            {copyLocalPath=><><div className="post-meta"><button onClick={()=>filterSource(post.subreddit)}>r/{post.subreddit}</button><time dateTime={new Date(post.createdMs).toISOString()}>{date(post.createdMs)}</time>{post.source==='archive'&&<span className="archive-label">Archive</span>}<div className="badges">{post.media.map(type=><span key={type}>{type}</span>)}{post.availability!=='available'&&<span>{post.availability}</span>}{copyLocalPath}</div></div>
+            <button className="post-title" onClick={()=>void openThread(post.id)}>{post.title}</button>{post.body&&<p className="post-preview">{post.body.slice(0,200)}</p>}</>}
+          </PostMedia>
+          </div><div className="post-actions"><button className="read-thread" onClick={()=>void openThread(post.id)} aria-label={'Read thread: '+post.title}>↗</button><button className="delete-post danger" title="Delete post" disabled={busy} aria-label={'Delete post: '+post.title} onClick={()=>{setError('');setPostToDelete(post);}}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7"/></svg></button></div>
+        </article>)}</div>
+        {!posts.length&&<div className="empty-state"><h2>{feeds.length?'No matching posts':'No feeds yet'}</h2><p>{feeds.length?'Refresh a feed or adjust your filters.':'Add a subreddit to get started.'}</p>{!feeds.length&&<button className="button primary" onClick={()=>navigate('feeds')}>Manage feeds</button>}</div>}
+        {next&&<button className="button load-more" onClick={()=>void loadFeed(true)}>Load more</button>}
+      </>}
+    </main>
+    {thread&&<div className="drawer-backdrop" onClick={()=>{setThread(null);threadId.current=null;}}><section className="thread-drawer" role="dialog" aria-modal="true" aria-label="Thread reader" onClick={e=>e.stopPropagation()}>
+      <div className="drawer-top"><span>r/{thread.post.subreddit} · {date(thread.post.createdMs)}</span><button autoFocus aria-label="Close thread" onClick={()=>{setThread(null);threadId.current=null;}}>×</button></div><h2>{thread.post.title}</h2>
+      <div className="thread-actions"><button className="button" disabled={busy} onClick={()=>void action('thread',{id:thread.post.id})}>{thread.snapshot?'Re-read discussion':'Read discussion in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setPostToDelete(thread.post);}}>Delete post</button><a href={thread.post.permalink} target="_blank" rel="noreferrer">Reddit ↗</a></div>
+      <PostMedia post={thread.post} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===thread.post.subreddit)&&syncing(feeds.find(feed=>feed.name===thread.post.subreddit)!))}>
+        {copyLocalPath=><div className="badges thread-media-badges">{thread.post.media.map(type=><span key={type}>{type}</span>)}{copyLocalPath}</div>}
+      </PostMedia>
+      <div className="prose">{thread.snapshot?.body??thread.post.body??(thread.post.availability!=='available'?'Post '+thread.post.availability+'.':thread.post.media.includes('Text')?'Post body has not been read.':'')}</div>
+      {thread.snapshot?<><div className="sample-note"><strong>{thread.snapshot.comments.length} sampled comments · {thread.snapshot.source} · sort: {thread.snapshot.sort}</strong><p>{thread.snapshot.sample}. Read {timestamp(thread.snapshot.observedAt)}.</p><p>{thread.snapshot.omitted} known omissions. Capture time: {timestamp(thread.snapshot.capturedAt)}.</p></div>
+        <div className="comments">{thread.snapshot.comments.map(comment=><article key={comment.id} className="comment"><div>{comment.id} {comment.ancestry==='unresolved'?'· parent unavailable':comment.parentId?.startsWith('t1_')?'· reply to '+comment.parentId:'· top-level'}</div><p>{comment.availability==='available'?comment.body:'['+comment.availability+']'}</p></article>)}</div>
+      </>:<p className="sample-note">Read discussion saves up to 100 initially rendered comments. Collapsed and unloaded branches are omitted.</p>}
+    </section></div>}
+    {removeFeed&&<Modal title={'Remove r/'+removeFeed+'?'} close={()=>setRemoveFeed(null)}><p>This stops its sync and removes it from your subscribed feeds. Collected content and history remain stored.</p><div className="dialog-actions"><button className="button" onClick={()=>setRemoveFeed(null)}>Keep feed</button><button className="button danger" disabled={busy} onClick={()=>{const name=removeFeed;void action('remove',{name,confirm:true}).then(result=>{if(result){if(source===name)setSource('');setRemoveFeed(null);}});}}>Remove feed</button></div>{error&&<p className="notice error" role="alert">{error}</p>}</Modal>}
+    {postToDelete&&<Modal title="Delete this post?" close={()=>setPostToDelete(null)}><p className="delete-post-title">{postToDelete.title}</p><p>Delete this post and its saved discussion from your reader. Media files are removed unless another post uses them.</p><p>It will stay excluded from future refreshes, history fetching and archive imports, even after clearing collected data. This does not report or delete the post on Reddit.</p><div className="dialog-actions"><button className="button" disabled={busy} onClick={()=>setPostToDelete(null)}>Keep post</button><button className="button danger" disabled={busy} onClick={()=>{const id=postToDelete.id;void action('delete-post',{id,confirm:true}).then(result=>{if(result){if(threadId.current===id){setThread(null);threadId.current=null;}setPostToDelete(null);}});}}>Delete post</button></div>{error&&<p className="notice error" role="alert">{error}</p>}</Modal>}
+    {clearFeed&&<Modal title={'Clear all data for r/'+clearFeed+'?'} close={()=>setClearFeed(null)}><p>This stops syncing r/{clearFeed} and permanently deletes its posts, discussions, saved media and history checkpoints. Your subscription and history limit stay in place. Locally deleted posts stay excluded.</p><p>Other subreddits keep their data. Media files shared with another subreddit are kept. You can refresh this feed to collect it again.</p><div className="dialog-actions"><button className="button" disabled={busy} onClick={()=>setClearFeed(null)}>Keep data</button><button className="button danger" disabled={busy} onClick={()=>{const name=clearFeed;void action('clear-source',{name,confirm:true}).then(result=>{if(result){if(thread?.post.subreddit===name){setThread(null);threadId.current=null;}setClearFeed(null);}});}}>Clear data</button></div>{error&&<p className="notice error" role="alert">{error}</p>}</Modal>}
+    {modal&&<Modal title={modal==='source'?'Add feed':modal==='history'?'Collection history':modal==='import'?'Import archive':modal==='settings'?'Settings':'Clear content?'} close={()=>setModal(null)} wide={modal==='history'}>
+      {modal==='settings'&&<><form onSubmit={e=>{e.preventDefault();void action('settings',{maxStoredBytes:Math.round(Number(storageGb)*GB)}).then(result=>{if(result)setStorageSaved(true);});}}>
+        <label>Max stored size (GB)<input type="number" min="0.001" max="10000" step="0.001" required value={storageGb} onChange={e=>{setStorageGb(e.target.value);setStorageSaved(false);}}/></label>
+        <p className="muted">{storedSize(state?.storage.usedBytes??0)} stored. Includes the database and saved media. Browser profile and temporary files are excluded.</p>
+        <p className="muted">Sync and imports pause at the cap. Lowering it keeps existing content. Raise it, then Resume to continue saving.</p>
+        <div className="settings-save"><button className="button primary" disabled={busy||!state}>Save cap</button>{storageSaved&&<span role="status">Saved</span>}</div>
+      </form><div className="settings-account"><p>{state?.account?'Signed in as '+state.account:'Account verified on collection'}</p><button className="button" disabled={busy} onClick={()=>void action(state?.job.manual?'sign-in/finish':'sign-in')}>{state?.job.manual?'Finish sign-in':'Open sign-in browser'}</button><button className="button danger" onClick={()=>{setError('');setModal('clear');}}>Clear collected content</button></div></>}
+      {modal==='source'&&<form onSubmit={e=>{e.preventDefault();void action('sources',{name,historyMonths:months}).then(result=>{if(result){setModal(null);setName('');}});}}>
+        <label>Subreddit<input required placeholder="e.g. python or r/aww" value={name} onChange={e=>setName(e.target.value)}/></label><label>History limit<select value={months} onChange={e=>setMonths(Number(e.target.value) as HistoryMonths)}>{HISTORY_OPTIONS.map(option=><option key={option.months} value={option.months}>{option.label}</option>)}</select></label>
+        <p className="muted">Saves recent posts, history and supported media locally, up to 60 minutes and 120 requests per session. Stop anytime and Resume from saved progress.</p><button className="button primary" disabled={busy}>Add &amp; sync</button>
+      </form>}
+      {modal==='history'&&<><p className="muted">Saved page checkpoints are diagnostic history. Use Sync or Resume on Feeds to collect posts and save their media together. A finished page scan alone does not mean the feed is saved offline.</p>
+        {state?.targets.map(target=><article className="history-item" key={target.id}><div><strong>r/{target.subreddit}</strong><span className="badge">{target.status==='done'?'Scan finished':target.status}</span><p>{target.lowerMs===null?'As far back as available':'Since '+date(target.lowerMs)} · {target.observedCount} encountered · {target.omissionCount} omitted</p>{target.oldestMs&&<p>Oldest: {timestamp(target.oldestMs)}</p>}<p className="muted">{target.reason??'Waiting'}{target.continuation?' · Checkpoint saved':''}</p></div></article>)}{!state?.targets.length&&<p>No collection history yet.</p>}</>}
+      {modal==='import'&&<>
+        <div className="archive-tabs" role="group" aria-label="Archive source"><button aria-pressed={archiveMode==='fetch'} onClick={()=>setArchiveMode('fetch')}>Fetch from archive</button><button aria-pressed={archiveMode==='file'} onClick={()=>setArchiveMode('file')}>Import a file</button></div>
+        {archiveMode==='fetch'&&<form onSubmit={e=>{e.preventDefault();void action('archive/start',{subreddit:archiveName,from:archiveFrom,to:archiveTo});}}>
+          <label>Subreddit<input required list="archive-subreddits" placeholder="e.g. python or r/aww" value={archiveName} onChange={e=>setArchiveName(e.target.value)}/><datalist id="archive-subreddits">{state?.sources.map(item=><option key={item} value={item}/>)}</datalist></label>
+          <div className="archive-dates"><label>From (optional)<input type="date" value={archiveFrom} max={archiveTo||undefined} onInput={e=>setArchiveFrom(e.currentTarget.value)}/></label><label>To<input type="date" required value={archiveTo} min={archiveFrom||undefined} max={new Date().toISOString().slice(0,10)} onInput={e=>setArchiveTo(e.currentTarget.value)}/></label></div>
+          <p className="muted">Dates include the whole day in UTC. Leave From blank for all available history. New subreddits are added to your feeds.</p>
+          <button type="button" className="archive-all-time" onClick={()=>setArchiveFrom('')}>Use all available history</button>
+          <p className="muted">Downloads posts from <a href="https://arctic-shift.photon-reddit.com" target="_blank" rel="noreferrer">Arctic Shift</a> and saves supported media for offline reading. One request every five seconds; you can stop and resume. Archives and older media may have gaps.</p>
+          <button className="button primary" disabled={busy||Boolean(archiveActive)||importBusy||state?.import?.state==='running'}>Fetch archive</button>
+        </form>}
+        {archiveMode==='file'&&<><p className="muted">Import an existing JSONL / NDJSON export, including .zst. Files are streamed in batches and pause at your storage cap.</p><label>Community<select value={importSource||state?.sources[0]||''} onChange={e=>setImportSource(e.target.value)}>{state?.sources.map(item=><option key={item}>{item}</option>)}</select></label><label>Comment post IDs (optional)<input placeholder="e.g. t3_abc, t3_def" value={importPostIds} onChange={e=>setImportPostIds(e.target.value)}/></label><p className="muted">For comment archives, enter up to 10 post IDs from Reddit links. Import their posts first. Leave blank for post archives.</p><label>Archive file<input type="file" accept=".jsonl,.ndjson,.zst" onChange={e=>setUpload(e.target.files?.[0]??null)}/></label>
+        <p className="muted">Reimport interrupted files from the beginning; posts deduplicate.</p><button className="button primary" disabled={!upload||!feeds.length||importBusy||Boolean(archiveActive)} onClick={()=>void importFile()}>{importBusy?'Importing…':'Import file'}</button>{importBusy&&<button className="button stop" onClick={()=>void action('import/stop')}>Stop import</button>}{state?.import&&<div className="sample-note">{state.import.state} · {state.import.lines.toLocaleString()} lines · {state.import.accepted.toLocaleString()} accepted · {state.import.omitted} omitted<p>{state.import.reason}</p></div>}</>}
+        {Boolean(state?.archives.length)&&<section className="archive-progress" aria-label="Archive fetches"><h3>Archive fetches</h3>{state!.archives.map(job=><article className="archive-job" key={job.id}>
+          <div className="archive-job-heading"><strong>r/{job.subreddit}</strong><span className="badge">{job.state==='running'?(job.phase==='media'?'Saving media':'Fetching'):job.state==='done'?'Finished':'Paused'}</span></div>
+          <p>{job.afterMs?new Date(job.afterMs).toISOString().slice(0,10):'All available history'} → {new Date(job.beforeMs-1).toISOString().slice(0,10)}</p>
+          <p>{job.observed.toLocaleString()} posts checked · {job.added.toLocaleString()} new · {job.pages.toLocaleString()} pages{job.omitted>0?` · ${job.omitted} omitted`:''}{job.excluded>0?` · ${job.excluded} excluded`:''}</p>
+          {job.oldestMs!==null&&<p>Oldest saved: {timestamp(job.oldestMs)}</p>}
+          {job.offline.total>0&&<p>Media {job.offline.ready}/{job.offline.total} offline{job.offline.failed?` · ${job.offline.failed} failed`:''}{job.offline.unavailable?` · ${job.offline.unavailable} unavailable`:''}</p>}
+          {job.reason&&<p className="archive-reason">{job.reason}</p>}{job.notBefore&&job.notBefore>Date.now()&&<p>Retry after {timestamp(job.notBefore)}</p>}
+          <div className="archive-job-actions">{job.state==='running'?<button className="button stop" disabled={busy} onClick={()=>void action('archive/stop',{id:job.id})}>Stop archive</button>:job.state==='paused'?<button className="button" disabled={busy||Boolean(archiveActive)||Boolean(job.notBefore&&job.notBefore>Date.now())} onClick={()=>void action('archive/resume',{id:job.id})}>Resume archive</button>:null}</div>
+        </article>)}</section>}
+      </>}
+      {modal==='clear'&&<><p>Deletes collected posts, discussions and history checkpoints, and stops active work. Your feeds and browser sign-in remain. The next sync verifies the current browser account again. Locally deleted posts stay excluded.</p><button className="button danger" disabled={busy} onClick={()=>void action('clear').then(result=>{if(result){setThread(null);threadId.current=null;setModal(null);}})}>Clear content</button></>}
+      {error&&<p className="notice error" role="alert">{error}</p>}
+    </Modal>}
+  </div>;
+}
+createRoot(document.getElementById('root')!).render(<App/>);

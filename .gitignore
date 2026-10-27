@@ -1,0 +1,12 @@
+node_modules/
+.cache/
+.local-data/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+artifacts/
+
+dist/
