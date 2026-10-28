@@ -28,8 +28,10 @@ export function MediaPreview({kind,url,title,caption}:{kind:'image'|'video';url:
   useEffect(()=>{
     if(!expanded)return;
     const overflow=document.body.style.overflow;document.body.style.overflow='hidden';
+    const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();close();}};
+    window.addEventListener('keydown',escape,true);
     frame.current?.querySelector<HTMLButtonElement>('.media-viewer-close')?.focus();
-    return()=>{document.body.style.overflow=overflow;if(returnFocus.current?.isConnected)returnFocus.current.focus();};
+    return()=>{window.removeEventListener('keydown',escape,true);document.body.style.overflow=overflow;if(returnFocus.current?.isConnected)returnFocus.current.focus();};
   },[expanded]);
   function keys(event:React.KeyboardEvent<HTMLDivElement>){
     if(!expanded)return;

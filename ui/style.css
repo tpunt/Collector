@@ -81,3 +81,11 @@
 
 .favourite-toggle{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;padding:4px;color:#82939d;border-radius:4px;line-height:1}
 .post-actions>.favourite-toggle{min-width:25px;min-height:25px}.favourite-toggle:hover{color:#f0cd80;background:#332e23}.favourite-toggle.active{color:#e8bf67}.post-author{display:inline-flex;align-items:center;gap:2px;max-width:100%;overflow-wrap:anywhere}.post-author .favourite-toggle{padding:2px}.post-author svg{width:12px;height:12px}.thread-author{display:flex;align-items:center;gap:12px;margin:-8px 0 12px;color:var(--muted);font-size:11px}.favourite-users{margin-bottom:14px}.favourite-users p{font-size:11px;line-height:1.6;color:var(--muted);margin:0 0 8px}.user-chips{display:flex;flex-wrap:wrap;gap:6px;max-height:140px;overflow-y:auto}.user-chip{display:flex;align-items:center;border:1px solid var(--line);border-radius:5px;max-width:100%;min-width:0}.user-filter{font-size:11px;padding:6px 8px;border-radius:4px;color:var(--muted);overflow-wrap:anywhere;min-width:0}.user-filter.selected{background:#26372e;color:#bfe3cd}.user-filter:hover{color:var(--text);background:var(--hover)}
+
+/* Local organisation and keyboard reading. */
+.post-tags,.tag-editor-list{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-top:7px}
+.tag-pill{color:#b9d7f0;background:#203444;border:1px solid #365369;border-radius:12px;padding:2px 8px;font-size:11px;line-height:1.5}
+.tag-edit{font-size:11px;color:var(--muted);padding:2px 4px}
+.tag-editor-list{margin-bottom:12px}
+.post-card.keyboard-active{outline:1px solid #6d9fc4;outline-offset:2px}
+.post-card:focus{outline:1px solid #6d9fc4}

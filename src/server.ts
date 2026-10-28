@@ -15,6 +15,7 @@ import { ArchiveFetcher } from './archive-fetch.ts';
 import { historyMonths, historyLowerBound, historyRank } from './history-window.ts';
 import { MEDIA_FILTERS, postId, subredditName } from './domain.ts';
 import type { MediaFilter } from './domain.ts';
+import {feedName,feedIdentity,tumblrBlog} from './sources.ts';
 import { MediaCache } from './media.ts';
 import type { MediaDependencies } from './media.ts';
 import { RequestQueue } from './request-gate.ts';
@@ -72,6 +73,15 @@ export function createReaderServer(options: { database?: string; port?: number; 
     const result = typeof value === 'number' ? value : Date.parse(String(value));
     if (!Number.isSafeInteger(result) || result < 0) throw new Error('Invalid date');
     return result;
+  };
+  const feedQuery=(params:URLSearchParams)=>{
+    const media=params.get('media')??undefined;
+    if(media&&!MEDIA_FILTERS.includes(media as MediaFilter))throw new Error('Invalid media filter');
+    return {tag:params.get('tag')||undefined,subreddit:params.get('subreddit')||undefined,media:media as MediaFilter|undefined,
+      favourites:params.get('favourites')||undefined,authorPlatform:params.get('authorPlatform')??undefined,authorId:params.get('authorId')??undefined,
+      read:params.get('read')??undefined,readBefore:params.has('readBefore')?Number(params.get('readBefore')):undefined,
+      text:params.get('q')??'',scope:params.get('scope')??undefined,afterMs:date(params.get('after')),beforeMs:date(params.get('before')),
+      cursor:params.get('cursor')||undefined};
   };
   let closing:Promise<void>|null=null,stopping=false,shutdownRequested=false;
   const requests=new Set<Promise<void>>();
@@ -166,6 +176,17 @@ export function createReaderServer(options: { database?: string; port?: number; 
             if(key){readIntents.delete(key);readIntents.set(key,Number(data.sequence));if(readIntents.size>100_000)readIntents.delete(readIntents.keys().next().value!);}
             json(res,{post:updated});return;
           }
+          case '/api/tags': {
+            const post=store.getPost(postId(String(data.id)));
+            if(!post||data.context!==post.readContext)throw new Error('Post changed; refresh the view and try again');
+            json(res,{post:store.setPostTags(post.id,data.tags)});return;
+          }
+          case '/api/read/bulk': {
+            if(data.confirm!==true||typeof data.query!=='string'||data.query.length>12000)throw new Error('Confirm marking matching posts read');
+            if(data.revision!==store.contentRevision)throw new Error('The library changed; review the filters and try again');
+            const query=feedQuery(new URLSearchParams(data.query));delete query.cursor;
+            json(res,{changed:store.markFeedRead(query,Number(data.generation))});return;
+          }
           case '/api/favourite/post': {
             const post=store.getPost(postId(String(data.id)));
             if(!post||data.context!==post.readContext)throw new Error('Post changed; refresh the view and try again');
@@ -180,7 +201,8 @@ export function createReaderServer(options: { database?: string; port?: number; 
             json(res,{storage:store.storage});return;
           }
           case '/api/sources': {
-            const name = subredditName(String(data.name ?? ''));
+            if(data.platform!==undefined&&!['reddit','tumblr'].includes(String(data.platform)))throw new Error('Choose Reddit or Tumblr');
+            const name = data.platform==='tumblr'?'tumblr:'+tumblrBlog(String(data.name??'')):data.platform==='reddit'?subredditName(String(data.name??'')):feedName(String(data.name ?? ''));
             if(store.followedSources().includes(name))throw new Error('This feed is already subscribed; change its history limit on Feeds');
             const months = historyMonths(data.historyMonths ?? 1);
             const now = Date.now(), lowerMs=historyLowerBound(months,now);
@@ -212,14 +234,14 @@ export function createReaderServer(options: { database?: string; port?: number; 
           case '/api/sync': {
             jobs.assertCanQueue(true);
             const followed = store.followedSources();
-            const selected = Array.isArray(data.names) && data.names.length ? [...new Set(data.names.map(item => subredditName(String(item))))] : followed;
+            const selected = Array.isArray(data.names) && data.names.length ? [...new Set(data.names.map(item => feedName(String(item))))] : followed;
             if (selected.some(name => !followed.includes(name))) throw new Error('Sync requires a subscribed feed');
-            if (!selected.length) throw new Error('Add a subreddit first');
+            if (!selected.length) throw new Error('Add a feed first');
             const names = selected.filter(name => feedStatus(name) === 'idle');
             json(res,{queued:jobs.syncFeeds(names)});return;
           }
           case '/api/history': {
-            const name=subredditName(String(data.name)),months=historyMonths(data.months);
+            const name=feedName(String(data.name)),months=historyMonths(data.months);
             if(archive.active?.subreddit===name)throw new Error('Stop the archive fetch before changing this feed’s history');
             if(!store.followedSources().includes(name))throw new Error('Subscribe to this feed first');
             const previous=store.getHistoryPreference(name),changed=previous.months!==months;
@@ -234,7 +256,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             json(res,{...result,targetId,queued:Boolean(targetId&&jobs.hasTarget(targetId))});return;
           }
           case '/api/pause': {
-            const selection=typeof data.name==='string'?{source:subredditName(data.name)}:{};
+            const selection=typeof data.name==='string'?{source:feedName(data.name)}:{};
             networkMode.cancel(selection);
             if(selection.source){await archive.stop(selection.source);media.stop(selection.source);await jobs.stopSource(selection.source);}else{await archive.stop();jobs.pause();}
             networkMode.cancel(selection);break;
@@ -243,7 +265,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
           case '/api/sign-in/finish': await jobs.finishSignIn(); break;
           case '/api/remove': {
             if (data.confirm !== true) throw new Error('Confirm feed removal first');
-            const name = subredditName(String(data.name));
+            const name = feedName(String(data.name));
             networkMode.cancel({source:name});
             await archive.stop(name,'Feed removed; stored archive progress kept');
             media.stop(name);
@@ -251,7 +273,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
           }
           case '/api/clear-source': {
             if(data.confirm!==true)throw new Error('Confirm clearing subreddit data first');
-            const name=subredditName(String(data.name));
+            const name=feedName(String(data.name));
             if(!store.followedSources().includes(name))throw new Error('Choose a subscribed subreddit');
             networkMode.cancel({source:name});
             await archive.stop(name,'Archive data cleared');
@@ -285,20 +307,14 @@ export function createReaderServer(options: { database?: string; port?: number; 
         res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':'attachment; filename="collector.tar.age"','Content-Length':file.bytes,'Cache-Control':'no-store'});
         await pipeline(createReadStream(file.path),res);return;
       }
-      if (url.pathname === '/api/state') { const policy=networkMode.status;json(res,{ token, network:policy, canQuit:Boolean(options.onShutdown), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name),offlinePaused:policy.offline&&policy.paused.feeds.includes(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
+      if (url.pathname === '/api/state') { const policy=networkMode.status;json(res,{ token, network:policy, canQuit:Boolean(options.onShutdown), generation:store.generation,tags:store.tags(), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name),offlinePaused:policy.offline&&policy.paused.feeds.includes(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
         storage:store.storage, import:importer.progress, imports:store.getSetting('imports') ?? [], account:store.getSetting('account') }); return; }
       if (url.pathname === '/api/feed') {
-        const media = url.searchParams.get('media') ?? undefined;
-        if (media && !MEDIA_FILTERS.includes(media as MediaFilter)) throw new Error('Invalid media filter');
-        json(res,store.queryFeed({subreddit:url.searchParams.get('subreddit') || undefined,media:media as MediaFilter | undefined,
-          favourites:url.searchParams.get('favourites')||undefined,authorPlatform:url.searchParams.get('authorPlatform')??undefined,authorId:url.searchParams.get('authorId')??undefined,
-          read:url.searchParams.get('read')??undefined,readBefore:url.searchParams.has('readBefore')?Number(url.searchParams.get('readBefore')):undefined,
-          text:url.searchParams.get('q')??'',scope:url.searchParams.get('scope')??undefined,afterMs:date(url.searchParams.get('after')),beforeMs:date(url.searchParams.get('before')),
-          cursor:url.searchParams.get('cursor') || undefined})); return;
+        json(res,store.queryFeed(feedQuery(url.searchParams)));return;
       }
       if (url.pathname.startsWith('/api/post/')) { const id=postId(url.pathname.slice('/api/post/'.length)); json(res,{post:store.getPost(id),snapshot:store.latestSnapshot(id)}); return; }
       if (url.pathname.startsWith('/api/media/')) {json(res,await media.view(postId(url.pathname.slice('/api/media/'.length))));return;}
-      const asset=/^\/media\/(t3_[a-z0-9]+)\/([a-f0-9]{64})$/.exec(url.pathname);
+      const asset=/^\/media\/((?:t3_[a-z0-9]+|tumblr:[a-z0-9-]+:[0-9]+))\/([a-f0-9]{64})$/.exec(url.pathname);
       if (asset) {await media.serve(postId(asset[1]!),asset[2]!,req.headers.range,res);return;}
       if (url.pathname.startsWith('/api/')) { json(res,{error:'Not found'},404); return; }
       const path = url.pathname === '/' ? resolve(dist,'index.html') : resolve(dist,'.' + decodeURIComponent(url.pathname));

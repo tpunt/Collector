@@ -1,3 +1,4 @@
+import {hasExternalAttachment,EXTERNAL_ATTACHMENT_NOTE} from './sources.ts';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile, open } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
@@ -92,7 +93,7 @@ export class MediaCache {
       if(saved&&(this.diskFiles.get(key)!==saved.bytes||!(this.diskFiles.get(key+'.json')??0))){
         this.cached.delete(key);
         for(const taskKey of this.states.keys())if(taskKey.endsWith(':'+key)&&!this.tasks.has(taskKey))this.states.delete(taskKey);
-        for(const owner of owners)if(this.store.mediaSync(owner.postId)?.status==='ready')this.store.setMediaSync(this.store.generation,owner.postId,'pending','Saved media changed or is missing; Sync to save it again');
+        for(const owner of owners){const state=this.store.mediaSync(owner.postId);if(state?.status==='ready'||state?.reason===EXTERNAL_ATTACHMENT_NOTE)this.store.setMediaSync(this.store.generation,owner.postId,'pending','Saved media changed or is missing; Sync to save it again');}
       }
       const bytes=(this.diskFiles.get(key)??0)+(this.diskFiles.get(key+'.json')??0),current=this.cached.get(key);
       if(bytes)result.push({key,kind:current?.type.startsWith('image/')?'image':current?.type.startsWith('video/')?'video':'other',bytes,owners});
@@ -117,8 +118,8 @@ export class MediaCache {
     for(const id of [...this.store.readyMediaIds()]){
       const post=this.store.getPost(id);
       const saved=Boolean(post?.attachments.length&&post.attachments.every(item=>this.cached.has(mediaKey(item)))&&(!isGallery(post.outbound)||completeCollection('reddit:'+post.id,post.attachments)));
-      if(saved)this.store.setMediaSync(this.store.generation,id,'ready');
-      else if(this.store.mediaSync(id)?.status==='ready')this.store.setMediaSync(this.store.generation,id,'pending','Saved media is incomplete; sync to download it again');
+      if(saved)this.store.setMediaSync(this.store.generation,id,hasExternalAttachment(post!)?'unavailable':'ready',hasExternalAttachment(post!)?EXTERNAL_ATTACHMENT_NOTE:null);
+      else this.store.setMediaSync(this.store.generation,id,'pending','Saved media is incomplete; sync to download it again');
     }
   }
   async reconcile() {
@@ -138,7 +139,7 @@ export class MediaCache {
     const gallery=isGallery(post.outbound),rediscover=Boolean(previous.reason?.startsWith('Media URL expired'));
     if(previous.status==='unavailable'&&!(gallery&&previous.reason?.startsWith('Complete gallery downloads')))return null;
     if(post.attachments.length&&post.attachments.every(item=>this.cached.has(mediaKey(item)))&&(!gallery||completeCollection('reddit:'+post.id,post.attachments))){
-      this.store.setMediaSync(this.store.generation,id,'ready',null,session);return null;
+      this.store.setMediaSync(this.store.generation,id,hasExternalAttachment(post)?'unavailable':'ready',hasExternalAttachment(post)?EXTERNAL_ATTACHMENT_NOTE:null,session);return null;
     }
     if(gallery&&(!completeCollection('reddit:'+post.id,post.attachments)||rediscover)){
       this.store.setMediaSync(this.store.generation,id,'downloading',rediscover?previous.reason:null,session);return {discover:true};
@@ -174,6 +175,7 @@ export class MediaCache {
     if(retryable)throw new Error(retryable.message??'Media download failed');
     if(failures.length&&items.every(item=>item.state==='ready'||item.state==='error'))throw new UnsupportedMediaError(failures[0]!.message??'Media is unavailable');
     if(!items.length||items.some(item=>item.state!=='ready'))throw new Error('Media files were not saved');
+    if(hasExternalAttachment(this.store.getPost(id)!))throw new UnsupportedMediaError(EXTERNAL_ATTACHMENT_NOTE);
     this.store.setMediaSync(this.store.generation,id,'ready',null,session);
   }
   async view(id:string) {return {items:await this.items(id),sync:this.store.mediaSync(id)};}

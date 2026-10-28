@@ -22,7 +22,7 @@ const secret='backup test passphrase';
 const post=(id='abc')=>({id,subreddit:'python',title:'Private library title',author:redditAuthor('Backup_Author'),body:'Offline body sentinel',permalink:`/r/python/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'backup-test',observedAt:1800000000000,media:['Image' as const,'Text' as const],attachments:[{kind:'image' as const,url:'https://i.redd.it/backup.jpg'}]});
 async function setup(){
  const root=await mkdtemp(join(tmpdir(),'collector-backup-')),database=join(root,'reader.sqlite'),mediaDirectory=join(root,'media'),work=join(root,'work'),store=new ReaderStore(database);
- store.addSubreddit('python');store.importArchiveBatch(store.generation,[post(),post('spam')]);store.setRead('abc',true);store.setPostFavourite('abc',true);store.setUserFavourite(redditAuthor('Backup_Author')!,true);store.deletePost('spam');store.setHistoryLimit('python',3);store.bindAccount('fixture_user');
+ store.addSubreddit('python');store.importArchiveBatch(store.generation,[post(),post('spam')]);store.setRead('abc',true);store.setPostTags('abc',['saved reference']);store.setPostFavourite('abc',true);store.setUserFavourite(redditAuthor('Backup_Author')!,true);store.deletePost('spam');store.setHistoryLimit('python',3);store.bindAccount('fixture_user');
  const media=new MediaCache(store,{directory:mediaDirectory,queue:new RequestQueue({intervalMs:0}),onAccess:()=>assert.fail(),fetch:async()=>new Response(new ReadableStream({start(controller){for(let i=0;i<8;i++)controller.enqueue(new Uint8Array(1024*1024).fill(i));controller.close();}}),{headers:{'Content-Type':'image/jpeg'}})});
  await media.initialize();await media.syncPost('abc','backup',1,new AbortController().signal);
  const backups=new LibraryBackups(store,media,work,mediaDirectory,10);
@@ -37,7 +37,7 @@ test('encrypted streaming backup restores owned media, preferences, exclusions a
   h.store.importArchiveBatch(h.store.generation,[post('later')]);const preview=await h.backups.prepare(createReadStream(file.path),secret);assert.equal(preview.posts,1);assert.equal(preview.files,1);assert(h.store.getPost('later'));
   await h.backups.discard(preview.id);assert(h.store.getPost('later'));
   const replacement=await h.backups.prepare(createReadStream(file.path),secret);h.store.setStorageLimit(1_000_000);await assert.rejects(h.backups.restore(replacement.id),/storage cap/);assert(h.store.getPost('later'));h.store.setStorageLimit(10_000_000_000);await h.backups.restore(replacement.id);
-  assert.equal(h.store.getPost('later'),null);assert.equal(h.store.getPost('abc')!.body,'Offline body sentinel');assert.notEqual(h.store.getPost('abc')!.readAt,null);assert.equal(h.store.getHistoryPreference('python').months,3);assert.equal(h.store.getPost('abc')!.favourite,true);assert.equal(h.store.getPost('abc')!.favouriteUser,true);assert.equal(h.store.getPost('abc')!.author?.name,'Backup_Author');
+  assert.equal(h.store.getPost('later'),null);assert.equal(h.store.getPost('abc')!.body,'Offline body sentinel');assert.deepEqual(h.store.getPost('abc')!.tags,['saved reference']);assert.notEqual(h.store.getPost('abc')!.readAt,null);assert.equal(h.store.getHistoryPreference('python').months,3);assert.equal(h.store.getPost('abc')!.favourite,true);assert.equal(h.store.getPost('abc')!.favouriteUser,true);assert.equal(h.store.getPost('abc')!.author?.name,'Backup_Author');
   assert(h.store.isPostExcluded('spam'));assert.equal(h.store.getSetting('account'),null);assert.equal((await h.media.items('abc'))[0]!.state,'ready');assert.equal(h.media.status.requests,1);
   assert.equal((await stat((await h.media.items('abc'))[0]!.localPath!)).size,8*1024*1024);assert.equal(h.store.queryFeed({read:'read'}).posts.length,1);
  }finally{await h.close();}
@@ -142,11 +142,11 @@ for(const offline of [true,false])test(`restore recovery keeps Offline mode ${of
  }finally{if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGKILL');await once(child,'exit');}await rm(root,{recursive:true,force:true});}
 });
 
-for(const schema of [3,4])test(`published version-${schema} backups upgrade only in staging and preserve saved content`,async()=>{
+for(const schema of [3,4,5])test(`published version-${schema} backups upgrade only in staging and preserve saved content`,async()=>{
  const h=await setup();
  try{
   const path=join(h.root,'legacy.sqlite');await h.store.snapshot(path);const old=new DatabaseSync(path);
-  old.exec("DROP TABLE observation_authors; DROP TABLE favourite_posts; DROP TABLE favourite_users;"+(schema===3?"DROP TRIGGER search_insert; DROP TRIGGER search_update; DROP TRIGGER search_delete; DROP TABLE search_index; DROP TABLE search_text;":"")+"UPDATE media_sync SET status='pending'; PRAGMA user_version="+schema+";");old.close();
+  old.exec("DROP TABLE post_tags; "+(schema<5?"DROP TABLE observation_authors; DROP TABLE favourite_posts; DROP TABLE favourite_users;":"")+(schema===3?"DROP TRIGGER search_insert; DROP TRIGGER search_update; DROP TRIGGER search_delete; DROP TABLE search_index; DROP TABLE search_text;":"")+"UPDATE media_sync SET status='pending'; PRAGMA user_version="+schema+";");old.close();
   const raw=await readFile(path),manifest=JSON.stringify({format:'Collector',version:1,schema,files:[{name:'reader.sqlite',bytes:raw.length,sha256:createHash('sha256').update(raw).digest('hex')}]});
   const pack=tar.pack();pack.entry({name:'manifest.json'},manifest);pack.entry({name:'reader.sqlite'},raw);pack.finalize();
   const encryption=new Encrypter();encryption.setPassphrase(secret);encryption.setScryptWorkFactor(10);const bytes=await encryption.encrypt(Readable.toWeb(Readable.from(pack)) as ReadableStream<Uint8Array>);

@@ -3,11 +3,13 @@ import { ReaderBrowser, AccessError } from './browser.ts';
 import { readListing, readThread, collectClassicListingDom } from './extract.ts';
 import { advanceBoundary } from './history.ts';
 import type { ReaderStore } from './store.ts';
-import { subredditName,postId } from './domain.ts';
+import {postId} from './domain.ts';
+import {feedName,feedIdentity,listingUrl} from './sources.ts';
 import type { Page } from 'playwright';
 import type { RequestQueue } from './request-gate.ts';
 import { discoverMedia } from './media-discovery.ts';
 import { SyncLimitError, UnsupportedMediaError, PostUnavailableError,PostIdentityError } from './sync-errors.ts';
+import {readTumblrListing,readTumblrPost} from './tumblr.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export interface MediaSyncDriver {
@@ -79,7 +81,7 @@ export class ReaderJobs {
     return work.kind === 'target' ? this.store.getTarget(work.targetId)?.subreddit ?? null : this.store.getPost(work.postId)?.subreddit ?? null;
   }
   feedStatus(input: string): 'idle' | 'queued' | 'syncing' | 'stopping' {
-    const name = subredditName(input);
+    const name = feedName(input);
     if (this.active && this.sourceOf(this.active) === name) return this.stopping || this.stoppedWork.has(this.active.id) ? 'stopping' : 'syncing';
     return this.queue.some(work => this.sourceOf(work) === name) ? 'queued' : 'idle';
   }
@@ -128,14 +130,14 @@ export class ReaderJobs {
   syncMedia(names:string[],options:{resume?:boolean}={}){
     this.store.assertStorageAvailable();
     this.allowed(Boolean(options.resume));this.stopping=false;
-    for(const name of names)if(this.store.followedSources().includes(subredditName(name)))this.queueMediaSource(subredditName(name),Date.now()+60*60_000);
+    for(const name of names)if(this.store.followedSources().includes(feedName(name)))this.queueMediaSource(feedName(name),Date.now()+60*60_000);
     this.start();
   }
   assertCanQueue(resume=false) { this.store.assertStorageAvailable();this.allowed(resume); }
   /** One explicit operation owns listing catch-up, historical pages and offline files. */
   syncFeeds(inputs:string[],plan?:{heads:string[];history:string[]}) {
     this.assertCanQueue(true);
-    const selectedNames=[...new Set(inputs.map(subredditName))];
+    const selectedNames=[...new Set(inputs.map(feedName))];
     if(selectedNames.some(name=>!this.store.followedSources().includes(name)))throw new Error('Sync requires a subscribed feed');
     // History changes stop the previous run first. Its aborted page may still be
     // unwinding; an explicit replacement plan must queue behind it, not vanish.
@@ -208,6 +210,7 @@ export class ReaderJobs {
     this.store.assertStorageAvailable();
     this.allowed(false); this.stopping = false;
     if (!this.store.getPost(postId)) throw new Error('Post not found');
+    if(feedIdentity(this.store.getPost(postId)!.subreddit).platform==='tumblr')throw new Error('Tumblr replies are not collected; the full saved post is available locally');
     if (this.queue.some(item => item.kind === 'thread' && item.postId === postId) || (this.active?.kind === 'thread' && this.active.postId === postId)) return;
     this.queue.unshift({ id: randomUUID(), kind: 'thread', postId, deadline: Date.now() + 3 * 60_000, generation: this.store.generation });
     this.start();
@@ -235,7 +238,7 @@ export class ReaderJobs {
     this.pause(error.message);
   }
   async stopSource(input: string, reason = 'Stopped by user') {
-    const name = subredditName(input);this.mediaSync?.stop(name);
+    const name = feedName(input);this.mediaSync?.stop(name);
     this.queue = this.queue.filter(work => this.sourceOf(work) !== name);
     this.store.pauseSource(name, reason);
     if (this.active && this.sourceOf(this.active) === name) {
@@ -243,7 +246,7 @@ export class ReaderJobs {
       this.controller?.abort();
       await this.closeBrowser();
     }
-    this.message = `r/${name}: ${reason.toLowerCase()}`;
+    this.message = `${feedIdentity(name).label}: ${reason.toLowerCase()}`;
   }
   async stopPost(input:string) {
     const id=postId(input);this.mediaSync?.stopPost?.(id);
@@ -305,8 +308,16 @@ export class ReaderJobs {
           if(work.kind==='media'){
             const plan=this.mediaSync?.preparePost(work.postId,workSession);if(!plan)continue;
             const post=this.store.getPost(work.postId);if(!post)continue;
-            this.message=`Saving media for r/${post.subreddit}: ${post.title}`;
-            if(plan.discover){
+            this.message=`Saving media for ${feedIdentity(post.subreddit).label}: ${post.title}`;
+            if(plan.discover&&feedIdentity(post.subreddit).platform==='tumblr'){
+              if(this.browserOpen&&this.mediaMode)await this.closeBrowser();
+              await this.browser.open(120-(this.totalRequests()-requestBaseline),'tumblr');this.browserOpen=true;this.mediaMode=false;
+              this.attemptedBodies.add(post.id);
+              const page=await this.browser.navigate(post.permalink,this.controller.signal),saved=await readTumblrPost(page,post.id);this.controller.signal.throwIfAborted();
+              this.store.savePostBody(work.generation,post.id,saved.body??'',saved.observedAt,saved.author);
+              if(!saved.attachments?.length)throw new UnsupportedMediaError('This Tumblr media is hosted by an unsupported external provider');
+              this.store.saveMediaReferences(work.generation,post.id,saved.attachments);
+            }else if(plan.discover){
               if(this.browserOpen&&!this.mediaMode)await this.closeBrowser();
               await this.browser.open(120-(this.totalRequests()-requestBaseline),'media');this.browserOpen=true;this.mediaMode=true;
               const page=await this.browser.navigate(post.permalink.replace('https://www.reddit.com','https://old.reddit.com'),this.controller.signal);
@@ -331,22 +342,23 @@ export class ReaderJobs {
             await this.closeBrowser();this.controller.signal.throwIfAborted();
             await this.mediaSync!.syncPost(post.id,workSession,120-(this.totalRequests()-requestBaseline),this.controller.signal);
             const progress=this.store.offlineMedia(post.subreddit);
-            this.message=`r/${post.subreddit}: media saved for ${progress.ready}/${progress.total} posts`;
+            this.message=`${feedIdentity(post.subreddit).label}: media saved for ${progress.ready}/${progress.total} posts`;
             continue;
           }
           if(this.browserOpen&&this.mediaMode)await this.closeBrowser();
-          await this.browser.open(120-(this.totalRequests()-requestBaseline));this.browserOpen=true;this.mediaMode=false;
+          const source=this.sourceOf(work),tumblr=source&&feedIdentity(source).platform==='tumblr';
+          await this.browser.open(120-(this.totalRequests()-requestBaseline),tumblr?'tumblr':false);this.browserOpen=true;this.mediaMode=false;
           this.controller.signal.throwIfAborted();
           if (work.kind === 'target') {
             const target = this.store.getTarget(work.targetId);
             if (!target || ['done','cancelled'].includes(target.status)) continue;
-            this.message = `Syncing r/${target.subreddit} · ${target.observedCount} posts encountered`;
-            const head = target.continuation === null || new URL(target.continuation).search === '';
-            const url = target.continuation ?? `https://old.reddit.com/r/${target.subreddit}/new/`;
-            const listing = await this.listing(await this.browser.navigate(url, this.controller.signal), target.subreddit);
+            this.message = `Syncing ${feedIdentity(target.subreddit).label} · ${target.observedCount} posts encountered`;
+            const head = target.continuation === null || target.continuation===listingUrl(target.subreddit);
+            const url = target.continuation ?? listingUrl(target.subreddit);
+            const listing = await (tumblr?readTumblrListing:this.listing)(await this.browser.navigate(url, this.controller.signal), target.subreddit);
             this.controller.signal.throwIfAborted();
             if (this.store.getTarget(target.id)?.status === 'cancelled') continue;
-            this.store.bindAccount(listing.account);
+            if(!tumblr)this.store.bindAccount(listing.account);
             const result = advanceBoundary(target, listing, this.store.hasBatch(target.id, listing.signature));
             this.store.commitBatch({ generation: work.generation, targetId: target.id, observations: listing.posts.map(post=>post.bodyNeedsFetch&&this.attemptedBodies.has(post.id)?{...post,body:undefined,bodyNeedsFetch:false}:post),
               continuation: listing.next, omissions: listing.omissions, boundary: result.boundary, batchKey: listing.signature,
@@ -354,7 +366,7 @@ export class ReaderJobs {
               status: result.done ? 'done' : result.stalled ? 'paused' : 'queued',
               reason: result.reason ?? (result.stalled ? 'Listing repeated three times; continuation needs inspection' : undefined) });
             await this.mediaSync?.reconcile?.();
-            this.message = `r/${target.subreddit}: ${listing.posts.length} posts checked${listing.omissions ? `, ${listing.omissions} omitted` : ''}`;
+            this.message = `${feedIdentity(target.subreddit).label}: ${listing.posts.length} posts checked${listing.omissions ? `, ${listing.omissions} omitted` : ''}`;
             if (!result.done && !result.stalled) this.queue.push({ ...work, head: false });
             this.queueMediaSource(target.subreddit,work.deadline);
             this.queueBodies(target.subreddit,work.deadline);
@@ -367,6 +379,14 @@ export class ReaderJobs {
             }
             this.message = work.kind==='body'?`Saving post text: ${post.title}`:`Reading discussion: ${post.title}`;
             const page = await this.browser.navigate(post.permalink.replace('https://www.reddit.com', 'https://old.reddit.com'), this.controller.signal);
+            if(tumblr&&work.kind==='body'){
+              const saved=await readTumblrPost(page,post.id);this.controller.signal.throwIfAborted();
+              this.store.savePostBody(work.generation,post.id,saved.body??'',saved.observedAt,saved.author);
+              if(saved.attachments?.length)this.store.saveMediaReferences(work.generation,post.id,saved.attachments);
+              await this.mediaSync?.reconcile?.();
+              if(this.mediaSync&&this.store.mediaSync(post.id))this.queue.push({id:randomUUID(),kind:'media',postId:post.id,deadline:work.deadline,generation:work.generation});
+              this.message='Tumblr post text and attachment references saved';continue;
+            }
             const account = await this.account(page);
             this.controller.signal.throwIfAborted();
             if (!account) throw new AccessError('Saved sign-in is unavailable');

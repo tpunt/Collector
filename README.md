@@ -2,12 +2,56 @@
 
 A local web app for collecting posts and media for offline reading. Reddit is the first supported source. Its collector uses its own signed-in Chrome profile, Playwright and structured rendered Classic Reddit HTML; the app uses React and SQLite. No Reddit API, hidden hydration state, screenshot-based collection or AI navigation. Post text comes from rendered DOM; syncing downloads supported media files for offline reading.
 
-The sidebar groups feeds by platform, with subreddits indented under **Reddit**.
-**All feeds**, search, read tracking and favourites are shared views. Each post
-shows its platform and feed; **Archive** separately identifies its provenance.
-Reddit display labels come from a small presentation adapter. A future source
-such as Tumblr can supply its own platform/feed labels to the shared post view;
-adding its collector and namespaced persistence remains future work.
+The sidebar groups feeds under **Reddit** and **Tumblr**. **All feeds**, tags,
+search, read tracking and favourites are shared views. Each post shows its
+platform and feed; **Archive** separately identifies provenance. Existing Reddit
+feed/item keys retain their reserved bare-name / `t3_` namespace; Tumblr uses
+`tumblr:<blog>` / `tumblr:<blog>:<post-id>`. Shared identities include a platform
+key, preventing collisions without rewriting existing libraries.
+
+Use **+ Tag** on a post or **Edit tags** in its details, then select a tag in the
+sidebar. Tags combine with feed, read, search, favourites and media filters: an
+image post remains visible with its saved images when both a tag and **Image**
+or **Media** are selected. **Image** and **Video** restrict displayed attachments
+within mixed posts; **Media** shows both. Local tags are separate from a site's own tags. They
+survive sync, restart and encrypted backups; deleting or clearing posts removes
+their tags. Labels are case-insensitive, with up to 50 tags of 60 characters per
+post.
+
+Keyboard reading: **J / K** selects the next / previous loaded post, **O** or
+**Enter** opens it, and **R** toggles its read status. Typing in controls does not
+invoke shortcuts. **Escape** exits an image or video viewer first, preserving
+any open post details; another Escape closes the details. **Mark matching posts
+read** confirms and marks every post matching the active filters, including
+unloaded pages. If content changes during confirmation, review the selection
+and try again.
+
+### Tumblr (experimental)
+
+Choose **Tumblr** when adding a feed and enter a blog name, `@name`, or its
+Tumblr blog URL. This collector visits public `name.tumblr.com` theme pages in
+its own Chrome profile, with JavaScript disabled. It reads attached DOM and NPF
+media attributes, follows captured `/page/N` links, and fetches individual public
+post pages to verify full text and attachment URLs. It uses no Tumblr API.
+The existing random 4–6 second shared request spacing, session budgets, storage
+cap, Stop/Resume and Offline mode apply. Nothing collects on startup.
+
+Supported themes must expose post identities, absolute dates, complete post
+content and direct Tumblr CDN image/video files. Full supported attachments are
+saved locally and work with the common reader controls. Access gates, missing
+dates, unfamiliar layouts and hidden photoset/native-player content pause or
+leave work incomplete, rather than silently advancing its checkpoint. External
+players retain the existing online-only treatment. In mixed posts, hosted media
+is saved while a separate external player keeps an orange offline warning; a
+cached image never counts as a downloaded external video. Private/dashboard-only blogs,
+custom-domain blogs, Tumblr sign-in, replies/notes and third-party Tumblr archives
+are not supported. An end-of-listing result discloses that older history could
+not be verified. Reddit's archive tools remain Reddit-specific.
+
+The collector has local end-to-end coverage for paginated history, full text,
+multiple attachments, local serving and Offline pause/resume. Live public Staff
+and Changes probes returned HTTP 403 during development; live Tumblr access is
+therefore unverified and this source is explicitly experimental.
 
 Star a post to save it in **Favourite posts**, or star the author beside their
 username to add them to **Favourite users**. Both views work offline with the
@@ -54,7 +98,7 @@ npm ci
 npm run launch
 ```
 
-The launcher opens the browser; the usual address is **http://127.0.0.1:3210**. The compact dark All feeds feed filters by subreddit, media type and text. **Media** combines image and video posts, hides text previews, and retains the post title, discussion and local-path controls. Text-only posts are excluded; **Image** and **Video** remain available separately. It is the single combined-feed destination in the sidebar. Post selection and AI summarisation have been removed. Open **Feeds** to view subscriptions, stored counts, per-subreddit sync status and the last successful offline sync time. Add a feed there with a history limit: **1 month** (default), 3 months, 6 months, 1 year, 2 years, 3 years, 5 years, or All time. The same setting is editable beside each subscription. Add & sync starts an explicit session. Sync a feed individually or use Sync all; already active/queued feeds are skipped. Nothing scrapes on application startup.
+The launcher opens the browser; the usual address is **http://127.0.0.1:3210**. The compact dark All feeds feed filters by source feed, tag, media type and text. **Media** combines image and video posts, hides text previews, and retains the post title, discussion and local-path controls. Text-only posts are excluded; **Image** and **Video** remain available separately. It is the single combined-feed destination in the sidebar. Post selection and AI summarisation have been removed. Open **Feeds** to view subscriptions, stored counts, per-subreddit sync status and the last successful offline sync time. Add a feed there with a history limit: **1 month** (default), 3 months, 6 months, 1 year, 2 years, 3 years, 5 years, or All time. The same setting is editable beside each subscription. Add & sync starts an explicit session. Sync a feed individually or use Sync all; already active/queued feeds are skipped. Nothing scrapes on application startup.
 
 The sidebar search scope sits above the text field. Search runs automatically after a 200ms pause in typing; changing the title/body scope also applies automatically. Read-status and subreddit selections apply immediately. **Show read+unread** includes both read states. Subreddit choices filter the current feed or favourites view; the Collector logo returns to the combined feed. Searching or changing a filter from Feeds opens the post feed.
 
@@ -113,7 +157,7 @@ owners; the database is global. Retained data from removed feeds is included.
 **Reclaim freed space** removes unowned cache files and compacts the database
 without deleting posts. Inspection only reads local files.
 
-Selective cleanup defaults to read posts. Choose a feed, post type and optional
+Selective cleanup defaults to read posts and excludes favourite posts. Uncheck **Exclude favourite posts** to include them explicitly. Changing the checkbox invalidates an existing preview. Choose a feed, post type and optional
 exclusive UTC cutoff, then **Preview cleanup**. Preview pauses collection and
 shows affected posts, media files and estimated media savings. **Delete posts**
 requires confirmation of that preview; changed content, ownership or selection
@@ -123,7 +167,7 @@ the posts back. There is no automatic eviction or history pruning.
 
 ## Persistence
 
-New databases use schema version 5. Version-four libraries receive an additive upgrade for author evidence and favourites, preserving existing content and preferences. Published versions receive preserving additive upgrades, including read states and the search index. Existing version-1 libraries receive one additive, transactional upgrade for durable post-text work, preserving content, media, preferences and deletion exclusions. Previously unverified live text is queued for the next explicit sync; startup makes no website requests. Unknown/prototype schemas and application identities are rejected before writes. To start fresh, stop the app, back up and move aside `reader.sqlite` together with any `reader.sqlite-wal` / `reader.sqlite-shm` files and the `media` directory, then restart. Keep `browser-profile` to retain the browser session.
+New databases use schema version 6. Version-five libraries receive an additive upgrade for local post tags, preserving existing data. Version-four libraries receive an additive upgrade for author evidence and favourites, preserving existing content and preferences. Published versions receive preserving additive upgrades, including read states and the search index. Existing version-1 libraries receive one additive, transactional upgrade for durable post-text work, preserving content, media, preferences and deletion exclusions. Previously unverified live text is queued for the next explicit sync; startup makes no website requests. Unknown/prototype schemas and application identities are rejected before writes. To start fresh, stop the app, back up and move aside `reader.sqlite` together with any `reader.sqlite-wal` / `reader.sqlite-shm` files and the `media` directory, then restart. Keep `browser-profile` to retain the browser session.
 
 Feed subscription, history limit, current history goal and newest-check boundary share one `feeds` row. `feed_sync` records completion separately from individual scan checkpoints. Date bounds define scan scope; there are no obsolete recent/since/all-time target types or first-page refresh timestamps. Post-to-media links determine file ownership across posts and communities, so deletion and Clear preserve shared files without a second ownership index. Post and comment removal evidence, exclusions and live/archive precedence remain enforced.
 

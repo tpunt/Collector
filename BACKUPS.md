@@ -26,7 +26,7 @@ directory rather than handing uploaded paths to a filesystem extractor.
 
 Backups include posts, observations, author evidence, saved discussions,
 subscriptions, history checkpoints, preferences, deletion exclusions, read
-states, favourite posts and favourite users. Unfinished work
+states, local post tags, favourite posts and favourite users. Unfinished work
 stays unfinished. Browser profiles, cookies and credentials are excluded. The destination storage cap is kept when restoring, rather than replaced by the saved quota. Restore
 clears the saved account binding and access pause, so the destination browser's
 visible account is verified on the next explicit collection. It starts no network

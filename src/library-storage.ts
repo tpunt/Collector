@@ -1,21 +1,23 @@
-import {MEDIA_FILTERS,subredditName} from './domain.ts';
+import {MEDIA_FILTERS} from './domain.ts';
+import {feedName} from './sources.ts';
 import type {MediaFilter} from './domain.ts';
 import type {ReaderStore} from './store.ts';
 import type {MediaInventory} from './media.ts';
 
-export interface CleanupCriteria {feed:string;kind:MediaFilter|'';beforeMs:number|null;readOnly:boolean}
+export interface CleanupCriteria {feed:string;kind:MediaFilter|'';beforeMs:number|null;readOnly:boolean;excludeFavourites?:boolean}
 export function cleanupCriteria(input:Record<string,unknown>):CleanupCriteria {
   if(input.feed!==undefined&&typeof input.feed!=='string')throw new Error('Choose a feed');
-  const feed=input.feed?subredditName(String(input.feed)):'';
+  const feed=input.feed?feedName(String(input.feed)):'';
   if(input.kind!==undefined&&input.kind!==''&&!MEDIA_FILTERS.includes(input.kind as MediaFilter))throw new Error('Choose a post type');
   if(input.readOnly!==undefined&&typeof input.readOnly!=='boolean')throw new Error('Invalid read selection');
+  if(input.excludeFavourites!==undefined&&typeof input.excludeFavourites!=='boolean')throw new Error('Invalid favourite selection');
   let beforeMs:number|null=null;
   if(input.before!==undefined&&input.before!==''){
     if(typeof input.before!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(input.before))throw new Error('Choose a valid cutoff date');
     beforeMs=Date.parse(input.before+'T00:00:00Z');
     if(!Number.isSafeInteger(beforeMs)||beforeMs<0||new Date(beforeMs).toISOString().slice(0,10)!==input.before)throw new Error('Choose a valid cutoff date');
   }
-  return{feed,kind:input.kind as MediaFilter||'',beforeMs,readOnly:input.readOnly!==false};
+  return{feed,kind:input.kind as MediaFilter||'',beforeMs,readOnly:input.readOnly!==false,excludeFavourites:input.excludeFavourites!==false};
 }
 export function storageBreakdown(store:ReaderStore,inventory:MediaInventory[]){
   const feeds=store.storageFeeds().map(feed=>({...feed,bytes:0,exclusiveBytes:0,sharedFiles:0}));

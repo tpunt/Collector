@@ -2,11 +2,12 @@ import React, {useEffect, useRef, useState} from 'react';
 import type {StoredPost,MediaSyncState} from '../src/store.ts';
 import type {MediaItem} from '../src/media.ts';
 import {onlineEmbed} from '../src/online-embed.ts';
+import {hasExternalAttachment} from '../src/sources.ts';
 import {MediaPreview} from './MediaPreview.tsx';
 import {ExternalLink,useNetworkMode} from './NetworkMode.tsx';
 
 /** Sync owns offline downloads. Known external players remain explicitly online. */
-export function PostMedia({post,syncing,revision,children}:{post:StoredPost;syncing:boolean;revision:number;children?:(controls:React.ReactNode)=>React.ReactNode}) {
+export function PostMedia({post,syncing,revision,children,filter}:{filter?:'image'|'video';post:StoredPost;syncing:boolean;revision:number;children?:(controls:React.ReactNode)=>React.ReactNode}) {
   const {offline}=useNetworkMode();
   const ref=useRef<HTMLDivElement>(null);
   const [visible,setVisible]=useState(false),[items,setItems]=useState<MediaItem[]>([]),[error,setError]=useState<{key:string;message:string}|null>(null),[sync,setSync]=useState<MediaSyncState|null>(null);
@@ -41,22 +42,24 @@ export function PostMedia({post,syncing,revision,children}:{post:StoredPost;sync
     void poll();return()=>{disposed=true;clearTimeout(timer);};
   },[visible,hasMedia,syncing,post.id,signature,revision]);
   const checked=loadedKey===lookupKey,localError=error?.key===lookupKey?error.message:'';
-  const ready=hasMedia&&checked?items.filter(item=>item.state==='ready'):[];
-  const notDownloaded=hasMedia&&checked&&!localError&&(!post.mediaDiscoveryComplete||ready.length<Math.max(items.length,1)||sync?.status==='unavailable'||sync?.status==='failed');
+  const readyAll=hasMedia&&checked?items.filter(item=>item.state==='ready'):[];
+  const visibleItems=items.filter(item=>!filter||item.kind===filter);
+  const ready=readyAll.filter(item=>!filter||item.kind===filter);
+  const notDownloaded=hasMedia&&checked&&!localError&&(!post.mediaDiscoveryComplete||readyAll.length<Math.max(items.length,1)||hasExternalAttachment(post)||sync?.status==='unavailable'||sync?.status==='failed');
   const note=localError||(!checked?'Checking local media…':sync?.status==='downloading'?'Downloading media during sync…':
     sync?.status==='unavailable'?(sync.reason??'This media cannot be saved offline'):
     sync?.status==='failed'?`Download failed · Sync this feed again to retry. ${sync.reason??''}`:!post.mediaDiscoveryComplete?'Collection discovery is incomplete · Sync this feed to collect every file':
     syncing?'Media queued for this sync':'Awaiting sync · Sync this feed to save it offline');
   const paths=ready.flatMap(item=>item.localPath?[item.localPath]:[]);
-  const embed=notDownloaded&&ready.length===0&&post.media.includes('Video')?onlineEmbed(post.outbound):null;
+  const embed=filter!=='image'&&notDownloaded&&(readyAll.length===0||hasExternalAttachment(post))&&post.media.includes('Video')?onlineEmbed(post.outbound):null;
   let original:string|null=null;
-  if(notDownloaded&&(embed||!post.attachments.length)&&post.outbound){
+  if(notDownloaded&&(embed||!post.attachments.length||hasExternalAttachment(post))&&post.outbound){
     try{const url=new URL(post.outbound);if(embed&&url.protocol==='http:')url.protocol='https:';if(url.protocol==='https:'&&!url.username&&!url.password)original=url.href;}catch{/* Invalid external links are not rendered. */}
   }
   const copyLocalPath=paths.length>0?<button type="button" className="copy-local-path" title={paths.join('\n')} aria-live="polite" onClick={()=>void copyPaths(paths)}>{copyStatus}</button>:null;
   const controls=<>{post.bodySync&&post.bodySync.status!=='ready'&&<span className="media-offline-status" title={post.bodySync.reason??'Sync this feed to save the complete post text'}>{post.body!==null?'Text update pending':'Text not downloaded'}</span>}{notDownloaded&&<span className="media-offline-status" role="status" title={note}>{ready.length?'Partially downloaded':'Not downloaded'}</span>}{localError&&hasMedia&&<span className="media-status-unknown" title={localError}>Status unknown</span>}{copyLocalPath}</>;
   return <>{children?.(controls)}{hasMedia&&<div className="post-media" ref={ref} data-read-pending={!checked}>
-    {(items.length>1||!post.mediaDiscoveryComplete)&&<p className="media-note">{post.mediaDiscoveryComplete?`${ready.length}/${items.length} files saved offline`:`${ready.length} files saved · Collection not fully discovered`}{ready.length>1?' · Scroll horizontally to view all':''}</p>}
+    {(visibleItems.length>1||!post.mediaDiscoveryComplete)&&<p className="media-note">{post.mediaDiscoveryComplete?`${ready.length}/${visibleItems.length} files saved offline`:`${ready.length} files saved · Collection not fully discovered`}{ready.length>1?' · Scroll horizontally to view all':''}</p>}
     {ready.length>0&&<div className={'media-items '+(ready.length>1?'gallery':'')} role="group" aria-label={`${ready.length} saved media files`} tabIndex={ready.length>1?0:undefined}>{ready.map((item,index)=><figure key={item.key+':'+index}><MediaPreview kind={item.kind} url={item.url!} title={item.kind==='image'&&ready.length>1?`${post.title} — image ${index+1}`:post.title} caption={item.caption}/>{item.caption&&<figcaption>{item.caption}</figcaption>}</figure>)}</div>}
     {embed&&<div className="online-media"><p className="media-note">{offline?'Offline mode · Online player paused':'Online player · Requires internet · Not saved locally'}</p>{!offline&&<iframe key={embed.url} src={'/online-player?url='+encodeURIComponent(embed.url)} title={`${embed.provider} player: ${post.title}`} loading="lazy" referrerPolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; fullscreen; picture-in-picture" allowFullScreen/>}</div>}
     {(!checked||localError||notDownloaded)&&<p className="media-note">{note}{original&&<ExternalLink href={original} target="_blank" rel="noreferrer" title="Requires internet; this media is not stored locally">Open original ↗</ExternalLink>}</p>}

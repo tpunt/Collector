@@ -1,7 +1,11 @@
 import type {DatabaseSync} from 'node:sqlite';
 import {SEARCH_TEXT_SELECT} from './reader-fields.ts';
 
-export const SCHEMA_VERSION=5;
+export const SCHEMA_VERSION=6;
+const TAG_SCHEMA=`CREATE TABLE post_tags (
+  post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  tag TEXT NOT NULL CHECK(length(tag) BETWEEN 1 AND 60), PRIMARY KEY(post_id,tag)
+); CREATE INDEX post_tag_lookup ON post_tags(tag,post_id);`;
 const APPLICATION_ID=0x52524452;
 const FAVOURITES_SCHEMA=`CREATE TABLE observation_authors (
   post_id TEXT NOT NULL, source_key TEXT NOT NULL, author TEXT NOT NULL CHECK(json_valid(author)),
@@ -122,6 +126,7 @@ ${BODY_SCHEMA}
 ${READ_SCHEMA}
 ${SEARCH_SCHEMA}
 ${FAVOURITES_SCHEMA}
+${TAG_SCHEMA}
 `;
 
 /** Unknown/prototype schemas are rejected. Published versions receive additive,
@@ -130,7 +135,7 @@ export function initializeSchema(db:DatabaseSync):void {
   const version=Number(db.prepare('PRAGMA user_version').get()!.user_version);
   const application=Number(db.prepare('PRAGMA application_id').get()!.application_id);
   const empty=!db.prepare("SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1").get();
-  if(!(version===0&&application===0&&empty)&&!([1,2,3,4,SCHEMA_VERSION].includes(version)&&application===APPLICATION_ID))
+  if(!(version===0&&application===0&&empty)&&!([1,2,3,4,5,SCHEMA_VERSION].includes(version)&&application===APPLICATION_ID))
     throw new Error(`Unsupported reader database schema (${version}). Back up and move aside reader.sqlite and its WAL/SHM files, then restart to create a fresh database.`);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=3000;');
   if(empty){
@@ -166,6 +171,11 @@ export function initializeSchema(db:DatabaseSync):void {
   if(!empty&&version<5){
     db.exec('BEGIN IMMEDIATE');
     try{db.exec(FAVOURITES_SCHEMA);db.exec('PRAGMA user_version=5; COMMIT;');}
+    catch(error){db.exec('ROLLBACK');throw error;}
+  }
+  if(!empty&&version<6){
+    db.exec('BEGIN IMMEDIATE');
+    try{db.exec(TAG_SCHEMA);db.exec('PRAGMA user_version=6; COMMIT;');}
     catch(error){db.exec('ROLLBACK');throw error;}
   }
 }

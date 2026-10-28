@@ -1,6 +1,9 @@
 import { mediaReference,MAX_MEDIA_REFERENCES } from './media-reference.ts';
 import type { MediaReference } from './media-reference.ts';
 import {authorIdentity} from './authors.ts';
+import {feedName,tumblrItem,tumblrUrl} from './sources.ts';
+import {subredditName,redditUrl} from './reddit-identity.ts';
+export {subredditName,redditUrl} from './reddit-identity.ts';
 import type {Author} from './authors.ts';
 export const MEDIA_KINDS = ['Text', 'Image', 'Video', 'Link', 'Unknown'] as const;
 export type MediaKind = typeof MEDIA_KINDS[number];
@@ -32,36 +35,18 @@ export interface PostObservation {
   availability?: Availability;
 }
 
-export function subredditName(input: string): string {
-  let value = input.trim();
-  if (/^https?:\/\//i.test(value)) {
-    const url = redditUrl(value);
-    if (url.search || url.hash || !/^\/r\/[^/]+\/?$/i.test(url.pathname)) {
-      throw new Error('Use a subreddit name or its Reddit community URL');
-    }
-    value = url.pathname;
-  }
-  value = value.replace(/^\/?r\//i, '').replace(/\/$/, '');
-  if (!/^[a-z0-9_]{2,21}$/i.test(value)) throw new Error('Invalid subreddit name');
-  return value.toLowerCase();
-}
 
 export function postId(input: string): string {
+  if(input.startsWith('tumblr:')){const identity=tumblrItem(input);if(!identity)throw new Error('Invalid Tumblr post ID');return `tumblr:${identity.blog}:${identity.id}`;}
   const value = input.toLowerCase().replace(/^t3_/, '');
   if (!/^[a-z0-9]{1,16}$/.test(value)) throw new Error('Invalid Reddit post ID');
   return `t3_${value}`;
 }
 
-export function redditUrl(input: string): URL {
-  const url = new URL(input, 'https://www.reddit.com');
-  if (url.protocol !== 'https:' || url.username || url.password || url.port ||
-      !['www.reddit.com', 'old.reddit.com', 'reddit.com'].includes(url.hostname)) {
-    throw new Error('Expected an HTTPS Reddit URL');
-  }
-  return url;
-}
 
 export function canonicalPostUrl(input: string, id: string, subreddit: string): string {
+  const tumblr=tumblrItem(id);
+  if(tumblr){if(feedName(subreddit)!=='tumblr:'+tumblr.blog)throw new Error('Post URL does not match its identity');const url=tumblrUrl(input,subreddit);if(url.pathname.split('/')[2]!==tumblr.id)throw new Error('Post URL does not match its identity');return `https://${tumblr.blog}.tumblr.com/post/${tumblr.id}/`;}
   const url = redditUrl(input);
   const match = /^\/r\/([^/]+)\/comments\/([a-z0-9]+)(?:\/[^/]*)?\/?$/i.exec(url.pathname);
   if (!match || subredditName(match[1]!) !== subredditName(subreddit) ||
@@ -96,8 +81,9 @@ export function absoluteTime(input: string): CreatedTime | null {
 }
 
 export function validateObservation(input: PostObservation): PostObservation {
-  const subreddit = subredditName(input.subreddit);
+  const subreddit = feedName(input.subreddit);
   const id = postId(input.id);
+  if(subreddit.startsWith('tumblr:')!==id.startsWith('tumblr:'))throw new Error('Post platform does not match its feed');
   const permalink = canonicalPostUrl(input.permalink, id, subreddit);
   if (!input.title.trim() || input.title.length > 20_000) throw new Error('Invalid post title');
   if (!Number.isSafeInteger(input.created.epochMs) || input.created.epochMs < 0 ||

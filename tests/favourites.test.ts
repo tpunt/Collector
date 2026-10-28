@@ -78,7 +78,7 @@ test('version-four libraries upgrade without losing content or reads and favouri
  const directory=await mkdtemp(join(tmpdir(),'collector-favourites-')),path=join(directory,'reader.sqlite');let store=new ReaderStore(path);
  try{
   store.addSubreddit('python');store.importArchiveBatch(store.generation,[record('abc')]);store.setRead('abc',true);store.close();
-  const old=new DatabaseSync(path);old.exec('DROP TABLE observation_authors; DROP TABLE favourite_posts; DROP TABLE favourite_users; PRAGMA user_version=4;');old.close();
+  const old=new DatabaseSync(path);old.exec('DROP TABLE post_tags; DROP TABLE observation_authors; DROP TABLE favourite_posts; DROP TABLE favourite_users; PRAGMA user_version=4;');old.close();
   store=new ReaderStore(path);assert.equal(store.getPost('abc')!.author,null);assert.notEqual(store.getPost('abc')!.readAt,null);assert.equal(store.getPost('abc')!.body,'Complete body abc');
   store.importArchiveBatch(store.generation,[record('abc')]);store.setPostFavourite('abc',true);store.setUserFavourite(alice,true);store.close();store=new ReaderStore(path);
   assert.equal(store.getPost('abc')!.favourite,true);assert.equal(store.getPost('abc')!.favouriteUser,true);assert.equal(store.getPost('abc')!.body,'Complete body abc');

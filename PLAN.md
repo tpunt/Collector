@@ -1,5 +1,22 @@
 # Collector — implementation plan
 
+## Organisation and second source — 28 October 2026
+
+Implemented local post tags and a sidebar tag filter, composing with search,
+media, read and favourites. Cleanup protects favourite posts by default with an
+explicit override checkbox. Added keyboard post navigation, bulk mark matching
+posts read, and global Escape handling for image/video fullscreen viewers.
+
+Added an experimental public-theme Tumblr collector with platform-scoped feed,
+post and author identities, a separate browser profile, captured page links,
+full-text verification and direct Tumblr CDN media downloads. It shares storage,
+filtering, favourites, read tracking and Offline pause/resume. Live probes were
+403-blocked; public access and theme diversity are not claimed verified. See
+README for the supported boundary and local coverage. Reddit archive tools and
+Reddit discussion extraction remain platform-specific. Scheduled backups and
+HTML exports were declined; library-at-rest encryption remains deferred.
+
+
 ## Current scope and next stage — 27 October 2026
 
 This section records the latest user decisions and takes precedence over older

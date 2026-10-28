@@ -18,9 +18,10 @@ export function mediaReference(input: string): MediaReference | null {
   try {
     const url = new URL(input);
     if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash || input.length > 4000) return null;
-    const image = ['i.redd.it', 'preview.redd.it', 'external-preview.redd.it', 'i.imgur.com'].includes(url.hostname)
+    const tumblr=/^(?:[a-z0-9-]+\.)?media\.tumblr\.com$/.test(url.hostname);
+    const image = (tumblr|| ['i.redd.it', 'preview.redd.it', 'external-preview.redd.it', 'i.imgur.com'].includes(url.hostname))
       && /\.(png|jpe?g|gif|webp|avif)$/i.test(url.pathname);
-    const video = ['v.redd.it', 'i.imgur.com', 'preview.redd.it'].includes(url.hostname)
+    const video = (tumblr||['v.redd.it', 'i.imgur.com', 'preview.redd.it'].includes(url.hostname))
       && (/\.(mp4|webm)$/i.test(url.pathname) || (url.hostname==='v.redd.it'&&/\.mpd$/i.test(url.pathname)));
     return image || video ? {kind: video ? 'video' : 'image', url: url.href} : null;
   } catch { return null; }
@@ -37,7 +38,7 @@ export function mediaReferences(inputs: (string | null | undefined)[]): MediaRef
  * or an observed manifest belonging to the same video before counting it offline. */
 export function postMediaReferences(outbound:string|null|undefined,references:MediaReference[]):MediaReference[] {
   // A saved preview image is not a downloaded external video.
-  if(onlineEmbed(outbound))return references.filter(reference=>reference.kind==='video');
+  if(onlineEmbed(outbound)&&!references.some(reference=>reference.collection?.id.startsWith('tumblr:')))return references.filter(reference=>reference.kind==='video');
   let owner:URL;
   try{owner=new URL(outbound??'');}catch{return references;}
   if(owner.hostname!=='v.redd.it')return references;

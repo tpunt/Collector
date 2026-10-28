@@ -3,7 +3,8 @@ import {initializeSchema,recoverInterruptedWork,rebuildSearch,SCHEMA_VERSION} fr
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { postId, redditUrl, subredditName, validateObservation } from './domain.ts';
+import { postId, validateObservation } from './domain.ts';
+import {feedName,feedIdentity,validateListingUrl,EXTERNAL_ATTACHMENT_NOTE} from './sources.ts';
 import type { Availability, MediaKind, MediaFilter, PostObservation } from './domain.ts';
 import { historyMonths, historyLowerBound, historyRank } from './history-window.ts';
 import type { HistoryMonths } from './history-window.ts';
@@ -19,6 +20,7 @@ import {feedCursor} from './feed-cursor.ts';
 import {ARCHIVE_JOIN,POST_BODY} from './reader-fields.ts';
 import type {CleanupCriteria} from './library-storage.ts';
 import {authorIdentity} from './authors.ts';
+import {postTags,tagName} from './tags.ts';
 import type {Author} from './authors.ts';
 
 // A listing can omit fields that an archive already saved. Compose the reader
@@ -59,6 +61,7 @@ export interface StoredPost {
   author:Author|null;
   favourite:boolean;
   favouriteUser:boolean;
+  tags:string[];
   readContext:string;
   readAt:number|null;
   id: string;
@@ -106,6 +109,7 @@ export interface FeedSource {
 
 export class ReaderStore {
   private db: DatabaseSync;
+  private postStatement:ReturnType<DatabaseSync['prepare']>|null=null;
   private externalStorageBytes = () => 0;
   compactionWarning: string | null = null;
   constructor(path: string) {
@@ -152,11 +156,11 @@ export class ReaderStore {
   validateBackup(path:string,allowPrevious=false){
     const db=new DatabaseSync(path,{readOnly:true});
     try{
-      const version=Number(db.prepare('PRAGMA user_version').get()!.user_version),previous=allowPrevious&&[3,4].includes(version);
+      const version=Number(db.prepare('PRAGMA user_version').get()!.user_version),previous=allowPrevious&&[3,4,5].includes(version);
       const schema="SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",order=' ORDER BY type,name';
-      const exclusions=(previous?" AND name NOT IN ('observation_authors','observation_author_identity','favourite_posts','favourite_users')":'')+(previous&&version===3?" AND name NOT GLOB 'search_*'":'');
+      const exclusions=(previous&&version<5?" AND name NOT IN ('observation_authors','observation_author_identity','favourite_posts','favourite_users')":'')+(previous&&version===3?" AND name NOT GLOB 'search_*'":'')+(previous?" AND name NOT IN ('post_tags','post_tag_lookup')":'');
       if(JSON.stringify(db.prepare(schema+order).all())!==JSON.stringify(this.db.prepare(schema+exclusions+order).all())||
-        ![SCHEMA_VERSION,...(previous?[3,4]:[])].includes(version)||
+        ![SCHEMA_VERSION,...(previous?[3,4,5]:[])].includes(version)||
         Number(db.prepare('PRAGMA application_id').get()!.application_id)!==Number(this.db.prepare('PRAGMA application_id').get()!.application_id))throw new Error('Backup schema is not compatible with this app version');
       if(db.prepare('PRAGMA quick_check').get()!.quick_check!=='ok'||db.prepare('PRAGMA foreign_key_check').all().length)throw new Error('Backup database integrity check failed');
       for(const row of db.prepare('SELECT * FROM observations JOIN posts ON posts.id=observations.post_id').iterate())validateObservation({
@@ -165,12 +169,12 @@ export class ReaderStore {
         observedAt:Number(row.observed_at),body:row.body as string??undefined,availability:row.availability as Availability,
         media:row.media?JSON.parse(String(row.media)):undefined,attachments:row.attachments?JSON.parse(String(row.attachments)):undefined,outbound:row.outbound as string??undefined});
       for(const row of db.prepare('SELECT * FROM media_evidence JOIN posts ON posts.id=media_evidence.post_id').iterate())validateObservation({id:String(row.id),subreddit:String(row.subreddit),permalink:String(row.permalink),title:'Media evidence',created:{epochMs:Number(row.created_ms),precisionMs:Number(row.precision_ms)},source:'live',observedAt:Number(row.observed_at),attachments:JSON.parse(String(row.attachments))});
-      for(const row of db.prepare('SELECT name FROM feeds').iterate())if(subredditName(String(row.name))!==row.name)throw new Error('Invalid backup feed identity');
-      for(const row of db.prepare('SELECT * FROM excluded_posts').iterate())if(postId(String(row.post_id))!==row.post_id||subredditName(String(row.subreddit))!==row.subreddit||!Number.isSafeInteger(row.deleted_at)||Number(row.deleted_at)<0)throw new Error('Invalid backup exclusion');
+      for(const row of db.prepare('SELECT name FROM feeds').iterate())if(feedName(String(row.name))!==row.name)throw new Error('Invalid backup feed identity');
+      for(const row of db.prepare('SELECT * FROM excluded_posts').iterate())if(postId(String(row.post_id))!==row.post_id||feedName(String(row.subreddit))!==row.subreddit||!Number.isSafeInteger(row.deleted_at)||Number(row.deleted_at)<0)throw new Error('Invalid backup exclusion');
       for(const row of db.prepare('SELECT * FROM posts').iterate()){
         const identity=validateObservation({id:String(row.id),subreddit:String(row.subreddit),permalink:String(row.permalink),title:'Stored post',created:{epochMs:Number(row.created_ms),precisionMs:Number(row.precision_ms)},source:'live',observedAt:0});
         if(identity.id!==row.id||identity.subreddit!==row.subreddit||identity.permalink!==row.permalink)throw new Error('Invalid backup post identity');
-        const post=this.readPost(db,String(row.id),undefined,!previous),expected=new Set((post?.attachments??[]).map(mediaKey));
+        const post=this.readPost(db,String(row.id),undefined,!previous||version>=5,version>=6),expected=new Set((post?.attachments??[]).map(mediaKey));
         const owned=db.prepare('SELECT key FROM post_media WHERE post_id=?').all(String(row.id)).map(row=>String(row.key));
         if(owned.length!==expected.size||owned.some(key=>!expected.has(key)))throw new Error('Backup media ownership does not match its post references');
       }
@@ -180,10 +184,11 @@ export class ReaderStore {
           snapshot.body!==null&&typeof snapshot.body!=='string'||snapshot.comments.some((comment:any)=>!/^t1_[a-z0-9]+$/.test(comment.id)||comment.postId!==row.post_id||typeof comment.body!=='string'))throw new Error('Invalid discussion in backup');
       }
       const cap=db.prepare("SELECT value FROM settings WHERE key='maxStoredBytes'").get();if(cap)storageCap(JSON.parse(String(cap.value)));
-      if(!previous){
+      if(!previous||version>=5){
         for(const row of db.prepare('SELECT author FROM observation_authors').iterate()){const author=JSON.parse(String(row.author));if(author!==null)authorIdentity(author);}
         for(const row of db.prepare('SELECT * FROM favourite_users').iterate())authorIdentity({platform:row.platform,id:row.user_id,name:row.display_name});
       }
+      if(version>=6)for(const row of db.prepare('SELECT tag FROM post_tags').iterate())if(tagName(row.tag)!==row.tag)throw new Error('Invalid backup tag');
       return {schema:version,posts:Number(db.prepare('SELECT count(*) AS n FROM posts').get()!.n),keys:new Set(db.prepare('SELECT DISTINCT key FROM post_media').all().map(row=>String(row.key)))};
     }finally{db.close();}
   }
@@ -201,7 +206,7 @@ export class ReaderStore {
     return Number(this.db.prepare("SELECT value FROM metadata WHERE key = 'generation'").get()!.value);
   }
   addSubreddit(input: string): string {
-    const name = subredditName(input);
+    const name = feedName(input);
     this.db.prepare('INSERT OR IGNORE INTO feeds(name) VALUES (?)').run(name);
     return name;
   }
@@ -210,7 +215,7 @@ export class ReaderStore {
   }
 
   createTarget(input: { subreddit: string; lowerMs?: number; upperMs: number }): string {
-    const name=subredditName(input.subreddit);this.requireSubreddit(name);
+    const name=feedName(input.subreddit);this.requireSubreddit(name);
     if(!Number.isSafeInteger(input.upperMs)||input.upperMs<0||
       (input.lowerMs!==undefined&&(!Number.isSafeInteger(input.lowerMs)||input.lowerMs<0||input.lowerMs>input.upperMs)))throw new Error('Invalid history target');
     const id=randomUUID();
@@ -255,13 +260,8 @@ export class ReaderStore {
       if (input.generation !== this.generation) throw new StaleGenerationError();
       const target = this.getTarget(input.targetId);
       if (!target || ['done', 'cancelled'].includes(target.status)) throw new Error('Target is no longer active');
-      if (input.continuation !== null) {
-        const next = redditUrl(input.continuation);
-        if (next.hash || !new RegExp(`^/r/${target.subreddit}/new/?$`, 'i').test(next.pathname)) {
-          throw new Error('Continuation must be a captured Next URL for this subreddit’s new listing');
-        }
-      }
-      if(input.pageUrl){const page=redditUrl(input.pageUrl);if(page.hostname!=='old.reddit.com'||!new RegExp(`^/r/${target.subreddit}/new/?$`,'i').test(page.pathname))throw new Error('Invalid committed listing URL');}
+      if(input.continuation!==null)validateListingUrl(input.continuation,target.subreddit);
+      if(input.pageUrl)validateListingUrl(input.pageUrl,target.subreddit);
       if(input.completion&&!['date-boundary','listing-end','prior-scan'].includes(input.completion))throw new Error('Invalid completion evidence');
       if((input.status==='done')!==Boolean(input.completion))throw new Error('Finished scans require explicit completion evidence');
       const omissions = input.omissions ?? 0;
@@ -307,7 +307,7 @@ export class ReaderStore {
   }
 
   fileImportSource(generation:number,input:string,fingerprint:string,legacy?:string):string {
-    const name=subredditName(input);if(!/^[a-f0-9]{64}$/.test(fingerprint))throw new Error('Invalid file identity');
+    const name=feedName(input);if(!/^[a-f0-9]{64}$/.test(fingerprint))throw new Error('Invalid file identity');
     return this.contentTransaction(()=>{
       if(generation!==this.generation)throw new StaleGenerationError();
       const key='fileImport:'+fingerprint,existing=this.getSetting<{subreddit:string;exportId:string}>(key);
@@ -363,16 +363,19 @@ export class ReaderStore {
   getPost(input: string, source?: 'archive'): StoredPost | null {
     return this.readPost(this.db,input,source);
   }
-  private readPost(db:DatabaseSync,input:string,source?:'archive',favourites=true):StoredPost|null {
-    const row = db.prepare(`SELECT p.*, o.title, ${POST_BODY} AS body,${POST_MEDIA} AS media,${POST_ATTACHMENTS} AS attachments,${POST_OUTBOUND} AS outbound,o.availability,
+  private readPost(db:DatabaseSync,input:string,source?:'archive',favourites=true,tags=true):StoredPost|null {
+    const sql=`SELECT p.*, o.title, ${POST_BODY} AS body,${POST_MEDIA} AS media,${POST_ATTACHMENTS} AS attachments,${POST_OUTBOUND} AS outbound,o.availability,
       o.source, o.export_id, o.observed_at, o.captured_at,
       ${favourites?POST_AUTHOR:'NULL'} AS author_data,
       ${favourites?'EXISTS(SELECT 1 FROM favourite_posts WHERE post_id=p.id)':'0'} AS favourite,
       ${favourites?AUTHOR_FAVOURITE:'0'} AS favourite_user,
+      ${tags?"(SELECT json_group_array(tag) FROM (SELECT tag FROM post_tags WHERE post_id=p.id ORDER BY tag))":"'[]'"} AS tags,
       (SELECT attachments FROM media_evidence WHERE post_id=p.id) AS discovered_attachments
       FROM posts p JOIN observations o ON o.post_id = p.id
       ${ARCHIVE_JOIN}
-      WHERE p.id = ? AND (? IS NULL OR o.source = ?) ORDER BY (o.source = 'live') DESC, o.observed_at DESC, o.source_key DESC LIMIT 1`).get(postId(input), source ?? null, source ?? null);
+      WHERE p.id = ? AND (? IS NULL OR o.source = ?) ORDER BY (o.source = 'live') DESC, o.observed_at DESC, o.source_key DESC LIMIT 1`;
+    const statement=db===this.db?(this.postStatement??=db.prepare(sql)):db.prepare(sql);
+    const row=statement.get(postId(input), source ?? null, source ?? null);
     if (!row) return null;
     const availability = (row.live_availability ?? row.availability) as Availability;
     const attachments = availability === 'available' ? postMediaReferences(row.outbound as string|null,JSON.parse(String(row.discovered_attachments ?? row.attachments ?? '[]')) as MediaReference[]) : [];
@@ -381,6 +384,7 @@ export class ReaderStore {
       author:availability==='deleted'?null:JSON.parse(String(row.author_data??'null')),
       favourite:Boolean(row.favourite),favouriteUser:availability!=='deleted'&&Boolean(row.favourite_user),
       readContext:String(db.prepare("SELECT value FROM metadata WHERE key='generation'").get()!.value)+':'+String(JSON.parse(String(db.prepare('SELECT value FROM settings WHERE key=?').get('sourceRevision:'+String(row.subreddit))?.value??'0'))),
+      tags:JSON.parse(String(row.tags??'[]')),
       readAt:(db.prepare('SELECT read_at FROM read_states WHERE post_id=?').get(String(row.id))?.read_at as number|undefined)??null,
       createdMs: Number(row.created_ms), precisionMs: Number(row.precision_ms),
       body: availability === 'available' ? row.body as string | null : null,
@@ -405,7 +409,7 @@ export class ReaderStore {
   get mediaSyncRevision():number {return Number(this.db.prepare("SELECT value FROM metadata WHERE key='media_sync_revision'").get()!.value);}
   get contentRevision():number {return Number(this.db.prepare("SELECT value FROM metadata WHERE key='content_revision'").get()!.value);}
   *readyMediaIds():Generator<string> {
-    for(const row of this.db.prepare("SELECT post_id FROM media_sync WHERE status='ready'").iterate())yield String(row.post_id);
+    for(const row of this.db.prepare("SELECT post_id FROM media_sync WHERE status='ready' OR (status='unavailable' AND reason=?)").iterate(EXTERNAL_ATTACHMENT_NOTE))yield String(row.post_id);
   }
   implementationLimitedMedia():string[] {
     return this.db.prepare("SELECT post_id FROM media_sync WHERE status='unavailable' AND (reason LIKE 'Complete gallery downloads%' OR reason LIKE '%per-file download limit%' OR reason LIKE '%media manifest%' OR reason LIKE '%single-file video representation%')").all().map(row=>String(row.post_id));
@@ -413,21 +417,21 @@ export class ReaderStore {
   pendingMedia(source:string,session:string,limit=25):string[] {
     return this.db.prepare(`SELECT m.post_id FROM media_sync m JOIN posts p ON p.id=m.post_id
       WHERE p.subreddit=? AND (m.status IN ('pending','failed') OR (m.status='unavailable' AND m.reason LIKE 'Complete gallery downloads%')) AND (m.session IS NULL OR m.session<>?)
-      ORDER BY p.created_ms DESC,p.id DESC LIMIT ?`).all(subredditName(source),session,limit).map(row=>String(row.post_id));
+      ORDER BY p.created_ms DESC,p.id DESC LIMIT ?`).all(feedName(source),session,limit).map(row=>String(row.post_id));
   }
   pendingBodies(source:string,excluded:ReadonlySet<string>=new Set(),limit=25):string[] {
     const result:string[]=[];
     for(const row of this.db.prepare(`SELECT p.id FROM posts p JOIN body_sync b ON b.post_id=p.id
       WHERE p.subreddit=? AND b.status IN ('pending','failed')
-      ORDER BY p.created_ms DESC,p.id DESC`).iterate(subredditName(source))){
+      ORDER BY p.created_ms DESC,p.id DESC`).iterate(feedName(source))){
       const id=String(row.id);if(!excluded.has(id))result.push(id);if(result.length>=limit)break;
     }
     return result;
   }
-  private missingBodyCount(source:string):number {return Number(this.db.prepare("SELECT count(*) AS n FROM body_sync b JOIN posts p ON p.id=b.post_id WHERE p.subreddit=? AND b.status<>'ready'").get(subredditName(source))!.n);}
+  private missingBodyCount(source:string):number {return Number(this.db.prepare("SELECT count(*) AS n FROM body_sync b JOIN posts p ON p.id=b.post_id WHERE p.subreddit=? AND b.status<>'ready'").get(feedName(source))!.n);}
   offlineText(source:string){
     const result={total:0,ready:0,pending:0,failed:0};
-    for(const row of this.db.prepare('SELECT b.status,count(*) AS n FROM body_sync b JOIN posts p ON p.id=b.post_id WHERE p.subreddit=? GROUP BY b.status').all(subredditName(source))){const key=row.status==='fetching'?'pending':row.status as 'pending'|'ready'|'failed';result[key]+=Number(row.n);result.total+=Number(row.n);}return result;
+    for(const row of this.db.prepare('SELECT b.status,count(*) AS n FROM body_sync b JOIN posts p ON p.id=b.post_id WHERE p.subreddit=? GROUP BY b.status').all(feedName(source))){const key=row.status==='fetching'?'pending':row.status as 'pending'|'ready'|'failed';result[key]+=Number(row.n);result.total+=Number(row.n);}return result;
   }
   bodySync(input:string):{status:'pending'|'fetching'|'ready'|'failed';reason:string|null}|null {
     const row=this.db.prepare('SELECT status,reason FROM body_sync WHERE post_id=?').get(postId(input));return row?row as unknown as {status:'pending'|'fetching'|'ready'|'failed';reason:string|null}:null;
@@ -438,7 +442,7 @@ export class ReaderStore {
   }
   offlineMedia(source:string):OfflineMediaCounts {
     const result:OfflineMediaCounts={total:0,ready:0,pending:0,failed:0,unavailable:0};
-    for(const row of this.db.prepare('SELECT m.status,count(*) AS n FROM media_sync m JOIN posts p ON p.id=m.post_id WHERE p.subreddit=? GROUP BY m.status').all(subredditName(source))){
+    for(const row of this.db.prepare('SELECT m.status,count(*) AS n FROM media_sync m JOIN posts p ON p.id=m.post_id WHERE p.subreddit=? GROUP BY m.status').all(feedName(source))){
       const status=row.status==='downloading'?'pending':row.status as keyof Omit<OfflineMediaCounts,'total'>;
       result[status]+=Number(row.n);result.total+=Number(row.n);
     }
@@ -446,7 +450,7 @@ export class ReaderStore {
   }
 
   feedSync(input:string):FeedSyncSummary {
-    const name=subredditName(input),row=this.db.prepare('SELECT * FROM feed_sync WHERE subreddit=?').get(name);
+    const name=feedName(input),row=this.db.prepare('SELECT * FROM feed_sync WHERE subreddit=?').get(name);
     if(row){
       const media=this.offlineMedia(name),missing=['complete','gaps'].includes(String(row.state))&&(media.pending>0||media.failed>0||this.missingBodyCount(name)>0);
       return {state:missing?'incomplete':row.state as FeedSyncSummary['state'],lastSuccessAt:row.last_success_ms as number|null,
@@ -458,7 +462,7 @@ export class ReaderStore {
 
   /** Resume only the current history goal's committed scope, never an abandoned wider goal. */
   resumeSyncPlan(input:string,now=Date.now()):{heads:string[];history:string[]}|null {
-    const name=subredditName(input),row=this.db.prepare("SELECT targets FROM feed_sync WHERE subreddit=? AND state='incomplete'").get(name);
+    const name=feedName(input),row=this.db.prepare("SELECT targets FROM feed_sync WHERE subreddit=? AND state='incomplete'").get(name);
     if(!row)return null;
     const ids=JSON.parse(String(row.targets)) as string[],goal=this.getHistoryPreference(name).targetId;
     if(!goal||!ids.includes(goal)||ids.some(id=>{const target=this.getTarget(id);return target?.subreddit!==name||target.status==='cancelled';}))return null;
@@ -475,7 +479,7 @@ export class ReaderStore {
     });
   }
   beginFeedSync(input:string,targetIds:string[],now=Date.now()):string {
-    const name=subredditName(input),ids=[...new Set(targetIds)];
+    const name=feedName(input),ids=[...new Set(targetIds)];
     if(!ids.length||ids.some(id=>this.getTarget(id)?.subreddit!==name))throw new Error('Sync targets must belong to this feed');
     const id=randomUUID();
     this.transaction(()=>{
@@ -484,10 +488,10 @@ export class ReaderStore {
         started_ms=excluded.started_ms,reason=NULL,gap_count=0`).run(name,id,JSON.stringify(ids),now);
     });return id;
   }
-  noteSyncGap(input:string):void {this.db.prepare("UPDATE feed_sync SET gap_count=gap_count+1 WHERE subreddit=? AND state='running'").run(subredditName(input));}
+  noteSyncGap(input:string):void {this.db.prepare("UPDATE feed_sync SET gap_count=gap_count+1 WHERE subreddit=? AND state='running'").run(feedName(input));}
   /** Called after this feed's queue drains. Saved pages alone are never success. */
   finishFeedSync(input:string,runId:string,now=Date.now()):void {
-    const name=subredditName(input);
+    const name=feedName(input);
     this.transaction(()=>{
       const row=this.db.prepare("SELECT * FROM feed_sync WHERE subreddit=? AND run_id=? AND state='running'").get(name,runId);if(!row)return;
       const targets=(JSON.parse(String(row.targets)) as string[]).map(id=>this.getTarget(id));
@@ -499,7 +503,7 @@ export class ReaderStore {
         state='incomplete';reason??=bodies?`${bodies} post body/bodies still need saving; Resume to retry`:media.failed?`${media.failed} media post(s) failed to save; Resume to retry`:media.pending?`${media.pending} media post(s) still need saving; Resume to continue`:'Post collection is unfinished; Resume to continue';
       }else{
         const gaps:string[]=[];
-        if(targets.some(target=>target?.completion==='listing-end'))gaps.push('Reached the end Reddit serves; full historical coverage could not be verified');
+        if(targets.some(target=>target?.completion==='listing-end'))gaps.push(`Reached the end ${feedIdentity(name).platform==='tumblr'?'Tumblr':'Reddit'} serves; full historical coverage could not be verified`);
         const omitted=targets.reduce((sum,target)=>sum+(target?.omissionCount??0),0);
         if(omitted)gaps.push(`${omitted} post extraction(s) omitted`);
         if(media.unavailable)gaps.push(`${media.unavailable} media post(s) unavailable for offline saving`);
@@ -524,7 +528,7 @@ export class ReaderStore {
 
   clearContent(): number {
     const generation=this.transaction(() => {
-      this.db.exec(`DELETE FROM favourite_posts; DELETE FROM search_text; DELETE FROM read_states; DELETE FROM feed_sync; DELETE FROM archive_fetches; DELETE FROM thread_snapshots; UPDATE feeds SET history_target_id=NULL,requested_ms=NULL;
+      this.db.exec(`DELETE FROM post_tags; DELETE FROM favourite_posts; DELETE FROM search_text; DELETE FROM read_states; DELETE FROM feed_sync; DELETE FROM archive_fetches; DELETE FROM thread_snapshots; UPDATE feeds SET history_target_id=NULL,requested_ms=NULL;
         UPDATE metadata SET value = value + 1 WHERE key = 'generation';
         DELETE FROM comment_states WHERE availability='available';
         DELETE FROM targets; DELETE FROM observations; DELETE FROM media_sync; DELETE FROM media_evidence; DELETE FROM post_media;
@@ -538,8 +542,8 @@ export class ReaderStore {
     return generation;
   }
 
-  sourceRevision(input:string):number {return this.getSetting<number>('sourceRevision:'+subredditName(input))??0;}
-  ownedMediaKeys(input:string):string[] {return this.db.prepare('SELECT DISTINCT m.key FROM post_media m JOIN posts p ON p.id=m.post_id WHERE p.subreddit=?').all(subredditName(input)).map(row=>String(row.key));}
+  sourceRevision(input:string):number {return this.getSetting<number>('sourceRevision:'+feedName(input))??0;}
+  ownedMediaKeys(input:string):string[] {return this.db.prepare('SELECT DISTINCT m.key FROM post_media m JOIN posts p ON p.id=m.post_id WHERE p.subreddit=?').all(feedName(input)).map(row=>String(row.key));}
   hasMediaOwner(key:string,owner?:string):boolean {return Boolean(owner?this.db.prepare('SELECT 1 FROM post_media WHERE key=? AND post_id=?').get(key,postId(owner)):this.db.prepare('SELECT 1 FROM post_media WHERE key=? LIMIT 1').get(key));}
   mediaOwners(key:string):{postId:string;feed:string}[]{return this.db.prepare('SELECT p.id AS postId,p.subreddit AS feed FROM post_media m JOIN posts p ON p.id=m.post_id WHERE m.key=? ORDER BY p.id').all(key) as unknown as {postId:string;feed:string}[];}
   storageFeeds(){return this.db.prepare(`SELECT f.name AS feed,f.subscribed,count(p.id) AS posts FROM feeds f LEFT JOIN posts p ON p.subreddit=f.name AND EXISTS(SELECT 1 FROM observations WHERE post_id=p.id) GROUP BY f.name ORDER BY f.name`).all().map(row=>({feed:String(row.feed),subscribed:Boolean(row.subscribed),posts:Number(row.posts)}));}
@@ -547,6 +551,7 @@ export class ReaderStore {
     const clauses=['1'],params:(string|number)[]=[];
     if(criteria.feed){clauses.push('p.subreddit=?');params.push(criteria.feed);}
     if(criteria.beforeMs!==null){clauses.push('p.created_ms<?');params.push(criteria.beforeMs);}
+    if(criteria.excludeFavourites!==false)clauses.push('NOT EXISTS(SELECT 1 FROM favourite_posts WHERE post_id=p.id)');
     if(criteria.readOnly)clauses.push('EXISTS(SELECT 1 FROM read_states WHERE post_id=p.id)');
     if(criteria.kind){
       const kinds=criteria.kind==='Media'?['Image','Video']:[criteria.kind];
@@ -589,7 +594,7 @@ export class ReaderStore {
     this.compactContent();return keys;
   }
   clearSubreddit(input:string):void {
-    const name=subredditName(input);this.requireSubreddit(name);
+    const name=feedName(input);this.requireSubreddit(name);
     this.transaction(()=>{
       this.setSetting('sourceRevision:'+name,this.sourceRevision(name)+1);
       this.db.prepare("DELETE FROM settings WHERE key GLOB 'fileImport:*' AND json_extract(value,'$.subreddit')=?").run(name);
@@ -641,14 +646,14 @@ export class ReaderStore {
   pauseTarget(id: string, reason: string): void { this.db.prepare("UPDATE targets SET status = 'paused', reason = ? WHERE id = ? AND status NOT IN ('done','cancelled')").run(reason, id); }
   listTargets(): HistoryTarget[] { return this.db.prepare('SELECT id FROM targets ORDER BY rowid DESC LIMIT 100').all().map(row => this.getTarget(String(row.id))!); }
   removeSubreddit(input: string): void {
-    const name = subredditName(input);
+    const name = feedName(input);
     this.transaction(() => {
       this.db.prepare("UPDATE targets SET status = 'cancelled', reason = 'Subreddit removed' WHERE subreddit = ? AND status IN ('paused','queued')").run(name);
       this.db.prepare('UPDATE feeds SET subscribed=0 WHERE name=?').run(name);
     });
   }
   followedSources(): string[] {return this.db.prepare('SELECT name FROM feeds WHERE subscribed=1 ORDER BY name').all().map(row=>String(row.name));}
-  refollow(input:string):void {this.db.prepare('UPDATE feeds SET subscribed=1 WHERE name=?').run(subredditName(input));}
+  refollow(input:string):void {this.db.prepare('UPDATE feeds SET subscribed=1 WHERE name=?').run(feedName(input));}
 
   feedSources(): FeedSource[] {
     return this.db.prepare(`SELECT s.name,s.history_months,s.history_target_id,
@@ -665,7 +670,7 @@ export class ReaderStore {
     return this.transaction(()=>{
       const heads:string[]=[],history:string[]=[];
       for(const input of names){
-        const name=subredditName(input),pref=this.getHistoryPreference(name);
+        const name=feedName(input),pref=this.getHistoryPreference(name);
         let goal=pref.targetId?this.getTarget(pref.targetId):null;
         if(!goal||goal.status==='cancelled')goal=this.getTarget(this.createHistoryGoal(name,pref.months,now));
         const currentCutoff=historyLowerBound(pref.months,now);
@@ -690,7 +695,7 @@ export class ReaderStore {
     });
   }
   getHistoryPreference(input: string): {months: HistoryMonths; targetId: string | null} {
-    const name=subredditName(input);this.requireSubreddit(name);
+    const name=feedName(input);this.requireSubreddit(name);
     const row=this.db.prepare('SELECT history_months,history_target_id FROM feeds WHERE name = ?').get(name);
     return {months:historyMonths(Number(row!.history_months)),targetId:row!.history_target_id as string | null};
   }
@@ -714,7 +719,7 @@ export class ReaderStore {
     return id;
   }
   setHistoryLimit(input: string, value: unknown, now = Date.now()) {
-    const name=subredditName(input),months=historyMonths(value),previous=this.getHistoryPreference(name);
+    const name=feedName(input),months=historyMonths(value),previous=this.getHistoryPreference(name);
     if(previous.months===months)return {changed:false,expanded:false,targetId:previous.targetId,headTargetId:null};
     return this.transaction(()=>{
       const expanded=historyRank(months)>historyRank(previous.months);
@@ -729,12 +734,12 @@ export class ReaderStore {
     });
   }
   ensureHistoryTarget(input: string, now = Date.now()): string {
-    const name=subredditName(input),pref=this.getHistoryPreference(name),target=pref.targetId?this.getTarget(pref.targetId):null;
+    const name=feedName(input),pref=this.getHistoryPreference(name),target=pref.targetId?this.getTarget(pref.targetId):null;
     if(target&&target.status!=='cancelled')return target.id;
     return this.transaction(()=>this.createHistoryGoal(name,pref.months,now));
   }
   pauseSource(input: string, reason: string): void {
-    const name = subredditName(input);
+    const name = feedName(input);
     this.transaction(() => {
       this.db.prepare("UPDATE targets SET status = 'paused', reason = ? WHERE subreddit = ? AND status IN ('queued','paused')").run(reason, name);
       this.db.prepare("UPDATE feed_sync SET state='incomplete',reason=? WHERE subreddit=? AND state='running'").run(reason,name);
@@ -766,11 +771,29 @@ export class ReaderStore {
       this.db.exec("UPDATE metadata SET value=value+1 WHERE key='content_revision'");
     });
   }
-  queryFeed(input: { subreddit?: string; media?: MediaFilter; text?: string; scope?:string; read?:string; readBefore?:number; favourites?:string;authorPlatform?:string;authorId?:string; afterMs?: number; beforeMs?: number; cursor?: string; limit?: number } = {}) {
+  tags(){return this.db.prepare('SELECT tag,count(*) AS posts FROM post_tags GROUP BY tag ORDER BY tag').all().map(row=>({name:String(row.tag),posts:Number(row.posts)}));}
+  setPostTags(input:string,value:unknown):StoredPost {
+    const id=postId(input),tags=postTags(value);if(!this.getPost(id))throw new Error('Post is no longer stored');
+    this.contentTransaction(()=>{this.db.prepare('DELETE FROM post_tags WHERE post_id=?').run(id);const insert=this.db.prepare('INSERT INTO post_tags VALUES (?,?)');for(const tag of tags)insert.run(id,tag);this.db.exec("UPDATE metadata SET value=value+1 WHERE key='content_revision'");});
+    return this.getPost(id)!;
+  }
+  markFeedRead(input:Parameters<ReaderStore['queryFeed']>[0],generation:number):number {
+    return this.transaction(()=>{
+      if(generation!==this.generation)throw new StaleGenerationError();
+      let cursor:string|undefined;const ids:string[]=[];
+      do{const page=this.queryFeed({...input,cursor,limit:100});ids.push(...page.posts.map(post=>post.id));cursor=page.next??undefined;}while(cursor);
+      const time=Date.now(),insert=this.db.prepare('INSERT OR IGNORE INTO read_states VALUES (?,?)');let changed=0;
+      for(const id of ids)changed+=Number(insert.run(id,time).changes);
+      if(changed)this.db.exec("UPDATE metadata SET value=value+1 WHERE key='content_revision'");
+      return changed;
+    });
+  }
+  queryFeed(input: { tag?:string; subreddit?: string; media?: MediaFilter; text?: string; scope?:string; read?:string; readBefore?:number; favourites?:string;authorPlatform?:string;authorId?:string; afterMs?: number; beforeMs?: number; cursor?: string; limit?: number } = {}) {
     const limit = Math.min(100, Math.max(1, input.limit ?? 50));
     if(input.favourites&&!['posts','users'].includes(input.favourites))throw new Error('Invalid favourites filter');
     const clauses: string[] = input.favourites?[]:["EXISTS(SELECT 1 FROM feeds f WHERE f.name=p.subreddit AND f.subscribed=1)"];
     const params: (string | number)[] = [];
+    if(input.tag){clauses.push('EXISTS(SELECT 1 FROM post_tags WHERE post_id=p.id AND tag=?)');params.push(tagName(input.tag));}
     if(input.favourites==='posts')clauses.push('p.id IN (SELECT post_id FROM favourite_posts)');
     if(input.favourites==='users')clauses.push(`p.id IN (SELECT a.post_id FROM favourite_users fu JOIN observation_authors a ON json_extract(a.author,'$.platform')=fu.platform AND json_extract(a.author,'$.id')=fu.user_id)
       AND coalesce(p.live_availability,o.availability)<>'deleted' AND ${AUTHOR_FAVOURITE}`);
@@ -786,7 +809,7 @@ export class ReaderStore {
     if(input.read&&input.read!=='all'){
       clauses.push(`${input.read==='unread'?'NOT ':''}EXISTS(SELECT 1 FROM read_states r WHERE r.post_id=p.id AND r.read_at<=?)`);params.push(readBefore);
     }
-    if (input.subreddit) { clauses.push('p.subreddit = ?'); params.push(subredditName(input.subreddit)); }
+    if (input.subreddit) { clauses.push('p.subreddit = ?'); params.push(feedName(input.subreddit)); }
     for (const [value, operator] of [[input.afterMs, '>='], [input.beforeMs, '<']] as const) {
       if (value !== undefined) { if (!Number.isSafeInteger(value)) throw new Error('Invalid date filter'); clauses.push(`p.created_ms ${operator} ?`); params.push(value); }
     }
