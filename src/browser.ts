@@ -26,6 +26,7 @@ export class ReaderBrowser {
   private onAccess: (error: AccessError) => void;
   private queue: RequestQueue;
   private observedMedia = new Set<string>();
+  private lifecycle=0;
   get mediaCandidates() { return [...this.observedMedia]; }
 
   constructor(onAccess: (error: AccessError) => void = () => {}, queue?: RequestQueue) {
@@ -36,24 +37,28 @@ export class ReaderBrowser {
 
   async open(maxRequests = 100, interactive: boolean | 'media' = false): Promise<void> {
     this.queue.assertOnline();
-    if (this.context) { if(this.failure)throw this.failure;return; }
+    if (this.context) { if(!this.failure)return;await this.close(); }
+    const lifecycle=this.lifecycle;
+    const assertOpening=()=>{this.queue.assertOnline();if(lifecycle!==this.lifecycle)throw new Error('Collection browser opening was cancelled');};
     if (this.closing) await this.closing;
     const wait = Math.max(0, this.lastClosed + 5_000 - Date.now());
     if (wait) await delay(wait,undefined,{signal:this.queue.signal});
-    this.queue.assertOnline();
+    assertOpening();
     this.failure = null;
     this.observedMedia.clear();
     this.limiter = new BrowserLimiter();
     await mkdir(profileDirectory, { recursive: true, mode: 0o700 });
     const { chromium } = await import('playwright');
-    this.queue.assertOnline();
+    assertOpening();
     const context = await chromium.launchPersistentContext(profileDirectory, {
       ...browserLaunchOptions, channel: process.env.REDDIT_READER_BROWSER_CHANNEL ?? 'chrome',
       headless: false, javaScriptEnabled: Boolean(interactive), viewport: { width: 1280, height: 900 },
     });
-    if(this.queue.offline){await context.close();this.queue.assertOnline();}
     this.context = context;
+    if(this.queue.offline||lifecycle!==this.lifecycle){await this.close();assertOpening();}
+    try {
     this.page = context.pages()[0] ?? await context.newPage();
+    assertOpening();
     this.page.setDefaultNavigationTimeout(30_000);
     this.page.setDefaultTimeout(10_000);
     context.on('response', response => {
@@ -68,16 +73,21 @@ export class ReaderBrowser {
       }
     });
     await context.routeWebSocket('**/*', socket => socket.close());
-    this.gate = await ChromiumRequestGate.install(await chromiumControlUrl(profileDirectory), {
+    assertOpening();const control=await chromiumControlUrl(profileDirectory);assertOpening();
+    const current=()=>lifecycle===this.lifecycle&&this.context===context&&!this.queue.offline;
+    const gate = await ChromiumRequestGate.install(control, {
       queue: this.queue,
       onMediaRequest: interactive==='media' ? url=>this.observedMedia.add(url) : undefined,
       // Media controls need Reddit's scripts, not unrelated embeds or tracking.
       allowResource:interactive==='media'?url=>{try{const host=new URL(url).hostname;return ['reddit.com','old.reddit.com','www.reddit.com'].includes(host)||host==='redditstatic.com'||host.endsWith('.redditstatic.com')||host==='redditmedia.com'||host.endsWith('.redditmedia.com');}catch{return false;}}:undefined,
       blockedResourceTypes: interactive === 'media' ? ['Image', 'Media', 'Font', 'Ping', 'Other'] : interactive ? [] : ['Image', 'Media', 'Font', 'Script', 'XHR', 'Fetch', 'Ping', 'Other'], maxRequests,
       isPaused: () => this.failure !== null||this.queue.offline,
-      onBudget: () => { const error = new AccessError('Website request budget reached; Continue explicitly to fetch more'); this.failure = error; this.onAccess(error); void this.close().catch(()=>{}); },
-      onFailure: () => { const error = new AccessError('Browser request control failed; collection stopped'); this.failure = error; this.onAccess(error); void this.close().catch(()=>{}); },
+      onBudget: () => { if(!current())return;const error = new AccessError('Website request budget reached; Continue explicitly to fetch more'); this.failure = error; this.onAccess(error); void this.close().catch(()=>{}); },
+      onFailure: () => { if(!current())return;const error = new AccessError('Browser request control failed; collection stopped'); this.failure = error; this.onAccess(error); void this.close().catch(()=>{}); },
     });
+    if(!current()){gate.stop();await context.close();gate.disposeAfterBrowserClose();assertOpening();}
+    this.gate=gate;
+    }catch(error){if(this.context===context)await this.close();throw error;}
   }
 
   async manualSignIn() {
@@ -116,6 +126,7 @@ export class ReaderBrowser {
   }
 
   async close(): Promise<void> {
+    this.lifecycle++;
     if (this.closing) return this.closing;
     const context = this.context;
     const gate = this.gate;

@@ -135,9 +135,15 @@ export class ReaderStore {
         for(const table of tables)this.db.exec(`DELETE FROM main."${table}"`);
         for(const table of tables)this.db.exec(`INSERT INTO main."${table}" SELECT * FROM restored."${table}"`);
         rebuildSearch(this.db);
-        this.db.prepare("UPDATE metadata SET value=? WHERE key='generation'").run(Math.max(generation,this.generation)+1);
+        const restoredGeneration=this.generation,nextGeneration=Math.max(generation,restoredGeneration)+1;
+        const resume=this.getSetting<{generation:number}>('offlineResume');
+        this.db.prepare("UPDATE metadata SET value=? WHERE key='generation'").run(nextGeneration);
         this.db.prepare("UPDATE metadata SET value=? WHERE key='content_revision'").run(revision+1);
-        if(portable){this.db.exec("DELETE FROM settings WHERE key IN ('account','accessPause','offlineResume')");this.setStorageLimit(limit);if(offline!==null)this.setSetting('offlineMode',offline);else this.db.prepare("DELETE FROM settings WHERE key='offlineMode'").run();}
+        if(!portable&&resume?.generation===restoredGeneration)this.setSetting('offlineResume',{...resume,generation:nextGeneration});
+        else this.db.exec("DELETE FROM settings WHERE key='offlineResume'");
+        if(portable){this.db.exec("DELETE FROM settings WHERE key IN ('account','accessPause')");this.setStorageLimit(limit);}
+        // Network permission belongs to this running app, even when content rolls back.
+        if(offline!==null)this.setSetting('offlineMode',offline);else this.db.prepare("DELETE FROM settings WHERE key='offlineMode'").run();
       });
       recoverInterruptedWork(this.db);
     }finally{this.db.exec('DETACH DATABASE restored');}
@@ -616,6 +622,7 @@ export class ReaderStore {
   setSetting(key: string, value: unknown): void {
     this.db.prepare('INSERT INTO settings VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value));
   }
+  setSettings(values:Record<string,unknown>):void {this.transaction(()=>{for(const [key,value]of Object.entries(values))this.setSetting(key,value);});}
   bindAccount(account: string): void {
     if (!/^[a-z0-9_-]{3,24}$/i.test(account)) throw new Error('Invalid account identity');
     const current = this.getSetting<string>('account');

@@ -29,6 +29,7 @@ test('offline policy rejects external work at the API, allows local reading, sur
   assert.equal((await fetch(origin+'/online-player?url='+encodeURIComponent('https://www.youtube.com/watch?v=fixture'))).status,400);
   assert.equal((await post('read',{id:'one',read:true})).status,200);assert.equal((await post('favourite/post',{id:'one',context:app.store.getPost('one')!.readContext,favourite:true})).status,200);
   assert.equal((await(await fetch(origin+'/api/feed?q=Saved&scope=body')).json()).posts.length,1);assert.equal(starts,0);
+  app.store.setSetting('offlineResume',{generation:app.store.generation,feeds:['aww'],tasks:[],archive:null,signIn:false});assert.equal((await post('restore/commit',{id:'expired',confirm:true})).status,400);assert.deepEqual(app.networkMode.status.paused.feeds,['aww'],'A rejected restore must retain the paused collection plan');
   const other=new ReaderStore(join(directory,'other.sqlite'));other.setSetting('offlineMode',false);await other.snapshot(join(directory,'online-backup.sqlite'));other.close();app.store.replaceFrom(join(directory,'online-backup.sqlite'));assert.equal(app.store.getSetting('offlineMode'),true);
   await app.close();app=createReaderServer({database:join(directory,'reader.sqlite'),port:0,jobs:{browser}});origin=await app.listen();assert.equal(app.networkMode.status.offline,true);assert.equal(starts,0);
   await post('offline',{offline:false});assert.equal(app.networkMode.status.offline,false);assert.equal(starts,0,'Going online with no suspended work must not start collection');
@@ -47,6 +48,28 @@ test('offline mode pauses active and queued feeds and resumes only that work, pr
   await app.close();app=createReaderServer(options());assert.equal(app.networkMode.status.offline,true);assert.deepEqual(app.networkMode.status.paused.feeds.sort(),['aww','python']);assert.equal(visits.length,1,'Restarting offline must not resume work');
   hold=false;await app.networkMode.change(false);await until(()=>!app.jobs.state.running);assert(visits.some(url=>url.includes('/r/aww/')));assert(visits.some(url=>url.includes('/r/python/')));assert(!visits.some(url=>url.includes('/r/stopped/')));assert.equal(app.store.stats().posts,2);
  }finally{await app.close();await rm(directory,{recursive:true,force:true});}
+});
+
+test('stopping a queued feed or all work immediately before Offline mode never enrolls it for automatic resume',async()=>{
+ let rejectPending:((error:Error)=>void)|null=null;const visits:string[]=[];
+ const browser={counts:counts(),async open(){},async manualSignIn(){},async close(){rejectPending?.(new Error('Paused fixture'));rejectPending=null;},async navigate(url:string){visits.push(url);return new Promise<any>((_resolve,reject)=>{rejectPending=reject;});}};
+ const app=createReaderServer({database:':memory:',port:0,jobs:{browser,network:new RequestQueue({intervalMs:0})}});
+ try{
+  for(const name of ['aww','python'])app.store.addSubreddit(name);
+  app.jobs.syncFeeds(['aww','python']);await until(()=>visits.length===1);await app.jobs.stopSource('python');await app.networkMode.change(true);assert.deepEqual(app.networkMode.status.paused.feeds,['aww'],'A stopped queued feed must stay stopped');
+  app.networkMode.cancel();await app.networkMode.change(false);app.jobs.syncFeeds(['aww','python']);await until(()=>visits.length===2);app.jobs.pause();assert.deepEqual(app.jobs.offlineWork(),{feeds:[],tasks:[],signIn:false},'Stop all is immediate even while its active page unwinds');await app.networkMode.change(true);assert.deepEqual(app.networkMode.status.paused.feeds,[]);
+ }finally{await app.close();}
+});
+
+test('enabling Offline mode while Clear data waits for collection cannot resume and refill the cleared feed',async()=>{
+ let rejectPending:((error:Error)=>void)|null=null,entered=false,release!:()=>void;const held=new Promise<void>(resolve=>{release=resolve;});let visits=0;
+ const browser={counts:counts(),async open(){},async manualSignIn(){},async close(){rejectPending?.(new Error('Paused fixture'));rejectPending=null;},async navigate(){visits++;return new Promise<any>((_resolve,reject)=>{rejectPending=reject;});}};
+ const app=createReaderServer({database:':memory:',port:0,jobs:{browser,network:new RequestQueue({intervalMs:0})}}),origin=await app.listen(),stop=app.archive.stop.bind(app.archive);let stops=0;
+ app.archive.stop=async(...args)=>{if(stops++===0){entered=true;await held;}await stop(...args);};
+ try{
+  app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[record('one')]);app.jobs.syncFeeds(['aww']);await until(()=>visits===1);
+  const token=(await(await fetch(origin+'/api/state')).json()).token,clearing=fetch(origin+'/api/clear-source',{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token},body:JSON.stringify({name:'aww',confirm:true})});await until(()=>entered);const offline=app.networkMode.change(true);release();const [response]=await Promise.all([clearing,offline]);assert.equal(response.status,200);assert.equal(app.store.stats().posts,0);assert.deepEqual(app.networkMode.status.paused.feeds,[]);await app.networkMode.change(false);assert.equal(app.jobs.state.running,false);assert.equal(visits,1);
+ }finally{release();await app.close();}
 });
 
 test('pausing media aborts the active transfer, keeps completed files and resumes media without starting a listing sync',async()=>{
@@ -100,8 +123,31 @@ test('network policy sockets require the local origin and launch token, and Offl
   });
   assert.equal(await rejected(url.href,origin),403);url.searchParams.set('token',token);assert.equal(await rejected(url.href,'https://example.com'),403);assert.equal(await rejected(url.href,origin,'attacker.example'),403);
   const messages:any[]=[];client=new PolicySocket(url,{origin});client.on('message',data=>messages.push(JSON.parse(String(data))));await until(()=>messages.length===1);assert.equal(messages[0].offline,false);
-  const switching=app.networkMode.change(true);await until(()=>messages.some(status=>status.offline));assert.equal(app.networkMode.status.changing,true,'Do not confirm Offline mode before the client removes its players');client.send(JSON.stringify({revision:messages.at(-1).revision}));await switching;assert.equal(app.networkMode.status.changing,false);assert.equal(app.networkMode.status.offline,true);
+  const switching=app.networkMode.change(true);await until(()=>messages.some(status=>status.offline));assert.equal(app.networkMode.status.changing,true,'Do not confirm Offline mode before the client removes its players');await switching;assert.equal(app.networkMode.status.changing,false);assert.equal(app.networkMode.status.pendingReaders,1,'An unresponsive client is not counted as paused');client.send(JSON.stringify({revision:messages.at(-1).revision}));await until(()=>app.networkMode.status.pendingReaders===0);assert.equal(app.networkMode.status.offline,true);
  }finally{client?.terminate();await app.close();}
+});
+
+test('failed setting writes roll back the mode and resume plan together without leaving the switch changing',async()=>{
+ const app=createReaderServer({database:':memory:',port:0}),setSetting=app.store.setSetting.bind(app.store);let fail=true;
+ try{
+  app.store.setSetting=(key,value)=>{setSetting(key,value);if(key==='offlineMode'&&value===true&&fail){fail=false;throw new Error('Fixture setting failure');}};
+  await assert.rejects(app.networkMode.change(true),/Fixture setting failure/);assert.equal(app.networkMode.status.changing,false);assert.equal(app.networkMode.status.offline,false);assert.equal(app.store.getSetting('offlineResume'),null);assert.equal(app.store.getSetting('offlineMode'),null);await app.networkMode.change(true);assert.equal(app.networkMode.status.offline,true);
+ }finally{await app.close();}
+});
+
+test('a rejected Offline request clears its optimistic pause across tabs',async()=>{
+ const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('aww');const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
+ try{
+  const context=await browser.newContext(),first=await context.newPage(),second=await context.newPage();await first.goto(origin);await second.goto(origin);await first.getByRole('button',{name:'Sync all',exact:true}).waitFor();await until(()=>app.networkMode.status.offline===false);await first.route('**/api/offline',route=>route.fulfill({status:400,contentType:'application/json',body:'{"error":"Fixture rejected request"}'}));await first.getByRole('switch',{name:'Offline mode',exact:true}).click();await first.getByRole('alert').waitFor();await first.waitForFunction(()=>![...document.querySelectorAll('button')].find(button=>button.textContent==='Sync all')?.disabled);await second.waitForFunction(()=>![...document.querySelectorAll('button')].find(button=>button.textContent==='Sync all')?.disabled);assert.equal(app.networkMode.status.offline,false);
+ }finally{await browser.close();await app.close();}
+});
+
+test('an unresponsive player leaves Offline mode unconfirmed and the user can cancel the request',async()=>{
+ const app=createReaderServer({database:':memory:',port:0}),origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});let client:PolicySocket|undefined;
+ try{
+  const token=(await(await fetch(origin+'/api/state')).json()).token,url=new URL('/api/network/events?client=held-reader&token='+token,origin);url.protocol='ws:';client=new PolicySocket(url,{origin});await new Promise<void>((resolve,reject)=>{client!.once('message',()=>resolve());client!.once('error',reject);});
+  const page=await browser.newPage();await page.goto(origin);await page.getByRole('switch',{name:'Offline mode',exact:true}).click();const cancel=page.getByRole('button',{name:'Cancel Offline request',exact:true});await cancel.waitFor();assert.equal(app.networkMode.status.pendingReaders,1);assert.equal(await page.getByRole('switch',{name:'Offline mode',exact:true}).getAttribute('aria-checked'),'false');await page.getByText(/Collection is paused. Waiting for 1 open/).waitFor();await cancel.click();await page.waitForFunction(()=>![...document.querySelectorAll('button')].find(button=>button.textContent==='Cancel Offline request'));assert.equal(app.networkMode.status.offline,false);assert.equal(app.networkMode.status.pendingReaders,0);
+ }finally{client?.terminate();await browser.close();await app.close();}
 });
 
 test('switching offline removes provider frames in every open reader and standalone player; saved media and local actions keep working',async()=>{

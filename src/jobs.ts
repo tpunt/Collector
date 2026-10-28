@@ -102,8 +102,9 @@ export class ReaderJobs {
   attachMedia(media:MediaSyncDriver|null){this.mediaSync=media;}
   /** Capture only work in flight/queued now, never older manually paused scans. */
   offlineWork(){
-    const work=[...this.queue,...(this.active?[this.active]:[])];
-    const feeds=[...new Set([...this.feedRuns.keys(),...work.filter(item=>item.kind==='target').map(item=>this.sourceOf(item)).filter((name):name is string=>Boolean(name))])];
+    if(this.stopping)return{feeds:[],tasks:[],signIn:false};
+    const work=[...this.queue,...(this.active?[this.active]:[])].filter(item=>!this.stoppedWork.has(item.id));
+    const feeds=[...new Set([...this.feedRuns.keys()].filter(name=>work.some(item=>this.sourceOf(item)===name)).concat(work.filter(item=>item.kind==='target').map(item=>this.sourceOf(item)).filter((name):name is string=>Boolean(name))))];
     const tasks:PausedTask[]=work.flatMap<PausedTask>(item=>item.kind==='target'||item.kind!=='thread'&&feeds.includes(this.sourceOf(item)??'')?[]:'postId'in item?[{kind:item.kind,postId:item.postId}]:[{kind:item.kind,subreddit:item.subreddit}]);
     return{feeds,tasks,signIn:this.manual};
   }
@@ -262,7 +263,7 @@ export class ReaderJobs {
   }
   async finishSignIn() { this.pause('Sign-in browser closed. Resume collection to verify the saved account.'); await this.closeBrowser(); }
   async close(reason='Application stopped; explicit Resume required') { this.pause(reason); await this.closeBrowser();await this.pumpDone;await this.signingIn?.catch(()=>{});await this.closeBrowser(); }
-  private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();this.pumpDone=this.pump();void this.pumpDone.catch(()=>{}); } }
+  private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();const done=this.pump();this.pumpDone=done;void done.catch(()=>{}).finally(()=>{if(this.pumpDone===done)this.pumpDone=null;}); } }
   private async pump() {
     const startingRequests = this.totalRequests();
     try {

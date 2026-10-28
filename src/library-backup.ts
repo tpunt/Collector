@@ -10,6 +10,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {ReaderStore} from './store.ts';
 import type {MediaCache} from './media.ts';
 import {SCHEMA_VERSION} from './schema.ts';
+import {DatabaseSync} from 'node:sqlite';
 
 const MAX_MANIFEST=32*1024*1024;
 const fileName=/^(reader\.sqlite|media\/[a-f0-9]{64}(\.json)?)$/;
@@ -24,8 +25,16 @@ function password(value:unknown,creating=false):string {
   return value;
 }
 async function digest(path:string,signal?:AbortSignal){const hash=createHash('sha256');for await(const chunk of createReadStream(path,{signal}))hash.update(chunk);return hash.digest('hex');}
-function journal(directory:string,stage:string,committed:boolean){
-  const path=join(directory,'restore.json');writeFileSync(path+'.tmp',JSON.stringify({stage:basename(stage),committed}),{mode:0o600,flush:true});renameSync(path+'.tmp',path);
+function journal(directory:string,stage:string,committed:boolean,offline?:boolean){
+  const path=join(directory,'restore.json');writeFileSync(path+'.tmp',JSON.stringify({stage:basename(stage),committed,...(offline===undefined?{}:{offline})}),{mode:0o600,flush:true});renameSync(path+'.tmp',path);
+}
+
+function savedOfflineMode(database:string):boolean{
+  try{
+    const db=new DatabaseSync(database,{readOnly:true});
+    try{const value=db.prepare("SELECT value FROM settings WHERE key='offlineMode'").get()?.value;return value!==undefined&&JSON.parse(String(value))!==false;}
+    finally{db.close();}
+  }catch{return true;} // Unreadable permissions cannot authorize network access.
 }
 
 /** Runs before opening SQLite. An unacknowledged replacement always rolls back. */
@@ -36,8 +45,14 @@ export function recoverLibraryRestore(database:string,mediaDirectory:string,dire
   const stage=join(directory,marker.stage);
   if(!marker.committed){
     if(!existsSync(join(stage,'previous.sqlite')))throw new Error('Restore rollback database is missing; preserve the backup work directory');
+    const offline=typeof marker.offline==='boolean'?marker.offline:savedOfflineMode(database);
+    // Persist the current permission before replacing SQLite, including a crash during recovery itself.
+    journal(directory,stage,false,offline);
     copyFileSync(join(stage,'previous.sqlite'),database);
     for(const suffix of ['-wal','-shm'])rmSync(database+suffix,{force:true});
+    const recovered=new DatabaseSync(database);
+    try{recovered.prepare("INSERT INTO settings(key,value) VALUES('offlineMode',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(offline));}
+    finally{recovered.close();}
     if(existsSync(join(stage,'previous-media'))){rmSync(mediaDirectory,{recursive:true,force:true});renameSync(join(stage,'previous-media'),mediaDirectory);}
   }
   rmSync(path,{force:true});rmSync(stage,{recursive:true,force:true});

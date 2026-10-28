@@ -15,6 +15,8 @@ import {RequestQueue} from '../src/request-gate.ts';
 import {LibraryBackups,recoverLibraryRestore} from '../src/library-backup.ts';
 import {SCHEMA_VERSION} from '../src/schema.ts';
 import {redditAuthor} from '../src/reddit-author.ts';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
 
 const secret='backup test passphrase';
 const post=(id='abc')=>({id,subreddit:'python',title:'Private library title',author:redditAuthor('Backup_Author'),body:'Offline body sentinel',permalink:`/r/python/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'backup-test',observedAt:1800000000000,media:['Image' as const,'Text' as const],attachments:[{kind:'image' as const,url:'https://i.redd.it/backup.jpg'}]});
@@ -81,6 +83,26 @@ test('a failed publication rolls the database and media back before accepting mo
  }finally{await h.close();}
 });
 
+test('a failed restore keeps Offline mode enabled while rolling back older settings',async()=>{
+ const h=await setup();
+ try{
+  h.store.setSetting('offlineMode',false);const backup=await h.backups.create(secret);
+  const prepared=await h.backups.prepare(createReadStream(h.backups.download(backup.id).path),secret),reload=h.media.reload.bind(h.media);let calls=0;
+  h.media.reload=async()=>{if(calls++===0){h.store.setSetting('offlineMode',true);throw new Error('Fixture disk failure after switching offline');}await reload();};
+  await assert.rejects(h.backups.restore(prepared.id),/Fixture disk failure/);assert.equal(h.store.getSetting('offlineMode'),true,'Rolling content back must not roll network permission back');
+ }finally{await h.close();}
+});
+
+test('a failed restore preserves the original offline collection plan with its rollback generation',async()=>{
+ const h=await setup();
+ try{
+  h.store.setSetting('offlineMode',true);h.store.setSetting('offlineResume',{generation:h.store.generation,feeds:['python'],tasks:[],archive:null,signIn:false});
+  const backup=await h.backups.create(secret),prepared=await h.backups.prepare(createReadStream(h.backups.download(backup.id).path),secret),reload=h.media.reload.bind(h.media);let calls=0;
+  h.media.reload=async()=>{if(calls++===0)throw new Error('Fixture publication failed');await reload();};
+  await assert.rejects(h.backups.restore(prepared.id),/Fixture publication failed/);const plan=h.store.getSetting<{generation:number;feeds:string[]}>('offlineResume');assert.equal(plan?.generation,h.store.generation);assert.deepEqual(plan?.feeds,['python']);assert.equal(h.store.getSetting('offlineMode'),true);
+ }finally{await h.close();}
+});
+
 test('a rollback-snapshot disk failure preserves the current library and a retryable validation ticket',async()=>{
  const h=await setup();
  try{
@@ -96,10 +118,28 @@ test('startup recovers an interrupted database/media replacement before opening 
  const root=await mkdtemp(join(tmpdir(),'collector-recovery-')),path=join(root,'reader.sqlite'),work=join(root,'work'),stage=join(work,'stage-fixture'),media=join(root,'media');let store=new ReaderStore(path);
  try{
   store.addSubreddit('python');store.importArchiveBatch(store.generation,[post()]);await mkdir(stage,{recursive:true});await store.snapshot(join(stage,'previous.sqlite'));
-  store.importArchiveBatch(store.generation,[post('later')]);store.close();await mkdir(join(stage,'previous-media'));await writeFile(join(stage,'previous-media','kept'),'Old media');await mkdir(media);await writeFile(join(media,'partial'),'New media');
+  store.importArchiveBatch(store.generation,[post('later')]);store.setSetting('offlineMode',true);store.close();await mkdir(join(stage,'previous-media'));await writeFile(join(stage,'previous-media','kept'),'Old media');await mkdir(media);await writeFile(join(media,'partial'),'New media');
   await writeFile(join(work,'restore.json'),JSON.stringify({stage:'stage-fixture',committed:false}));recoverLibraryRestore(path,media,work);store=new ReaderStore(path);
-  assert(store.getPost('abc'));assert.equal(store.getPost('later'),null);assert.equal(await readFile(join(media,'kept'),'utf8'),'Old media');
+  assert(store.getPost('abc'));assert.equal(store.getPost('later'),null);assert.equal(await readFile(join(media,'kept'),'utf8'),'Old media');assert.equal(store.getSetting('offlineMode'),true);
  }finally{store.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('recovery retains its journalled Offline mode across another interrupted rollback',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'collector-recovery-policy-')),path=join(root,'reader.sqlite'),work=join(root,'work'),stage=join(work,'stage-fixture'),media=join(root,'media');let store=new ReaderStore(path);
+ try{
+  store.setSetting('offlineMode',false);await mkdir(stage,{recursive:true});await store.snapshot(join(stage,'previous.sqlite'));store.close();
+  await writeFile(join(work,'restore.json'),JSON.stringify({stage:'stage-fixture',committed:false,offline:true}));recoverLibraryRestore(path,media,work);store=new ReaderStore(path);assert.equal(store.getSetting('offlineMode'),true);
+ }finally{store.close();await rm(root,{recursive:true,force:true});}
+});
+
+for(const offline of [true,false])test(`restore recovery keeps Offline mode ${offline} when its last write exists only in SQLite WAL`,async()=>{
+ const root=await mkdtemp(join(tmpdir(),'collector-recovery-wal-')),path=join(root,'reader.sqlite'),work=join(root,'work'),stage=join(work,'stage-fixture');let child:ReturnType<typeof spawn>|undefined;
+ try{
+  const store=new ReaderStore(path);store.setSetting('offlineMode',!offline);await mkdir(stage,{recursive:true});await store.snapshot(join(stage,'previous.sqlite'));store.close();
+  child=spawn(process.execPath,['--input-type=module','-e','import{DatabaseSync}from"node:sqlite";const db=new DatabaseSync(process.argv[1]);db.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0");db.prepare("UPDATE settings SET value=? WHERE key=\'offlineMode\'").run(process.argv[2]);console.log("ready");setInterval(()=>{},1000);',path,JSON.stringify(offline)],{stdio:['ignore','pipe','ignore']});
+  await once(child.stdout!,'data');child.kill('SIGKILL');await once(child,'exit');assert((await stat(path+'-wal')).size>0);await writeFile(join(work,'restore.json'),JSON.stringify({stage:'stage-fixture',committed:false}));recoverLibraryRestore(path,join(root,'media'),work);
+  const recovered=new ReaderStore(path);try{assert.equal(recovered.getSetting('offlineMode'),offline);}finally{recovered.close();}
+ }finally{if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGKILL');await once(child,'exit');}await rm(root,{recursive:true,force:true});}
 });
 
 for(const schema of [3,4])test(`published version-${schema} backups upgrade only in staging and preserve saved content`,async()=>{

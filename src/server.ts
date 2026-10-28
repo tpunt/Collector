@@ -149,8 +149,8 @@ export function createReaderServer(options: { database?: string; port?: number; 
             finally{res.removeListener('close',cancel);}return;
           }
           case '/api/restore/commit': {
-            if(data.confirm!==true)throw new Error('Confirm library replacement first');networkMode.cancel();await quiesce('Paused to restore a backup; Resume to continue');replacement=backups.restore(String(data.id));
-            try{await replacement;await importer.clear();cleanupPlans.clear();json(res,{ok:true,warning:store.compactionWarning});}finally{replacement=null;}return;
+            if(data.confirm!==true)throw new Error('Confirm library replacement first');await quiesce('Paused to restore a backup; Resume to continue');replacement=backups.restore(String(data.id));
+            try{await replacement;networkMode.cancel();await importer.clear();cleanupPlans.clear();json(res,{ok:true,warning:store.compactionWarning});}finally{replacement=null;}return;
           }
           case '/api/restore/discard': await backups.discard(String(data.id));json(res,{ok:true});return;
           case '/api/read': {
@@ -206,6 +206,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             if(typeof data.id==='string'&&job?.id!==data.id&&!paused)throw new Error('This archive fetch is no longer active');
             if(job||paused)networkMode.cancel({source:(job??paused)!.subreddit});
             await archive.stop();if(job){media.stop(job.subreddit);await jobs.stopSource(job.subreddit,'Archive stopped by user');}
+            if(job||paused)networkMode.cancel({source:(job??paused)!.subreddit});
             json(res,{ok:true});return;
           }
           case '/api/sync': {
@@ -232,7 +233,12 @@ export function createReaderServer(options: { database?: string; port?: number; 
             if(targetId&&shouldFetch)jobs.syncFeeds([name],{heads:result.headTargetId?[result.headTargetId]:[],history:[targetId]});
             json(res,{...result,targetId,queued:Boolean(targetId&&jobs.hasTarget(targetId))});return;
           }
-          case '/api/pause': networkMode.cancel(typeof data.name==='string'?{source:subredditName(data.name)}:{});if (typeof data.name === 'string') {await archive.stop(subredditName(data.name));media.stop(subredditName(data.name));await jobs.stopSource(data.name);} else {await archive.stop();jobs.pause();} break;
+          case '/api/pause': {
+            const selection=typeof data.name==='string'?{source:subredditName(data.name)}:{};
+            networkMode.cancel(selection);
+            if(selection.source){await archive.stop(selection.source);media.stop(selection.source);await jobs.stopSource(selection.source);}else{await archive.stop();jobs.pause();}
+            networkMode.cancel(selection);break;
+          }
           case '/api/sign-in': if(archive.running)throw new Error('Pause archive collection before signing in');await jobs.signIn(); break;
           case '/api/sign-in/finish': await jobs.finishSignIn(); break;
           case '/api/remove': {
@@ -241,7 +247,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             networkMode.cancel({source:name});
             await archive.stop(name,'Feed removed; stored archive progress kept');
             media.stop(name);
-            await jobs.stopSource(name, 'Feed removed');await importer.stopSource(name);store.removeSubreddit(name); break;
+            await jobs.stopSource(name, 'Feed removed');await importer.stopSource(name);store.removeSubreddit(name);networkMode.cancel({source:name});break;
           }
           case '/api/clear-source': {
             if(data.confirm!==true)throw new Error('Confirm clearing subreddit data first');
@@ -251,7 +257,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             await archive.stop(name,'Archive data cleared');
             await jobs.stopSource(name,'Data cleared');await importer.clearSource(name);
             const keys=store.ownedMediaKeys(name);
-            store.clearSubreddit(name);await media.clearSource(name,keys);
+            store.clearSubreddit(name);await media.clearSource(name,keys);networkMode.cancel({source:name});
             json(res,{ok:true,warning:store.compactionWarning});return;
           }
           case '/api/delete-post': {
@@ -279,7 +285,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
         res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':'attachment; filename="collector.tar.age"','Content-Length':file.bytes,'Cache-Control':'no-store'});
         await pipeline(createReadStream(file.path),res);return;
       }
-      if (url.pathname === '/api/state') { json(res,{ token, network:networkMode.status, canQuit:Boolean(options.onShutdown), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name),offlinePaused:networkMode.status.offline&&networkMode.status.paused.feeds.includes(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
+      if (url.pathname === '/api/state') { const policy=networkMode.status;json(res,{ token, network:policy, canQuit:Boolean(options.onShutdown), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name),offlinePaused:policy.offline&&policy.paused.feeds.includes(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
         storage:store.storage, import:importer.progress, imports:store.getSetting('imports') ?? [], account:store.getSetting('account') }); return; }
       if (url.pathname === '/api/feed') {
         const media = url.searchParams.get('media') ?? undefined;

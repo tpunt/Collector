@@ -1,8 +1,8 @@
 import React,{createContext,useContext,useEffect,useLayoutEffect,useRef,useState} from 'react';
 import type {NetworkStatus} from '../src/network-mode.ts';
 
-type Mode={offline:boolean;connected:boolean;status:NetworkStatus|null;beginOffline:()=>void};
-const Context=createContext<Mode>({offline:true,connected:false,status:null,beginOffline:()=>{}});
+type Mode={offline:boolean;connected:boolean;status:NetworkStatus|null;beginOffline:()=>void;cancelOffline:()=>void};
+const Context=createContext<Mode>({offline:true,connected:false,status:null,beginOffline:()=>{},cancelOffline:()=>{}});
 export const NetworkModeProvider=Context.Provider;
 export const useNetworkMode=()=>useContext(Context);
 
@@ -11,7 +11,7 @@ export function useNetworkController(token:string,stopped:boolean):Mode{
   const revision=useRef(0),channel=useRef<BroadcastChannel|null>(null),socket=useRef<WebSocket|null>(null);
   useEffect(()=>{
     const broadcast=new BroadcastChannel('collector-offline-mode');channel.current=broadcast;
-    broadcast.onmessage=event=>{if(event.data?.offline===true&&event.data.revision>=revision.current)setForced(true);};
+    broadcast.onmessage=event=>{if(typeof event.data?.offline==='boolean'&&event.data.revision>=revision.current)setForced(event.data.offline);};
     return()=>{broadcast.close();channel.current=null;};
   },[]);
   useEffect(()=>{
@@ -36,7 +36,7 @@ export function useNetworkController(token:string,stopped:boolean):Mode{
     if(!connected||!status?.offline||!token)return;
     if(socket.current?.readyState===WebSocket.OPEN)socket.current.send(JSON.stringify({revision:status.revision}));
   },[connected,status?.revision,status?.offline,token,client]);
-  return{offline,connected,status,beginOffline:()=>{setForced(true);channel.current?.postMessage({offline:true,revision:revision.current});}};
+  return{offline,connected,status,beginOffline:()=>{setForced(true);channel.current?.postMessage({offline:true,revision:revision.current});},cancelOffline:()=>{setForced(false);channel.current?.postMessage({offline:false,revision:revision.current});}};
 }
 
 export function ExternalLink({children,...props}:React.AnchorHTMLAttributes<HTMLAnchorElement>){
