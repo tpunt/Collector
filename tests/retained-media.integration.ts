@@ -4,12 +4,12 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {chromium} from 'playwright';
 import {browserLaunchOptions} from '../src/browser-options.ts';
-import {createReaderServer} from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 
 test('retained favourites serve cached images, complete galleries and videos after unsubscribing, until their content is deleted',async()=>{
  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDVQAAAAASUVORK5CYII=','base64'),video=await readFile(new URL('./fixtures/media.mp4',import.meta.url));let downloads=0;
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async input=>{downloads++;return new Response(String(input).endsWith('.mp4')?video:png,{headers:{'Content-Type':String(input).endsWith('.mp4')?'video/mp4':'image/png'}});}}});app.store.addSubreddit('aww');
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async input=>{downloads++;return new Response(String(input).endsWith('.mp4')?video:png,{headers:{'Content-Type':String(input).endsWith('.mp4')?'video/mp4':'image/png'}});}}});app.store.addSubreddit('aww');
  const author={platform:'reddit',id:'alice_example',name:'Alice_Example'},base={subreddit:'aww',author,body:'Saved body',created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'retained-media',observedAt:1800000000000};
  app.store.importArchiveBatch(app.store.generation,[{...base,id:'image',title:'Retained image',permalink:'/r/aww/comments/image/',media:['Image'],attachments:[{kind:'image',url:'https://i.redd.it/retained.png'}]},
   {...base,id:'gallery',title:'Retained gallery',permalink:'/r/aww/comments/gallery/',media:['Image'],outbound:'https://www.reddit.com/gallery/gallery/',attachments:[0,1].map(index=>({kind:'image' as const,url:`https://i.redd.it/retained-${index}.png`,caption:'Slide '+(index+1),collection:{id:'reddit:t3_gallery',index,total:2}}))},

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import { browserLaunchOptions } from '../src/browser-options.ts';
 import { readListing, readThread, classifyMedia } from '../src/extract.ts';
-import { createReaderServer } from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import type { PostObservation } from '../src/domain.ts';
 
 test('Classic extractor rejects hidden/invalid cards, ignores edit time and retains thread ancestry',async()=>{
@@ -22,7 +22,7 @@ test('Classic extractor rejects hidden/invalid cards, ignores edit time and reta
   }finally{await browser.close();}
 });
 test('web app supports actual feed filtering, thread drawer, history and streaming file upload without website traffic',async()=>{
-  const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');
+  const app=await createOnlineReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');
   const records:PostObservation[]=['Text','Image','Video'].map((media,index)=>({id:'t3_'+['abc','def','ghi'][index],subreddit:'python',title:media+' fixture story',permalink:'/r/python/comments/'+['abc','def','ghi'][index]+'/',created:{epochMs:1700000000000+index*1000,precisionMs:1000},source:'archive',exportId:'fixture',observedAt:1800000000000,body:media==='Text'?'Saved fixture body':'Media caption',media:[media as 'Text'|'Image'|'Video']}));app.store.importArchiveBatch(app.store.generation,records);
   const origin=await app.listen();const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
   try{
@@ -53,7 +53,7 @@ test('feeds page refreshes individually or together, shows progress, stops one f
     async navigate(url:string){const name=new URL(url).pathname.split('/')[2]!;visited.push(name);return new Promise<any>((resolve,reject)=>pending.set(name,{resolve,reject}));},
     async close(){for(const item of pending.values())item.reject(new Error('Stopped fixture'));pending.clear();}};
   const finish=(name:string)=>{const item=pending.get(name);assert(item);pending.delete(name);item.resolve({url:()=>`https://old.reddit.com/r/${name}/new/`});};
-  const app=createReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,browser:driver,readListing:async(_page,name)=>{
+  const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,browser:driver,readListing:async(_page,name)=>{
     const id=name==='python'?'abc':'def';return{account:'fixture_user',posts:[{id:'t3_'+id,subreddit:name,title:name+' stored fixture',permalink:`/r/${name}/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'live',observedAt:Date.now(),body:'Stored fixture body',media:name==='python'?['Text']:['Image']}],ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:id};
   }}});
   app.store.addSubreddit('python');app.store.addSubreddit('aww');
@@ -79,7 +79,7 @@ test('feeds page refreshes individually or together, shows progress, stops one f
 });
 
 test('local status polling preserves additional loaded pages of stored posts',async()=>{
-  const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');
+  const app=await createOnlineReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');
   app.store.importArchiveBatch(app.store.generation,Array.from({length:75},(_,index)=>({id:'t3_'+(1000+index).toString(36),subreddit:'python',title:'Stored post '+index,permalink:`/r/python/comments/${(1000+index).toString(36)}/`,created:{epochMs:1700000000000+index*1000,precisionMs:1000},source:'archive' as const,exportId:'pagination-fixture',observedAt:1800000000000,media:['Text' as const]})));
   const origin=await app.listen();const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
   try{
@@ -89,7 +89,7 @@ test('local status polling preserves additional loaded pages of stored posts',as
 });
 
 test('per-subreddit Clear has a cancellable confirmation, resets only that feed and keeps its history preference',async()=>{
- const app=createReaderServer({database:':memory:',port:0,jobs:{mediaSync:null}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{mediaSync:null}});
  for(const [name,id] of [['aww','abc'],['python','def']]){app.store.addSource({name:name!,historyMonths:name==='aww'?3:1});app.store.importArchiveBatch(app.store.generation,[{id:id!,subreddit:name!,title:name+' clear fixture',permalink:`/r/${name}/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'clear-ui',observedAt:1800000000000,media:['Text']}]);}
  const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
@@ -103,7 +103,7 @@ test('per-subreddit Clear has a cancellable confirmation, resets only that feed 
 
 test('post deletion can be cancelled, works from feed and discussion, and stays excluded after refresh and reload',async()=>{
  const records=['abc','def'].map(id=>({id,subreddit:'python',title:id==='abc'?'Spam deletion fixture':'Keep deletion fixture',permalink:`/r/python/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'live' as const,observedAt:Date.now(),body:'Fixture body',media:['Text' as const]}));
- const app=createReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(){return{}as any;}},readListing:async()=>({account:'fixture_user',posts:records,ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:'deletion-fixture'})}});app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,records.map(row=>({...row,source:'archive',exportId:'delete-ui'})));const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(){return{}as any;}},readListing:async()=>({account:'fixture_user',posts:records,ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:'deletion-fixture'})}});app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,records.map(row=>({...row,source:'archive',exportId:'delete-ui'})));const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
   const page=await browser.newPage();await page.goto(origin);const trash=()=>page.getByRole('button',{name:'Delete post: Spam deletion fixture',exact:true});
   await trash().click();let dialog=page.getByRole('dialog',{name:'Delete this post?',exact:true});await dialog.getByRole('button',{name:'Keep post',exact:true}).click();assert.equal(app.store.stats().posts,2);
@@ -114,7 +114,7 @@ test('post deletion can be cancelled, works from feed and discussion, and stays 
 });
 
 test('late status polls and feed responses cannot restore an obsolete subreddit filter',async()=>{
- const app=createReaderServer({database:':memory:',port:0});
+ const app=await createOnlineReaderServer({database:':memory:',port:0});
  for(const [name,id] of [['python','abc'],['aww','def']]){app.store.addSubreddit(name!);app.store.importArchiveBatch(app.store.generation,[{id:id!,subreddit:name!,title:name+' race fixture',permalink:`/r/${name}/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'race',observedAt:1800000000000,media:['Text']}]);}
  const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  let releasePoll!:()=>void,releaseFeed!:()=>void;
@@ -134,7 +134,7 @@ test('late status polls and feed responses cannot restore an obsolete subreddit 
 
 test('history controls default to one month, expand automatically and contract without pruning',async()=>{
  const pending=new Map<string,{resolve:(page:any)=>void;reject:(error:Error)=>void}>();const visits:string[]=[];
- const app=createReaderServer({database:':memory:',port:0,jobs:{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async manualSignIn(){},async close(){for(const item of pending.values())item.reject(new Error('History stopped'));pending.clear();},async navigate(url){visits.push(url);return new Promise<any>((resolve,reject)=>pending.set('python',{resolve,reject}));}},readListing:async()=>({account:'fixture_user',posts:[{id:'t3_abc',subreddit:'python',title:'Old collected post',permalink:'/r/python/comments/abc/',created:{epochMs:1600000000000,precisionMs:1000},source:'live',observedAt:Date.now(),body:'Complete fixture body',media:['Text']}],ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:'t3_abc'})}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async manualSignIn(){},async close(){for(const item of pending.values())item.reject(new Error('History stopped'));pending.clear();},async navigate(url){visits.push(url);return new Promise<any>((resolve,reject)=>pending.set('python',{resolve,reject}));}},readListing:async()=>({account:'fixture_user',posts:[{id:'t3_abc',subreddit:'python',title:'Old collected post',permalink:'/r/python/comments/abc/',created:{epochMs:1600000000000,precisionMs:1000},source:'live',observedAt:Date.now(),body:'Complete fixture body',media:['Text']}],ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:'t3_abc'})}});
  app.store.addSubreddit('python');const origin=await app.listen();const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
   const page=await browser.newPage();await page.goto(origin+'/#feeds');const row=page.locator('[data-feed="python"]');await row.waitFor();const select=row.getByLabel('History limit for r/python');assert.equal(await select.inputValue(),'1');assert.deepEqual(await select.locator('option').allTextContents(),['1 month','3 months','6 months','1 year','2 years','3 years','5 years','All time']);
@@ -148,7 +148,7 @@ test('history controls default to one month, expand automatically and contract w
 test('inline images and playable video use cached local assets, range responses and no remote browser requests',async()=>{
  const {readFile,stat}=await import('node:fs/promises');const {RequestQueue}=await import('../src/request-gate.ts');
  const video=await readFile(new URL('./fixtures/media.mp4',import.meta.url)),audio=await readFile(new URL('./fixtures/media-audio.mp4',import.meta.url)),manifest=await readFile(new URL('./fixtures/media.mpd',import.meta.url));const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDVQAAAAASUVORK5CYII=','base64');let downloads=0,networkTime=0;const mediaStarts:number[]=[],samples=[0,1,0.25,0.75];
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({fromCompletion:true,random:()=>samples.shift()!,clock:{now:()=>networkTime,sleep:async ms=>{networkTime+=ms;}}})},media:{fetch:async url=>{downloads++;mediaStarts.push(networkTime);networkTime+=37;const isAudio=String(url).endsWith('audio.mp4'),isVideo=String(url).endsWith('.mp4'),isManifest=String(url).endsWith('.mpd');return new Response(isManifest?manifest:isAudio?audio:isVideo?video:png,{headers:{'Content-Type':isManifest?'application/dash+xml':isAudio?'audio/mp4':isVideo?'video/mp4':'image/png'}});}}});app.store.addSubreddit('aww');
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({fromCompletion:true,random:()=>samples.shift()!,clock:{now:()=>networkTime,sleep:async ms=>{networkTime+=ms;}}})},media:{fetch:async url=>{downloads++;mediaStarts.push(networkTime);networkTime+=37;const isAudio=String(url).endsWith('audio.mp4'),isVideo=String(url).endsWith('.mp4'),isManifest=String(url).endsWith('.mpd');return new Response(isManifest?manifest:isAudio?audio:isVideo?video:png,{headers:{'Content-Type':isManifest?'application/dash+xml':isAudio?'audio/mp4':isVideo?'video/mp4':'image/png'}});}}});app.store.addSubreddit('aww');
  app.store.importArchiveBatch(app.store.generation,['Image','Video'].map((kind,index)=>({id:'t3_'+['abc','def'][index],subreddit:'aww',title:kind+' inline fixture',permalink:`/r/aww/comments/${['abc','def'][index]}/`,created:{epochMs:1700000000000+index*1000,precisionMs:1000},source:'archive' as const,exportId:'inline-fixture',observedAt:Date.now(),media:[kind as 'Image'|'Video'],attachments:[{kind:kind==='Image'?'image' as const:'video' as const,url:kind==='Image'?'https://i.redd.it/fixture.png':'https://v.redd.it/fixture/DASHPlaylist.mpd'}]})));
  const origin=await app.listen();const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
@@ -187,7 +187,7 @@ test('expanded media discovery binds DASH manifests, rejects unsupported media a
 });
 
 test('All feeds replaces Posts, and Settings saves a non-destructive storage cap with sidebar percentage',async()=>{
- const app=createReaderServer({database:':memory:',port:0});for(const name of ['aww','python'])app.store.addSubreddit(name);
+ const app=await createOnlineReaderServer({database:':memory:',port:0});for(const name of ['aww','python'])app.store.addSubreddit(name);
  app.store.importArchiveBatch(app.store.generation,['aww','python'].map((name,index)=>({id:index?'def':'abc',subreddit:name,title:name+' storage fixture',body:'x'.repeat(500_000),permalink:`/r/${name}/comments/${index?'def':'abc'}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'storage-ui',observedAt:Date.now(),media:['Text' as const]})));
  const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
@@ -201,7 +201,7 @@ test('All feeds replaces Posts, and Settings saves a non-destructive storage cap
 });
 
 test('offline reader has no selection or summary controls; discussions still work and Clear reports compaction warnings',async()=>{
- const app=createReaderServer({database:':memory:',port:0,jobs:{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){return{url:()=>url}as any;}},readAccount:async()=> 'fixture_user',readThread:async()=>({topLink:null,attachments:[],snapshot:{id:'reader-snapshot',postId:'t3_abc',source:'live',observedAt:Date.now(),capturedAt:null,sort:'best',body:'Saved discussion body',availability:'available',comments:[{id:'t1_comment',postId:'t3_abc',parentId:'t3_abc',ancestry:'known',body:'A saved fixture comment',availability:'available',createdMs:1700000001000}],omitted:2,sample:'One visible fixture comment'}})}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){return{url:()=>url}as any;}},readAccount:async()=> 'fixture_user',readThread:async()=>({topLink:null,attachments:[],snapshot:{id:'reader-snapshot',postId:'t3_abc',source:'live',observedAt:Date.now(),capturedAt:null,sort:'best',body:'Saved discussion body',availability:'available',comments:[{id:'t1_comment',postId:'t3_abc',parentId:'t3_abc',ancestry:'known',body:'A saved fixture comment',availability:'available',createdMs:1700000001000}],omitted:2,sample:'One visible fixture comment'}})}});
  app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,[{id:'abc',subreddit:'python',title:'Offline UI fixture',permalink:'/r/python/comments/abc/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'reader-ui',observedAt:Date.now(),body:'Complete fixture body',media:['Text']}]);
  const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{

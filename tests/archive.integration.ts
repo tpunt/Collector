@@ -4,16 +4,16 @@ import assert from 'node:assert/strict';
 import {setTimeout as delay} from 'node:timers/promises';
 import {chromium} from 'playwright';
 import {browserLaunchOptions} from '../src/browser-options.ts';
-import {createReaderServer} from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 const rows=[{id:'abc',subreddit:'python',title:'Archived photo fixture',created_utc:1577836800,url:'https://i.redd.it/archive-fixture.png',is_self:false},{id:'def',subreddit:'python',title:'Archived text fixture',created_utc:1577836801,is_self:true,selftext:'Saved archive text'}];
 const json=(data:unknown[])=>new Response(JSON.stringify({data}),{headers:{'Content-Type':'application/json'}});
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDVQAAAAASUVORK5CYII=','base64');
-async function settle(app:ReturnType<typeof createReaderServer>){const deadline=Date.now()+5000;while(app.archive.running||app.jobs.state.running){if(Date.now()>deadline)throw new Error('Archive pipeline did not finish');await delay(2);}}
+async function settle(app:Awaited<ReturnType<typeof createOnlineReaderServer>>){const deadline=Date.now()+5000;while(app.archive.running||app.jobs.state.running){if(Date.now()>deadline)throw new Error('Archive pipeline did not finish');await delay(2);}}
 
 test('archive HTTP workflow enforces authentication, imports a date range and automatically saves local media through the shared gate',async()=>{
  let archiveCalls=0,mediaCalls=0,browserOpens=0;const starts:number[]=[];
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:25,fromCompletion:true}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){browserOpens++;throw new Error('Direct archived images should not open Reddit');},async close(){},async manualSignIn(){},async navigate(){throw new Error('No Reddit navigation expected');}}},archive:{fetch:async url=>{starts.push(Date.now());archiveCalls++;assert.equal(new URL(String(url)).hostname,'arctic-shift.photon-reddit.com');return json(archiveCalls===1?rows:[]);}},media:{fetch:async()=>{starts.push(Date.now());mediaCalls++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:25,fromCompletion:true}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){browserOpens++;throw new Error('Direct archived images should not open Reddit');},async close(){},async manualSignIn(){},async navigate(){throw new Error('No Reddit navigation expected');}}},archive:{fetch:async url=>{starts.push(Date.now());archiveCalls++;assert.equal(new URL(String(url)).hostname,'arctic-shift.photon-reddit.com');return json(archiveCalls===1?rows:[]);}},media:{fetch:async()=>{starts.push(Date.now());mediaCalls++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
  const origin=await app.listen();
  try{
   const {token}=await(await fetch(origin+'/api/state')).json();const post=(path:string,data:unknown,auth=true)=>fetch(origin+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json',...(auth?{'X-Reader-Token':token}:{})},body:JSON.stringify(data)});
@@ -28,7 +28,7 @@ test('archive HTTP workflow enforces authentication, imports a date range and au
 
 test('Stop, Resume, scoped Clear and global Clear cancel archive requests and preserve unrelated feeds',async()=>{
  let calls=0,aborts=0;
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},archive:{fetch:async(_url,options)=>{calls++;return new Promise((_resolve,reject)=>options?.signal?.addEventListener('abort',()=>{aborts++;reject(new Error('Fixture aborted'));},{once:true}));}}});app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[{id:'keep',subreddit:'aww',title:'Unrelated saved post',permalink:'/r/aww/comments/keep/',created:{epochMs:1577836800000,precisionMs:1000},source:'archive',exportId:'keep',observedAt:Date.now(),media:['Text']}]);const origin=await app.listen();
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},archive:{fetch:async(_url,options)=>{calls++;return new Promise((_resolve,reject)=>options?.signal?.addEventListener('abort',()=>{aborts++;reject(new Error('Fixture aborted'));},{once:true}));}}});app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[{id:'keep',subreddit:'aww',title:'Unrelated saved post',permalink:'/r/aww/comments/keep/',created:{epochMs:1577836800000,precisionMs:1000},source:'archive',exportId:'keep',observedAt:Date.now(),media:['Text']}]);const origin=await app.listen();
  try{
   const {token}=await(await fetch(origin+'/api/state')).json(),post=(path:string,data:unknown)=>fetch(origin+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token},body:JSON.stringify(data)});
   const {id}=await(await post('archive/start',{subreddit:'python',from:'2020-01-01',to:'2020-01-01'})).json();while(calls<1)await delay(1);assert.equal((await post('archive/start',{subreddit:'aww',to:'2020-01-01'})).status,400);assert.equal((await post('archive/stop',{id:'wrong'})).status,400);
@@ -40,7 +40,7 @@ test('Stop, Resume, scoped Clear and global Clear cancel archive requests and pr
 
 test('archive UI accepts subreddit and dates, stops/resumes, restores progress on reload and displays offline media',async()=>{
  let calls=0;
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},archive:{fetch:async(_url,options)=>{calls++;if(calls===1)return new Promise((_resolve,reject)=>options?.signal?.addEventListener('abort',()=>reject(new Error('Stopped fixture')),{once:true}));return json(calls===2?rows:[]);}},media:{fetch:async()=>new Response(png,{headers:{'Content-Type':'image/png'}})}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},archive:{fetch:async(_url,options)=>{calls++;if(calls===1)return new Promise((_resolve,reject)=>options?.signal?.addEventListener('abort',()=>reject(new Error('Stopped fixture')),{once:true}));return json(calls===2?rows:[]);}},media:{fetch:async()=>new Response(png,{headers:{'Content-Type':'image/png'}})}});
  const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
   const page=await browser.newPage();await page.goto(origin);await page.getByRole('button',{name:'Import an archive',exact:true}).click();const dialog=()=>page.getByRole('dialog',{name:'Import archive',exact:true});

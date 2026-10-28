@@ -3,14 +3,14 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {chromium} from 'playwright';
 import {browserLaunchOptions} from '../src/browser-options.ts';
-import {createReaderServer} from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 import type {PostObservation} from '../src/domain.ts';
 
 test('one feed control waits for local media before showing successful sync, then displays the cached image offline',async()=>{
  let release!:()=>void,started=false,downloads=0;const gate=new Promise<void>(resolve=>{release=resolve;});
  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDVQAAAAASUVORK5CYII=','base64'),old=Date.now()-45*86400000;
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),
   browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){return{url:()=>url}as any;}},
   readListing:async page=>{
    const prefix=page.url().includes('?')?'b':'a';

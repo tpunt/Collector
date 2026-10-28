@@ -9,7 +9,7 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
 import {browserLaunchOptions} from '../src/browser-options.ts';
-import {createReaderServer} from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 
 async function fixture(){
@@ -18,7 +18,7 @@ async function fixture(){
   // This must contain a picture AND sound; the audio-only input is not a movie.
   const movie=join(directory,'movie.mp4');await promisify(execFile)('ffmpeg',['-nostdin','-hide_banner','-loglevel','error','-stream_loop','-1','-i',fileURLToPath(new URL('./fixtures/media.mp4',import.meta.url)),'-stream_loop','-1','-i',fileURLToPath(new URL('./fixtures/media-audio.mp4',import.meta.url)),'-map','0:v:0','-map','1:a:0','-c','copy','-t','8','-movflags','+faststart',movie]);
   const video=await readFile(movie),png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDVQAAAAASUVORK5CYII=','base64');let downloads=0;
-  const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async input=>{downloads++;return new Response(String(input).endsWith('.mp4')?video:png,{headers:{'Content-Type':String(input).endsWith('.mp4')?'video/mp4':'image/png'}});}}});app.store.addSubreddit('aww');
+  const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async input=>{downloads++;return new Response(String(input).endsWith('.mp4')?video:png,{headers:{'Content-Type':String(input).endsWith('.mp4')?'video/mp4':'image/png'}});}}});app.store.addSubreddit('aww');
   const base={subreddit:'aww',created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'player',observedAt:Date.now()};
   app.store.importArchiveBatch(app.store.generation,[{...base,id:'video',title:'Video with picture and sound',permalink:'/r/aww/comments/video/',media:['Video'],attachments:[{kind:'video',url:'https://v.redd.it/preview/DASH_720.mp4'}]},
    {...base,id:'gallery',title:'Gallery preview',permalink:'/r/aww/comments/gallery/',media:['Image'],attachments:[0,1].map(index=>({kind:'image' as const,url:`https://i.redd.it/preview-${index}.png`,caption:'Image caption '+(index+1),collection:{id:'reddit:t3_gallery',index,total:2}}))}]);

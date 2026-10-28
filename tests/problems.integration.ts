@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {chromium} from 'playwright';
 import {browserLaunchOptions} from '../src/browser-options.ts';
-import {createReaderServer} from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 import {readFile,mkdtemp,rm} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -14,12 +14,12 @@ import {readListing} from '../src/extract.ts';
 const head='<div id="header"><span class="user"><a href="/user/fixture_user/">fixture_user</a></span></div><div class="tabmenu"><span class="selected">new</span></div>';
 const good='<div class="thing self" data-fullname="t3_abc" data-subreddit="python" data-permalink="/r/python/comments/abc/PRIVATE_TITLE_SLUG/"><div class="entry"><a class="title">PRIVATE_POST_TITLE</a><p class="tagline"><time datetime="2026-10-20T10:30:00Z">Time</time></p><div class="usertext-body"><div class="md">PRIVATE_POST_BODY</div></div></div></div>';
 const bad='<div class="thing self" data-subreddit="python" data-permalink="/r/python/comments/def/"><div class="entry"><a class="title">Another PRIVATE_POST_TITLE</a></div></div>';
-async function settled(app:ReturnType<typeof createReaderServer>){const end=Date.now()+15000;while(app.jobs.state.running){if(Date.now()>end)throw new Error('Problem fixture did not settle');await delay(3);}}
+async function settled(app:Awaited<ReturnType<typeof createOnlineReaderServer>>){const end=Date.now()+15000;while(app.jobs.state.running){if(Date.now()>end)throw new Error('Problem fixture did not settle');await delay(3);}}
 
 test('a partially changed Reddit listing pauses without advancing, shows diagnostics offline and can be retried after the parser input is fixed',async()=>{
  const root=await mkdtemp(join(tmpdir(),'collector-problem-ui-')),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),collector=await browser.newPage();let broken=true,visits=0;
  await collector.route('**/*',route=>route.fulfill({contentType:'text/html',body:head+'<div id="siteTable">'+good+(broken?bad:'')+'</div><div class="commentarea"></div>'}));
- const app=createReaderServer({database:join(root,'reader.sqlite'),port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0},async open(){},async close(){},async manualSignIn(){},async navigate(url){visits++;await collector.goto(url);return collector;}}}});
+ const app=await createOnlineReaderServer({database:join(root,'reader.sqlite'),port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0},async open(){},async close(){},async manualSignIn(){},async navigate(url){visits++;await collector.goto(url);return collector;}}}});
  const origin=await app.listen();
  try{
   let state=await(await fetch(origin+'/api/state')).json();assert.equal(state.problems.groups,0);assert.equal((await(await fetch(origin+'/api/feed')).json()).posts.length,0);
@@ -48,7 +48,7 @@ test('an unrecognised whole listing and invalid pagination expose structural fac
 });
 
 test('archive response failures and invalid records are logged once with service/feed context while normal Stop stays quiet',async()=>{
- let mode:'error'|'bad'|'pending'='error';const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},archive:{fetch:async(_input,options)=>{
+ let mode:'error'|'bad'|'pending'='error';const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},archive:{fetch:async(_input,options)=>{
   if(mode==='error')return new Response('PRIVATE_RESPONSE',{status:500});
   if(mode==='pending')return new Promise<Response>((_resolve,reject)=>options!.signal!.addEventListener('abort',()=>reject(new Error('Stopped fixture')),{once:true}));
   const url=new URL(String(_input)),after=Date.parse(url.searchParams.get('after')!);return new Response(JSON.stringify({data:after<Date.parse('2020-01-01T00:00:01Z')?[{id:'abc',subreddit:'python',created_utc:1577836801,title:{private:'PRIVATE_ARCHIVE_BODY'}}]:[]}),{headers:{'Content-Type':'application/json'}});

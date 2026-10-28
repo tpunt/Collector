@@ -22,14 +22,15 @@ test('launch reuses one library, isolates clones, falls back from a busy default
  let first:Awaited<ReturnType<typeof launchCollector>>|undefined,second:typeof first;
  try{
   first=await launchCollector({...local,directory:join(directory,'first'),port,fallback:true,openBrowser:async url=>{opens.push(url);}});assert.equal(first.reused,false);assert.notEqual(Number(new URL(first.origin).port),port);
-  const initial=await(await fetch(first.origin+'/api/state')).json();assert(initial.canQuit);assert.equal(initial.job.requests.sessionTotal,0);assert.equal(initial.job.running,false);
-  const reused=await launchCollector({...local,directory:join(directory,'first'),openBrowser:async url=>{opens.push(url);}});assert(reused.reused);assert.equal(reused.origin,first.origin);assert.deepEqual(opens,[first.origin,first.origin]);
+  const initial=await(await fetch(first.origin+'/api/state')).json();assert(initial.canQuit);assert.equal(initial.job.requests.sessionTotal,0);assert.equal(initial.job.running,false);assert.equal(initial.network.offline,true);
+  const permission=await fetch(first.origin+'/api/offline',{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':initial.token},body:JSON.stringify({offline:false})});assert.equal(permission.status,200);
+  const reused=await launchCollector({...local,directory:join(directory,'first'),openBrowser:async url=>{opens.push(url);}});assert(reused.reused);assert.equal(reused.origin,first.origin);assert.deepEqual(opens,[first.origin,first.origin]);assert.equal((await(await fetch(first.origin+'/api/state')).json()).network.offline,false,'Reopening a running server keeps its current permission');
   const otherRoot=join(directory,'other checkout');await mkdir(otherRoot);await assert.rejects(launchCollector({...local,directory:join(directory,'first'),root:otherRoot}),/another checkout/);
   await assert.rejects(launchCollector({...local,directory:join(directory,'conflict'),port}),{code:'EADDRINUSE'});assert.equal(readInstance(join(directory,'conflict','reader.sqlite')),null);
   second=await launchCollector({...local,directory:join(directory,'second'),port:0});assert.notEqual(first.origin,second.origin);
   const appOrigin=first.origin;const wrong=await fetch(appOrigin+'/api/shutdown',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal(wrong.status,403);
   const quit=await fetch(appOrigin+'/api/shutdown',{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':initial.token},body:'{}'});assert.equal(quit.status,200);await first.closed;assert.equal(readInstance(join(directory,'first','reader.sqlite')),null);
-  first=await launchCollector({...local,directory:join(directory,'first'),port:0});const reopened=await(await fetch(first.origin+'/api/state')).json();assert.equal(reopened.job.requests.sessionTotal,0);assert.equal(reopened.job.running,false);
+  first=await launchCollector({...local,directory:join(directory,'first'),port:0});const reopened=await(await fetch(first.origin+'/api/state')).json();assert.equal(reopened.job.requests.sessionTotal,0);assert.equal(reopened.job.running,false);assert.equal(reopened.network.offline,true,'Relaunching after Quit requires permission again');
   await assert.rejects(launchCollector({...local,directory:join(directory,'build failure'),build:async()=>{throw new Error('Injected build failure');}}),/Injected build failure/);assert.equal(readInstance(join(directory,'build failure','reader.sqlite')),null);
  }finally{await first?.stop();await second?.stop();occupied.closeAllConnections();await new Promise<void>(resolve=>occupied.close(()=>resolve()));await rm(directory,{recursive:true,force:true});}
 });

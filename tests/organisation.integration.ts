@@ -3,12 +3,12 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {chromium} from 'playwright';
 import {browserLaunchOptions} from '../src/browser-options.ts';
-import {createReaderServer} from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDVQAAAAASUVORK5CYII=','base64');
 const record=(id:string)=>({id,subreddit:'aww',title:'Organise '+id,body:'Saved caption',permalink:`/r/aww/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'organise',observedAt:1800000000000,media:['Image' as const],attachments:[{kind:'image' as const,url:'https://i.redd.it/organise.png'}]});
 test('tags combine with image/media filters; keyboard reading, bulk read and favourite-safe cleanup work entirely locally',async()=>{
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async()=>new Response(png,{headers:{'Content-Type':'image/png'}})}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async()=>new Response(png,{headers:{'Content-Type':'image/png'}})}});
  app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[record('aaa'),record('bbb'),record('ccc')]);
  for(const id of ['aaa','bbb','ccc'])await app.media.syncPost(id,'fixture',10,new AbortController().signal);
  await app.networkMode.change(true);const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
@@ -37,7 +37,7 @@ test('tags combine with image/media filters; keyboard reading, bulk read and fav
 });
 
 test('tag and bulk read routes require authentication, matching contexts and a confirmed, current library selection',async()=>{
- const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[record('aaa')]);const origin=await app.listen();
+ const app=await createOnlineReaderServer({database:':memory:',port:0});app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[record('aaa')]);const origin=await app.listen();
  try{
   const state=await(await fetch(origin+'/api/state')).json(),context=app.store.getPost('aaa')!.readContext;
   const post=(path:string,data:unknown,auth=true)=>fetch(origin+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json',...(auth?{'X-Reader-Token':state.token}:{})},body:JSON.stringify(data)});

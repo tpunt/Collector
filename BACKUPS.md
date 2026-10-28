@@ -59,9 +59,10 @@ rollback blocks library access and retains recovery material for the next
 startup. This handles application interruption; it is not a filesystem-wide
 power-loss atomicity guarantee. Browser profiles remain in place throughout.
 
-Offline mode remains a destination permission during successful restore,
-rollback and startup recovery. An unreadable permission fails closed to Offline
-mode. Successful replacement clears the old automatic collection-resume intent;
+Offline mode remains a destination permission during successful restore and
+rollback within the current server session. Every server start forces Offline
+mode on after recovery, regardless of the previous saved permission. An
+unreadable permission fails closed to Offline mode. Successful replacement clears the old automatic collection-resume intent;
 a failed replacement retains the original library's paused plan.
 
 Temporary plaintext staging and the live library are not encrypted at rest.

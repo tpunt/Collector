@@ -4,15 +4,15 @@ import assert from 'node:assert/strict';
 import {setTimeout as delay} from 'node:timers/promises';
 import {chromium} from 'playwright';
 import {browserLaunchOptions} from '../src/browser-options.ts';
-import {createReaderServer} from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 
 const record=(id:string,subreddit='aww',url='https://i.redd.it/shared.png')=>({id,subreddit,title:'Cleanup '+id,body:'Offline fixture',permalink:`/r/${subreddit}/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'storage-ui',observedAt:1800000000000,media:['Image' as const],attachments:[{kind:'image' as const,url}]});
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDVQAAAAASUVORK5CYII=','base64');
-async function settled(app:ReturnType<typeof createReaderServer>){const until=Date.now()+5000;while(app.jobs.state.running){if(Date.now()>until)throw new Error('Storage fixture did not settle');await delay(2);}}
+async function settled(app:Awaited<ReturnType<typeof createOnlineReaderServer>>){const until=Date.now()+5000;while(app.jobs.state.running){if(Date.now()>until)throw new Error('Storage fixture did not settle');await delay(2);}}
 
 test('storage UI previews and cancels deletion, keeps shared media and permanently excludes confirmed posts',async()=>{
- let requests=0;const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async()=>{requests++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});app.store.addSubreddit('aww');app.store.addSubreddit('python');const rows=[record('aaa'),record('bbb','python'),record('ccc','aww','https://i.redd.it/only.png')];app.store.importArchiveBatch(app.store.generation,rows);app.store.setRead('aaa',true);app.store.setRead('ccc',true);
+ let requests=0;const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async()=>{requests++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});app.store.addSubreddit('aww');app.store.addSubreddit('python');const rows=[record('aaa'),record('bbb','python'),record('ccc','aww','https://i.redd.it/only.png')];app.store.importArchiveBatch(app.store.generation,rows);app.store.setRead('aaa',true);app.store.setRead('ccc',true);
  const origin=await app.listen();app.jobs.syncMedia(['aww','python'],{resume:true});await settled(app);const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
   const page=await browser.newPage();await page.addInitScript(()=>Object.defineProperty(document,'visibilityState',{get:()=> 'hidden'}));await page.goto(origin);await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByRole('button',{name:'Manage storage',exact:true}).click();
@@ -26,7 +26,7 @@ test('storage UI previews and cancels deletion, keeps shared media and permanent
 });
 
 test('preview aborts downloads; confirmation and fresh contents are required, and compaction warnings do not block file cleanup',async()=>{
- let requests=0,aborts=0;const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async(_url,options)=>{requests++;if(String(_url).includes('fast.png'))return new Response(png,{headers:{'Content-Type':'image/png'}});return new Promise<Response>((_resolve,reject)=>options?.signal?.addEventListener('abort',()=>{aborts++;reject(new Error('Stopped fixture download'));},{once:true}));}}});app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[record('aaa'),record('bbb','aww','https://i.redd.it/fast.png')]);app.store.setRead('aaa',true);app.store.setRead('bbb',true);const origin=await app.listen();
+ let requests=0,aborts=0;const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async(_url,options)=>{requests++;if(String(_url).includes('fast.png'))return new Response(png,{headers:{'Content-Type':'image/png'}});return new Promise<Response>((_resolve,reject)=>options?.signal?.addEventListener('abort',()=>{aborts++;reject(new Error('Stopped fixture download'));},{once:true}));}}});app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[record('aaa'),record('bbb','aww','https://i.redd.it/fast.png')]);app.store.setRead('aaa',true);app.store.setRead('bbb',true);const origin=await app.listen();
  try{
   const token=(await(await fetch(origin+'/api/state')).json()).token;
   const post=async(path:string,data:unknown)=>{const response=await fetch(origin+'/api/storage/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token},body:JSON.stringify(data)});return{status:response.status,data:await response.json()};};

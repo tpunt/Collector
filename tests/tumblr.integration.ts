@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {setTimeout as delay} from 'node:timers/promises';
 import {chromium} from 'playwright';
 import {browserLaunchOptions} from '../src/browser-options.ts';
-import {createReaderServer} from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 import {readTumblrListing,readTumblrPost} from '../src/tumblr.ts';
 import {ReaderStore} from '../src/store.ts';
@@ -12,7 +12,7 @@ import {readFile,rm} from 'node:fs/promises';
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDVQAAAAASUVORK5CYII=','base64');
 const article=(id:string,full=false)=>`<article data-post-id="${id}" data-timestamp="1700000000"><a class="permalink" href="https://staff.tumblr.com/post/${id}/">Post</a><h2>Tumblr ${id}</h2><div class="post-content"><p>${full?'Complete Tumblr body including the rest of the text.':'Listing excerpt.'}</p><img src="https://64.media.tumblr.com/fixture-${id}-one.png"><img src="https://64.media.tumblr.com/fixture-${id}-two.png"></div>${full?'':'<a href="https://staff.tumblr.com/post/'+id+'/">Keep reading</a>'}<footer><a>Like</a></footer></article>`;
 const html=(body:string)=>`<!doctype html><html><head><title>Staff</title></head><body><main>${body}</main></body></html>`;
-async function settle(app:ReturnType<typeof createReaderServer>){const until=Date.now()+15000;while(app.jobs.state.running){if(Date.now()>until)throw new Error('Tumblr sync did not settle');await delay(5);}}
+async function settle(app:Awaited<ReturnType<typeof createOnlineReaderServer>>){const until=Date.now()+15000;while(app.jobs.state.running){if(Date.now()>until)throw new Error('Tumblr sync did not settle');await delay(5);}}
 
 test('public Tumblr extraction reads ordered full attachments, binds identities and refuses unknown dates, hidden galleries and access gates',async()=>{
  const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
@@ -32,7 +32,7 @@ test('public Tumblr extraction reads ordered full attachments, binds identities 
 
 test('mixed Tumblr posts save hosted images and video while disclosing a separate online player; image/video filters restrict the displayed attachments',async()=>{
  const video=await readFile(new URL('./fixtures/media.mp4',import.meta.url));let downloads=0;
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async input=>{downloads++;return new Response(String(input).endsWith('.mp4')?video:png,{headers:{'Content-Type':String(input).endsWith('.mp4')?'video/mp4':'image/png'}});}}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async input=>{downloads++;return new Response(String(input).endsWith('.mp4')?video:png,{headers:{'Content-Type':String(input).endsWith('.mp4')?'video/mp4':'image/png'}});}}});
  app.store.addSubreddit('tumblr:staff');app.store.importArchiveBatch(app.store.generation,[{id:'tumblr:staff:77777',subreddit:'tumblr:staff',permalink:'https://staff.tumblr.com/post/77777/',title:'Mixed attachments',body:'Hosted media and a separate online video',created:{epochMs:1700000000000,precisionMs:1000},observedAt:Date.now(),source:'archive',exportId:'mixed-fixture',media:['Text','Image','Video'],outbound:'https://www.youtube.com/embed/abcDEF12345',attachments:[{kind:'image',url:'https://64.media.tumblr.com/mixed.png',collection:{id:'tumblr:staff:77777',index:0,total:2}},{kind:'video',url:'https://va.media.tumblr.com/mixed.mp4',collection:{id:'tumblr:staff:77777',index:1,total:2}}]}]);
  const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
@@ -54,7 +54,7 @@ test('Tumblr sync pages history, saves full text and every attachment before suc
   const url=new URL(route.request().url());if(url.hostname!=='staff.tumblr.com')return route.abort();
   const id=url.pathname.match(/\/post\/([0-9]+)/)?.[1];return route.fulfill({contentType:'text/html',body:html(id?article(id,true):url.pathname==='/page/2'?article('12344'):article('12345')+'<a href="/page/2">Older</a>')});
  });
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts,async open(_limit,mode){assert.equal(mode,'tumblr');},async close(){},async manualSignIn(){assert.fail('Public Tumblr does not sign into Reddit');},async navigate(url,signal){signal?.throwIfAborted();navigations++;counts.released++;await collector.goto(url);return collector;}}},media:{fetch:async()=>{downloads++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts,async open(_limit,mode){assert.equal(mode,'tumblr');},async close(){},async manualSignIn(){assert.fail('Public Tumblr does not sign into Reddit');},async navigate(url,signal){signal?.throwIfAborted();navigations++;counts.released++;await collector.goto(url);return collector;}}},media:{fetch:async()=>{downloads++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
  const origin=await app.listen();
  try{
   const state=await(await fetch(origin+'/api/state')).json();const response=await fetch(origin+'/api/sources',{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':state.token},body:JSON.stringify({platform:'tumblr',name:'staff',historyMonths:0})});assert.equal(response.status,200);await settle(app);
@@ -75,7 +75,7 @@ test('Tumblr sync pages history, saves full text and every attachment before suc
 test('Offline mode pauses a Tumblr page without advancing its checkpoint and automatically resumes it with saved media retained',async()=>{
  const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),page=await browser.newPage();let blocked=true,atSecondPage=false,downloads=0;
  await page.route('**/*',route=>{const url=new URL(route.request().url()),id=url.pathname.match(/\/post\/([0-9]+)/)?.[1];return route.fulfill({contentType:'text/html',body:html(id?article(id,true):url.pathname==='/page/2'?article('12344'):article('12345')+'<a href="/page/2">Older</a>')});});
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0},async open(){},async close(){},async manualSignIn(){},async navigate(url,signal){
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0},async open(){},async close(){},async manualSignIn(){},async navigate(url,signal){
   if(blocked&&url.endsWith('/page/2')){atSecondPage=true;await new Promise<void>((_resolve,reject)=>signal!.addEventListener('abort',()=>reject(new Error('Paused fixture navigation')),{once:true}));}
   signal?.throwIfAborted();await page.goto(url);return page;
  }}},media:{fetch:async()=>{downloads++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});

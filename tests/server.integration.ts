@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createReaderServer } from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import { ArchiveImporter } from '../src/archive.ts';
 import { Readable } from 'node:stream';
 test('loopback server rejects cross-origin writes and requires a per-launch token; Clear leaves no stale feed',async()=>{
-  const app=createReaderServer({database:':memory:',port:0});const origin=await app.listen();
+  const app=await createOnlineReaderServer({database:':memory:',port:0});const origin=await app.listen();
   try{
     assert.equal((await fetch(origin+'/api/clear',{method:'POST'})).status,403);
     assert.equal((await fetch(origin+'/api/state',{headers:{Origin:'https://evil.test'}})).status,403);
@@ -19,7 +19,7 @@ test('loopback server rejects cross-origin writes and requires a per-launch toke
 
 test('feed removal requires explicit confirmation and refresh is scoped to subscribed selected feeds',async()=>{
   const visited:string[]=[];
-  const app=createReaderServer({database:':memory:',port:0,jobs:{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){visited.push(url);return {} as any;}},readListing:async(_page,name)=>({account:'fixture_user',posts:[],ordinary:[],unknownTime:false,omissions:0,next:null,empty:true,signature:name})}});
+  const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){visited.push(url);return {} as any;}},readListing:async(_page,name)=>({account:'fixture_user',posts:[],ordinary:[],unknownTime:false,omissions:0,next:null,empty:true,signature:name})}});
   const now=Date.now();app.store.addSource({name:'python',lowerMs:now-1000},now);app.store.addSource({name:'aww',lowerMs:now-1000},now);
   const origin=await app.listen();
   try{
@@ -36,7 +36,7 @@ test('feed removal requires explicit confirmation and refresh is scoped to subsc
 
 test('scoped Clear requires confirmation, deletes exclusive and superseded media, and keeps shared media and other feeds',async()=>{
  const {RequestQueue}=await import('../src/request-gate.ts'),{stat}=await import('node:fs/promises');
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async()=>new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}})}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async()=>new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}})}});
  const record=(name:string,id:string,url:string)=>({id,subreddit:name,title:'Clear fixture '+id,permalink:`/r/${name}/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'clear-api',observedAt:1800000000000,media:['Image' as const],attachments:[{kind:'image' as const,url}]});
  app.store.addSource({name:'aww',historyMonths:3});app.store.addSubreddit('python');
  app.store.importArchiveBatch(app.store.generation,[record('aww','abc','https://i.redd.it/exclusive.png'),record('aww','def','https://i.redd.it/shared.png'),record('python','ghi','https://i.redd.it/shared.png')]);
@@ -56,7 +56,7 @@ test('scoped Clear requires confirmation, deletes exclusive and superseded media
 test('scoped Clear aborts the selected sync without restoring late posts or discarding another queued feed',async()=>{
  let release!:(listing:any)=>void,started=false;const visits:string[]=[];
  const listing=(name:string)=>{const id=name==='aww'?'abc':'def';return{account:'fixture_user',posts:[{id,subreddit:name,title:name+' queued fixture',permalink:`/r/${name}/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'live',observedAt:Date.now(),body:'Complete fixture body',media:['Text']}],ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:id};};
- const app=createReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){visits.push(url);return{}as any;}},readListing:async(_page,name)=>{if(name==='aww'){started=true;return new Promise(resolve=>{release=resolve;});}return listing(name)as any;}}});app.store.addSubreddit('aww');app.store.addSubreddit('python');const origin=await app.listen();
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){visits.push(url);return{}as any;}},readListing:async(_page,name)=>{if(name==='aww'){started=true;return new Promise(resolve=>{release=resolve;});}return listing(name)as any;}}});app.store.addSubreddit('aww');app.store.addSubreddit('python');const origin=await app.listen();
  try{
   const {token}=await(await fetch(origin+'/api/state')).json()as any;const post=(path:string,data:unknown)=>fetch(origin+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token},body:JSON.stringify(data)});
   await post('sync',{});const deadline=Date.now()+3000;while(!started){if(Date.now()>deadline)throw new Error('Fixture did not start');await new Promise(resolve=>setTimeout(resolve,2));}
@@ -69,7 +69,7 @@ test('scoped Clear aborts the selected sync without restoring late posts or disc
 test('post deletion requires confirmation and never restores the post through refresh, archive import or Clear',async()=>{
  const {RequestQueue}=await import('../src/request-gate.ts'),{stat}=await import('node:fs/promises');let downloads=0,visits=0;
  const records=['abc','def'].map(id=>({id,subreddit:'python',title:id==='abc'?'Spam fixture':'Keep fixture',body:'Complete fixture body',permalink:`/r/python/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'live' as const,observedAt:Date.now(),media:[id==='abc'?'Image' as const:'Text' as const],attachments:id==='abc'?[{kind:'image' as const,url:'https://i.redd.it/spam-fixture.png'}]:[]}));
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(){visits++;return{}as any;}},readListing:async()=>({account:'fixture_user',posts:records,ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:'fixture-abc-def'})},media:{fetch:async()=>{downloads++;return new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}});}}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(){visits++;return{}as any;}},readListing:async()=>({account:'fixture_user',posts:records,ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:'fixture-abc-def'})},media:{fetch:async()=>{downloads++;return new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}});}}});
  app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,records.map(row=>({...row,source:'archive',exportId:'delete-api'})));const origin=await app.listen();
  try{
   const {token}=await(await fetch(origin+'/api/state')).json()as any,post=(path:string,data:unknown,auth=true)=>fetch(origin+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json',...(auth?{'X-Reader-Token':token}:{})},body:JSON.stringify(data)});
@@ -86,7 +86,7 @@ test('post deletion requires confirmation and never restores the post through re
 test('deleting an actively read post rejects its late discussion without stopping another queued post',async()=>{
  let release!:(value:any)=>void,started!:()=>void;const began=new Promise<void>(resolve=>{started=resolve;});
  const discussion=(id:string)=>({topLink:null,snapshot:{id:'snapshot-'+id,postId:id,source:'live' as const,capturedAt:null,observedAt:Date.now(),sort:'best',body:'Saved discussion',availability:'available' as const,comments:[],omitted:0,sample:'Fixture'}});
- const app=createReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(){return{}as any;}},readAccount:async()=> 'fixture_user',readThread:async(_page,id)=>{if(id==='t3_abc'){started();return new Promise(resolve=>{release=resolve;});}return discussion(id);}}});app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,['abc','def'].map(id=>({id,subreddit:'python',title:id+' thread fixture',permalink:`/r/python/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'delete-thread',observedAt:Date.now(),body:'Complete fixture body',media:['Text']})));const origin=await app.listen();
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(){return{}as any;}},readAccount:async()=> 'fixture_user',readThread:async(_page,id)=>{if(id==='t3_abc'){started();return new Promise(resolve=>{release=resolve;});}return discussion(id);}}});app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,['abc','def'].map(id=>({id,subreddit:'python',title:id+' thread fixture',permalink:`/r/python/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'delete-thread',observedAt:Date.now(),body:'Complete fixture body',media:['Text']})));const origin=await app.listen();
  try{
   const {token}=await(await fetch(origin+'/api/state')).json()as any,post=(path:string,data:unknown)=>fetch(origin+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token},body:JSON.stringify(data)});
   await post('thread',{id:'abc'});await began;await post('thread',{id:'def'});assert.equal((await post('delete-post',{id:'abc',confirm:true})).status,200);release(discussion('t3_abc'));
@@ -96,7 +96,7 @@ test('deleting an actively read post rejects its late discussion without stoppin
 });
 
 test('expanding a per-feed limit automatically fetches; contraction never fetches or prunes',async()=>{
- const visited:string[]=[];const app=createReaderServer({database:':memory:',port:0,jobs:{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){visited.push(url);return{url:()=>url}as any;}},readListing:async()=>({account:'fixture_user',posts:[{id:'t3_abc',subreddit:'python',title:'History post',permalink:'/r/python/comments/abc/',created:{epochMs:1700000000000,precisionMs:1000},source:'live',observedAt:Date.now(),body:'Complete fixture body',media:['Text']}],ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:'t3_abc'})}});
+ const visited:string[]=[];const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(url){visited.push(url);return{url:()=>url}as any;}},readListing:async()=>({account:'fixture_user',posts:[{id:'t3_abc',subreddit:'python',title:'History post',permalink:'/r/python/comments/abc/',created:{epochMs:1700000000000,precisionMs:1000},source:'live',observedAt:Date.now(),body:'Complete fixture body',media:['Text']}],ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:'t3_abc'})}});
  app.store.addSubreddit('python');const origin=await app.listen();
  try{
   const {token}=await(await fetch(origin+'/api/state')).json()as{token:string};const update=(months:number,fetchHistory=false)=>fetch(origin+'/api/history',{method:'POST',headers:{'X-Reader-Token':token,'Content-Type':'application/json'},body:JSON.stringify({name:'python',months,fetch:fetchHistory})});
@@ -110,7 +110,7 @@ test('expanding a per-feed limit automatically fetches; contraction never fetche
 
 test('Refresh saves previously imported media, GET endpoints never download it, and per-post download routes are absent',async()=>{
  const {RequestQueue}=await import('../src/request-gate.ts');let downloads=0;
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(){return{}as any;}},readListing:async()=>({account:'fixture_user',posts:[],ordinary:[],unknownTime:false,omissions:0,next:null,empty:true,signature:'empty-head'})},media:{fetch:async()=>{downloads++;return new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}});}}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(){return{}as any;}},readListing:async()=>({account:'fixture_user',posts:[],ordinary:[],unknownTime:false,omissions:0,next:null,empty:true,signature:'empty-head'})},media:{fetch:async()=>{downloads++;return new Response(new Uint8Array([1,2,3]),{headers:{'Content-Type':'image/png'}});}}});
  app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[{id:'abc',subreddit:'aww',title:'Unvisited imported media',permalink:'/r/aww/comments/abc/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'offline-api-fixture',observedAt:Date.now(),media:['Image'],attachments:[{kind:'image',url:'https://i.redd.it/fixture.png'}]}]);
  const origin=await app.listen();
  try{
@@ -123,7 +123,7 @@ test('Refresh saves previously imported media, GET endpoints never download it, 
 });
 
 test('storage settings reject invalid caps, preserve content when lowered, and block collection before any website request',async()=>{
- let visits=0;const app=createReaderServer({database:':memory:',port:0,jobs:{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(){visits++;return {}as any;}},readListing:async()=>({account:'fixture_user',posts:[],ordinary:[],unknownTime:false,omissions:0,next:null,empty:true,signature:'empty-head'})}});
+ let visits=0;const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){},async close(){},async manualSignIn(){},async navigate(){visits++;return {}as any;}},readListing:async()=>({account:'fixture_user',posts:[],ordinary:[],unknownTime:false,omissions:0,next:null,empty:true,signature:'empty-head'})}});
  app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,['abc','def'].map(id=>({id,subreddit:'aww',title:'Stored '+id,body:'x'.repeat(500_000),permalink:`/r/aww/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'storage-api',observedAt:Date.now(),media:['Text' as const]})));
  const origin=await app.listen();
  try{
@@ -138,7 +138,7 @@ test('storage settings reject invalid caps, preserve content when lowered, and b
 });
 
 test('read intent order survives delayed requests and old read contexts cannot cross a scoped clear',async()=>{
- const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');const row={id:'order',subreddit:'python',title:'Read order',body:'Saved text',permalink:'/r/python/comments/order/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'read-order',observedAt:1800000000000,media:['Text' as const]};app.store.importArchiveBatch(app.store.generation,[row]);
+ const app=await createOnlineReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');const row={id:'order',subreddit:'python',title:'Read order',body:'Saved text',permalink:'/r/python/comments/order/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'read-order',observedAt:1800000000000,media:['Text' as const]};app.store.importArchiveBatch(app.store.generation,[row]);
  const origin=await app.listen(),{token}=await(await fetch(origin+'/api/state')).json(),client='00000000-0000-4000-8000-000000000001';
  const read=(sequence:number,value:boolean,context:string)=>fetch(origin+'/api/read',{method:'POST',headers:{'Content-Type':'application/json','X-Reader-Token':token},body:JSON.stringify({id:'order',read:value,client,sequence,context})});
  try{

@@ -6,7 +6,7 @@ import {browserLaunchOptions} from '../src/browser-options.ts';
 import {discoverMedia} from '../src/media-discovery.ts';
 import {galleryFixture} from './fixtures/gallery.ts';
 import {completeCollection} from '../src/media-reference.ts';
-import {createReaderServer} from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 import {archivePost} from '../src/archive.ts';
 import {mkdtemp,rm} from 'node:fs/promises';
@@ -32,12 +32,12 @@ test('native gallery controls expose every ordered original, including more than
 test('an archived gallery saves every file and caption without Reddit, and all files remain viewable after restart with external traffic blocked',async()=>{
  const directory=await mkdtemp(join(tmpdir(),'reader-offline-gallery-ui-')),database=join(directory,'reader.sqlite'),mediaDirectory=join(directory,'media');let downloads=0;
  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDVQAAAAASUVORK5CYII=','base64');
- let app=createReaderServer({database,port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){assert.fail('A complete archive gallery needs no Reddit page');},async close(){},async manualSignIn(){},async navigate(){assert.fail('A complete archive gallery needs no Reddit page');}}},media:{directory:mediaDirectory,fetch:async()=>{downloads++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
+ let app=await createOnlineReaderServer({database,port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:5000},async open(){assert.fail('A complete archive gallery needs no Reddit page');},async close(){},async manualSignIn(){},async navigate(){assert.fail('A complete archive gallery needs no Reddit page');}}},media:{directory:mediaDirectory,fetch:async()=>{downloads++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
  const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
   app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[archivePost({id:'abc',subreddit:'aww',title:'Offline gallery fixture',created_utc:1700000000,is_gallery:true,url:'https://www.reddit.com/gallery/abc',gallery_data:{items:[{media_id:'one',caption:'First caption'},{media_id:'two',caption:'Second caption'}]},media_metadata:{one:{status:'valid',e:'Image',s:{u:'https://i.redd.it/one.png'}},two:{status:'valid',e:'Image',s:{u:'https://i.redd.it/two.png'}}}},'aww','offline-gallery',Date.now())]);
   await app.jobs.archiveMedia(['t3_abc'],new AbortController().signal);assert.equal(downloads,2);await app.close();
-  app=createReaderServer({database,port:0,media:{directory:mediaDirectory,fetch:async()=>assert.fail('Reading cached gallery files must not use a website')}});
+  app=await createOnlineReaderServer({database,port:0,media:{directory:mediaDirectory,fetch:async()=>assert.fail('Reading cached gallery files must not use a website')}});
   const origin=await app.listen(),page=await browser.newPage(),external:string[]=[];
   await page.route('**/*',route=>{if(!route.request().url().startsWith(origin)){external.push(route.request().url());return route.abort();}return route.continue();});
   await page.goto(origin);const card=page.locator('.post-card');await card.getByText('2/2 files saved offline · Scroll horizontally to view all',{exact:true}).waitFor();assert.equal(await card.getByText('Not downloaded',{exact:true}).count(),0);assert.equal(await card.locator('img').count(),2);

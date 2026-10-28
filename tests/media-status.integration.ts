@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {chromium} from 'playwright';
 import {browserLaunchOptions} from '../src/browser-options.ts';
-import {createReaderServer} from '../src/server.ts';
+import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
 import type {PostObservation} from '../src/domain.ts';
 import {readFile} from 'node:fs/promises';
@@ -12,7 +12,7 @@ test('offline pills distinguish media states while unsupported videos keep an on
  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aDVQAAAAASUVORK5CYII=','base64');
  let downloads=0,release!:()=>void;
  const held=new Promise<void>(resolve=>{release=resolve;});
- const app=createReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async()=>{downloads++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async()=>{downloads++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
  const goal=app.store.addSource({name:'aww'}),cached='https://i.redd.it/cached.png';
  const names=['Saved media','Pending media','Retryable media','External video','Partial media','Unknown status','Text only'];
  const records:PostObservation[]=names.map((title,index)=>({id:'t3_'+['a','b','c','d','e','u','t'][index],subreddit:'aww',title,body:'Stored post body',permalink:`/r/aww/comments/${['a','b','c','d','e','u','t'][index]}/`,created:{epochMs:1700000000000-index,precisionMs:1000},source:'archive',exportId:'media-status',observedAt:1800000000000,media:[index===3?'Video':index===6?'Text':'Image'],attachments:index===3||index===6?[]:[{kind:'image',url:index===0||index===4?cached:`https://i.redd.it/${index}.png`},...(index===4?[{kind:'image' as const,url:'https://i.redd.it/missing.png'}]:[])],outbound:index===3?'https://www.youtube.com/watch?v=fixture':undefined}));
@@ -48,7 +48,7 @@ test('offline pills distinguish media states while unsupported videos keep an on
 
 test('known online players play in isolated frames, retain offline warnings and never change the download ledger',async()=>{
  let downloads=0;
- const app=createReaderServer({database:':memory:',port:0,media:{fetch:async()=>{downloads++;throw new Error('No offline download expected');}}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,media:{fetch:async()=>{downloads++;throw new Error('No offline download expected');}}});
  app.store.addSubreddit('aww');
  const links=['http://www.youtube.com/watch?v=M7lc1UVf-VE&autoplay=1','https://vimeo.com/76979871/abc123','https://example.com/video'];
  const titles=['YouTube online fixture','Vimeo online fixture','Unknown provider fixture'];

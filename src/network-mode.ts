@@ -25,8 +25,10 @@ export class NetworkMode {
   private media:MediaCache;
   constructor(store:ReaderStore,network:RequestQueue,jobs:ReaderJobs,archive:ArchiveFetcher,media:MediaCache){
     this.store=store;this.network=network;this.jobs=jobs;this.archive=archive;this.media=media;
-    const saved=store.getSetting('offlineMode');network.setOffline(saved!==null&&saved!==false);
-    if(!network.offline&&store.getSetting('offlineResume'))this.save(this.empty());
+    // Network permission lasts only for this server session. Apply the gate
+    // before publishing an address or allowing a reader/player to connect.
+    const saved=store.getSetting('offlineMode');network.setOffline(true);
+    store.setSettings(saved===true?{offlineMode:true}:{offlineMode:true,offlineResume:this.empty()});
   }
   private empty():PausedWork{return{generation:this.store.generation,feeds:[],tasks:[],archive:null,signIn:false};}
   private source(task:PausedTask){return'subreddit'in task?task.subreddit:this.store.getPost(task.postId)?.subreddit;}
