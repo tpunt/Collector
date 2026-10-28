@@ -35,7 +35,7 @@ test('a failed filtered feed is retried even without data changes, and successfu
    if(new URL(route.request().url()).searchParams.get('q')==='missing'&&failFeed){failedRequests++;return route.abort('failed');}return route.continue();
   });
   await page.goto(origin);await page.waitForResponse(response=>response.url()===origin+'/api/state');await page.getByRole('heading',{name:'No feeds yet',exact:true}).waitFor();
-  await page.getByRole('searchbox',{name:'Search stored posts',exact:true}).fill('missing');await page.getByRole('button',{name:'Search',exact:true}).click();await page.getByRole('alert').waitFor();await page.waitForResponse(response=>response.url()===origin+'/api/state');
+  await page.getByRole('searchbox',{name:'Search stored posts',exact:true}).fill('missing');await page.getByRole('alert').waitFor();await page.waitForResponse(response=>response.url()===origin+'/api/state');
   assert.equal(await page.getByRole('alert').count(),1,'Successful state polling must not conceal a failed feed read');
   failFeed=false;await page.getByRole('alert').waitFor({state:'hidden',timeout:6000});assert(failedRequests>=1);assert.equal(app.jobs.state.requests.sessionTotal,0);
  }finally{await browser.close();await app.close();}
@@ -49,7 +49,7 @@ test('a failed obsolete filter request cannot add an error after a newer view ha
    if(new URL(route.request().url()).searchParams.get('q')==='obsolete'){entered();await gate;await route.abort('failed');}else await route.continue();
   });
   await page.goto(origin);await page.getByRole('heading',{name:'No feeds yet',exact:true}).waitFor();const search=page.getByRole('searchbox',{name:'Search stored posts',exact:true});
-  await search.fill('obsolete');await page.getByRole('button',{name:'Search',exact:true}).click();await began;await search.fill('current');await page.getByRole('button',{name:'Search',exact:true}).click();await page.waitForResponse(response=>new URL(response.url()).searchParams.get('q')==='current');
+  await search.fill('obsolete');await began;await search.fill('current');await page.waitForResponse(response=>new URL(response.url()).searchParams.get('q')==='current');
   const failed=page.waitForEvent('requestfailed',request=>new URL(request.url()).searchParams.get('q')==='obsolete');release();await failed;
   await page.waitForResponse(response=>response.url()===origin+'/api/state');assert.equal(await page.getByRole('alert').count(),0);assert.equal(app.jobs.state.requests.sessionTotal,0);
  }finally{release();await browser.close();await app.close();}
