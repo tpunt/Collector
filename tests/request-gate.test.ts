@@ -22,6 +22,14 @@ test('stopping the request queue cancels already queued releases', async () => {
   assert.equal(ran, 1);
 });
 
+test('Offline mode aborts the network signal, rejects new releases and cannot revive old queued requests',async()=>{
+  const queue=new RequestQueue({intervalMs:0});let release!:()=>void,started!:()=>void,calls=0;
+  const began=new Promise<void>(resolve=>{started=resolve;}),hold=new Promise<void>(resolve=>{release=resolve;});
+  const first=queue.run(async()=>{calls++;started();await hold;}),signal=queue.signal;
+  const old=queue.run(async()=>{calls++;});await began;queue.setOffline(true);assert(signal.aborted);await assert.rejects(queue.run(async()=>{calls++;}),/Offline mode/);
+  queue.setOffline(false);release();await first;await assert.rejects(old,{name:'AbortError'});assert.equal(calls,1);assert.equal(queue.signal.aborted,false);await queue.run(async()=>{calls++;});assert.equal(calls,2);
+});
+
 test('production pacing samples fresh 4–6 second gaps after each response, without overlapping requests',async()=>{
   let now=0,active=0;const samples=[0,1,0.25,0.75,0.5];
   const queue=new RequestQueue({fromCompletion:true,random:()=>samples.shift()!,clock:{now:()=>now,sleep:async ms=>{now+=ms;}}});

@@ -23,6 +23,9 @@ import {LibraryBackups,recoverLibraryRestore} from './library-backup.ts';
 import {cleanupCriteria,cleanupPreview,storageBreakdown} from './library-storage.ts';
 import type {CleanupCriteria} from './library-storage.ts';
 import {claimInstance} from './instance.ts';
+import {NetworkMode} from './network-mode.ts';
+import {onlinePlayer} from './online-player.ts';
+import {WebSocketServer} from 'ws';
 
 export function createReaderServer(options: { database?: string; port?: number; root?:string; onShutdown?:()=>Promise<void>; backup?:{workFactor?:number}; archive?:{fetch?:typeof fetch}; jobs?: JobDependencies; media?: Partial<Pick<MediaDependencies,'directory'|'fetch'|'maxBytes'|'maxRequests'>> } = {}) {
   const database=options.database??databasePath;
@@ -46,6 +49,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
     if(importer.progress?.state==='running')throw new Error('Stop the file import before fetching an archive');
     jobs.assertCanQueue(resume);
   },onRunStart:()=>jobs.beginArchiveRun(),saveMedia:(ids,signal)=>jobs.archiveMedia(ids,signal)});
+  const networkMode=new NetworkMode(store,network,jobs,archive,media);
   const feedStatus=(name:string)=>archive.active?.subreddit===name&&archive.active.state==='running'?'syncing' as const:jobs.feedStatus(name)==='idle'?media.feedStatus(name):jobs.feedStatus(name);
   const token = randomBytes(32).toString('hex');
   const dist = fileURLToPath(new URL('../dist/', import.meta.url));
@@ -55,7 +59,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
   const readIntents=new Map<string,number>();
   const cleanupPlans=new Map<string,{ids:string[];criteria:CleanupCriteria;revision:number;mediaRevision:number;expires:number}>();
   const cleanupPaths=new Set(['/api/remove','/api/clear-source','/api/delete-post','/api/clear','/api/backup/create','/api/restore/commit','/api/storage/preview','/api/storage/delete','/api/storage/compact']);
-  const stopPaths=new Set(['/api/pause','/api/import/stop','/api/archive/stop','/api/sign-in/finish']);
+  const stopPaths=new Set(['/api/pause','/api/import/stop','/api/archive/stop','/api/sign-in/finish','/api/offline']);
   const assertCleanupIdle=(path:string)=>{if(cleaningContent&&!stopPaths.has(path))throw new Error('Content cleanup is still in progress. Try again when it finishes.');};
   const quiesce=async(reason:string)=>{await archive.close(reason);await importer.close();await jobs.close(reason);await media.close();};
   const json = (res: ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value)); };
@@ -74,7 +78,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
   const handle = async (req:IncomingMessage, res:ServerResponse) => {
     res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Referrer-Policy','no-referrer');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src https://www.youtube-nocookie.com https://player.vimeo.com; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ${origin.replace(/^http:/,'ws:')}; frame-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
     try {
       if (req.headers.host !== new URL(origin).host || (req.headers.origin && req.headers.origin !== origin) || req.headers['sec-fetch-site'] === 'cross-site') { json(res, { error: 'Local requests only' },403); return; }
       const url = new URL(req.url ?? '/', origin);
@@ -110,6 +114,11 @@ export function createReaderServer(options: { database?: string; port?: number; 
         if(cleansContent)cleaningContent=true;
         try {
         switch (url.pathname) {
+          case '/api/offline': {
+            if(typeof data.offline!=='boolean')throw new Error('Choose Offline mode on or off');
+            if(!data.offline&&cleaningContent)throw new Error('Wait for local maintenance before resuming online work');
+            json(res,{network:await networkMode.change(data.offline)});return;
+          }
           case '/api/shutdown': {
             if(!options.onShutdown)throw new Error('Stop this app from its terminal');
             if(!shutdownRequested){shutdownRequested=true;res.once('finish',()=>setImmediate(()=>void options.onShutdown!().catch(error=>console.error('Unable to stop Collector:',error.message))));}
@@ -140,7 +149,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             finally{res.removeListener('close',cancel);}return;
           }
           case '/api/restore/commit': {
-            if(data.confirm!==true)throw new Error('Confirm library replacement first');await quiesce('Paused to restore a backup; Resume to continue');replacement=backups.restore(String(data.id));
+            if(data.confirm!==true)throw new Error('Confirm library replacement first');networkMode.cancel();await quiesce('Paused to restore a backup; Resume to continue');replacement=backups.restore(String(data.id));
             try{await replacement;await importer.clear();cleanupPlans.clear();json(res,{ok:true,warning:store.compactionWarning});}finally{replacement=null;}return;
           }
           case '/api/restore/discard': await backups.discard(String(data.id));json(res,{ok:true});return;
@@ -193,7 +202,9 @@ export function createReaderServer(options: { database?: string; port?: number; 
           }
           case '/api/archive/stop': {
             const job=archive.active;
-            if(typeof data.id==='string'&&job?.id!==data.id)throw new Error('This archive fetch is no longer active');
+            const paused=typeof data.id==='string'&&networkMode.status.offline?store.archiveFetch(data.id):null;
+            if(typeof data.id==='string'&&job?.id!==data.id&&!paused)throw new Error('This archive fetch is no longer active');
+            if(job||paused)networkMode.cancel({source:(job??paused)!.subreddit});
             await archive.stop();if(job){media.stop(job.subreddit);await jobs.stopSource(job.subreddit,'Archive stopped by user');}
             json(res,{ok:true});return;
           }
@@ -214,18 +225,20 @@ export function createReaderServer(options: { database?: string; port?: number; 
             const expanded=historyRank(months)>historyRank(previous.months);
             const shouldFetch=expanded;
             if(shouldFetch)jobs.assertCanQueue(true);
+            if(changed&&network.offline)networkMode.cancel({source:name});
             if(changed&&jobs.feedStatus(name)!=='idle')await jobs.stopSource(name,expanded?'History limit expanded':'History limit reduced; collected posts retained');
             const result=store.setHistoryLimit(name,months);
             const targetId=shouldFetch?store.ensureHistoryTarget(name):result.targetId;
             if(targetId&&shouldFetch)jobs.syncFeeds([name],{heads:result.headTargetId?[result.headTargetId]:[],history:[targetId]});
             json(res,{...result,targetId,queued:Boolean(targetId&&jobs.hasTarget(targetId))});return;
           }
-          case '/api/pause': if (typeof data.name === 'string') {await archive.stop(subredditName(data.name));media.stop(subredditName(data.name));await jobs.stopSource(data.name);} else {await archive.stop();jobs.pause();} break;
-          case '/api/sign-in': await jobs.signIn(); break;
+          case '/api/pause': networkMode.cancel(typeof data.name==='string'?{source:subredditName(data.name)}:{});if (typeof data.name === 'string') {await archive.stop(subredditName(data.name));media.stop(subredditName(data.name));await jobs.stopSource(data.name);} else {await archive.stop();jobs.pause();} break;
+          case '/api/sign-in': if(archive.running)throw new Error('Pause archive collection before signing in');await jobs.signIn(); break;
           case '/api/sign-in/finish': await jobs.finishSignIn(); break;
           case '/api/remove': {
             if (data.confirm !== true) throw new Error('Confirm feed removal first');
             const name = subredditName(String(data.name));
+            networkMode.cancel({source:name});
             await archive.stop(name,'Feed removed; stored archive progress kept');
             media.stop(name);
             await jobs.stopSource(name, 'Feed removed');await importer.stopSource(name);store.removeSubreddit(name); break;
@@ -234,6 +247,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             if(data.confirm!==true)throw new Error('Confirm clearing subreddit data first');
             const name=subredditName(String(data.name));
             if(!store.followedSources().includes(name))throw new Error('Choose a subscribed subreddit');
+            networkMode.cancel({source:name});
             await archive.stop(name,'Archive data cleared');
             await jobs.stopSource(name,'Data cleared');await importer.clearSource(name);
             const keys=store.ownedMediaKeys(name);
@@ -243,12 +257,13 @@ export function createReaderServer(options: { database?: string; port?: number; 
           case '/api/delete-post': {
             if(data.confirm!==true)throw new Error('Confirm deleting this post first');
             const id=postId(String(data.id));
+            networkMode.cancel({post:id});
             media.stopPost(id);await jobs.stopPost(id);
             const keys=store.deletePost(id),warning=store.compactionWarning;
             await media.clearPost(id,keys);json(res,{ok:true,warning});return;
           }
           case '/api/thread': jobs.thread(postId(String(data.id))); break;
-          case '/api/clear': await archive.stop(undefined,'Archive data cleared');jobs.pause('Content cleared');await importer.clear();store.clearContent();await media.clear();store.setSetting('imports',[]);json(res,{ok:true,warning:store.compactionWarning});return;
+          case '/api/clear': networkMode.cancel();await archive.stop(undefined,'Archive data cleared');jobs.pause('Content cleared');await importer.clear();store.clearContent();await media.clear();store.setSetting('imports',[]);json(res,{ok:true,warning:store.compactionWarning});return;
           case '/api/import/stop': importer.stop(); break;
           default: json(res,{error:'Not found'},404); return;
         }
@@ -256,13 +271,15 @@ export function createReaderServer(options: { database?: string; port?: number; 
         } finally {if(cleansContent)cleaningContent=false;}
       }
       if (req.method !== 'GET') { json(res,{error:'Method not allowed'},405); return; }
+      if(url.pathname==='/api/network/events'){json(res,{error:'WebSocket connection required'},426);return;}
+      if(url.pathname==='/online-player'){network.assertOnline();const player=onlinePlayer(url.searchParams.get('url')??'',token,origin);res.setHeader('Content-Security-Policy',player.csp);res.setHeader('Content-Type','text/html; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(player.body);return;}
       if(url.pathname==='/api/storage'){json(res,storageBreakdown(store,await media.inventory()));return;}
       if(url.pathname.startsWith('/api/backup/download/')){
         const file=backups.download(url.pathname.slice('/api/backup/download/'.length));
         res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':'attachment; filename="collector.tar.age"','Content-Length':file.bytes,'Cache-Control':'no-store'});
         await pipeline(createReadStream(file.path),res);return;
       }
-      if (url.pathname === '/api/state') { json(res,{ token, canQuit:Boolean(options.onShutdown), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
+      if (url.pathname === '/api/state') { json(res,{ token, network:networkMode.status, canQuit:Boolean(options.onShutdown), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name),offlinePaused:networkMode.status.offline&&networkMode.status.paused.feeds.includes(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
         storage:store.storage, import:importer.progress, imports:store.getSetting('imports') ?? [], account:store.getSetting('account') }); return; }
       if (url.pathname === '/api/feed') {
         const media = url.searchParams.get('media') ?? undefined;
@@ -288,8 +305,20 @@ export function createReaderServer(options: { database?: string; port?: number; 
     } catch (error) { if (!res.headersSent) json(res,{error:error instanceof Error ? error.message : 'Request failed'},400); else res.end(); }
   };
   const server=createServer((req,res)=>{const work=handle(req,res);requests.add(work);void work.finally(()=>requests.delete(work));});
+  const policySockets=new WebSocketServer({noServer:true,maxPayload:1024,perMessageDeflate:false});
+  server.on('upgrade',(req,socket,head)=>{
+    const onSocketError=()=>socket.destroy();socket.on('error',onSocketError);
+    try{
+      const url=new URL(req.url??'/',origin),client=url.searchParams.get('client')??'';
+      if(stopping||req.headers.host!==new URL(origin).host||req.headers.origin!==origin||req.headers['sec-fetch-site']==='cross-site'||url.pathname!=='/api/network/events'||url.searchParams.get('token')!==token||!/^[a-zA-Z0-9-]{1,80}$/.test(client)){
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n',()=>socket.destroy());return;
+      }
+      socket.removeListener('error',onSocketError);
+      policySockets.handleUpgrade(req,socket,head,webSocket=>networkMode.subscribe(client,webSocket));
+    }catch{socket.destroy();}
+  });
   server.requestTimeout = 60 * 60_000;
-  return { server, store, jobs, importer, media, archive, backups, async listen(port=options.port??Number(process.env.PORT??3210)) {
+  return { server, store, jobs, importer, media, archive, backups, networkMode, async listen(port=options.port??Number(process.env.PORT??3210)) {
     await media.initialize();
     await new Promise<void>((resolve,reject)=>{
       const fail=(error:Error)=>{server.removeListener('listening',ready);reject(error);};
@@ -300,6 +329,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
     origin=`http://127.0.0.1:${address.port}`;lease?.publish(origin);return origin;
   }, close() {return closing??=(async()=>{
     stopping=true;
+    networkMode.close();policySockets.close();
     const drained=new Promise<void>(resolve=>server.close(()=>resolve()));
     server.closeAllConnections();
     const failures:unknown[]=[];

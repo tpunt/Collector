@@ -222,6 +222,7 @@ export class MediaCache {
     return this.items(postId);
   }
   private assertCurrent(task: Task) {
+    this.options.queue.assertOnline();
     task.controller.signal.throwIfAborted();
     const post = this.store.getPost(task.postId);
     if (this.store.generation !== task.generation || this.store.sourceRevision(task.subreddit)!==task.revision || post?.availability !== 'available' || !post.attachments.some(item=>mediaKey(item)===mediaKey(task.reference))
@@ -237,7 +238,7 @@ export class MediaCache {
       this.assertCurrent(task);
       this.store.assertStorageAvailable();
       if(this.requests>=this.budget)throw new Error('Sync request budget reached; Resume to save remaining media.');
-      const signal=AbortSignal.any([task.controller.signal,AbortSignal.timeout(60*60_000)]);
+      const signal=AbortSignal.any([task.controller.signal,this.options.queue.signal,AbortSignal.timeout(60*60_000)]);
       this.requests++;
       const response=await (this.options.fetch??fetch)(url,{redirect:'manual',signal,headers:{Accept:accept}});
       if([301,302,303,307,308].includes(response.status)){

@@ -57,7 +57,7 @@ test('known online players play in isolated frames, retain offline warnings and 
  const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
   const headers=(await fetch(origin)).headers,csp=headers.get('content-security-policy')!;
-  assert.equal(headers.get('referrer-policy'),'no-referrer');assert(csp.includes("connect-src 'self'"));assert(csp.includes("script-src 'self'"));assert.match(csp,/frame-src https:\/\/www\.youtube-nocookie\.com https:\/\/player\.vimeo\.com;/);assert(!csp.includes('*'));
+  assert.equal(headers.get('referrer-policy'),'no-referrer');assert(csp.includes("connect-src 'self'"));assert(csp.includes("script-src 'self'"));assert(csp.includes("frame-src 'self'"));assert(!csp.includes('*'));
   const page=await browser.newPage(),requests:{url:string;referer:string|undefined}[]=[];
   const video=(await readFile(new URL('./fixtures/media.mp4',import.meta.url))).toString('base64');
   const players=['https://www.youtube-nocookie.com/embed/M7lc1UVf-VE?autoplay=0&playsinline=1','https://player.vimeo.com/video/76979871?h=abc123&autoplay=0'];
@@ -71,8 +71,8 @@ test('known online players play in isolated frames, retain offline warnings and 
   const card=(title:string)=>page.locator('.post-card').filter({has:page.getByRole('button',{name:title,exact:true})});
   for(let index=0;index<2;index++){
    const post=card(titles[index]!);await post.scrollIntoViewIfNeeded();await post.getByText('Not downloaded',{exact:true}).waitFor();
-   const iframe=post.locator('iframe');await iframe.waitFor();assert.equal(await iframe.getAttribute('src'),players[index]);assert.equal(await iframe.getAttribute('referrerpolicy'),'strict-origin-when-cross-origin');assert.equal(await iframe.getAttribute('sandbox'),'allow-scripts allow-same-origin allow-presentation');
-   const frame=page.frameLocator(`iframe[title="${index?'Vimeo':'YouTube'} player: ${titles[index]}"]`);
+   const iframe=post.locator('iframe');await iframe.waitFor();assert.equal(new URL((await iframe.getAttribute('src'))!,origin).searchParams.get('url'),players[index]);assert.equal(await iframe.getAttribute('referrerpolicy'),'strict-origin-when-cross-origin');assert.equal(await iframe.getAttribute('sandbox'),'allow-scripts allow-same-origin allow-presentation');
+   const frame=page.frameLocator(`iframe[title="${index?'Vimeo':'YouTube'} player: ${titles[index]}"]`).frameLocator('iframe');
    await frame.getByRole('button',{name:'Play fixture',exact:true}).click();await frame.getByRole('button',{name:'Playing',exact:true}).waitFor();
    assert(await frame.locator('video').evaluate((v:HTMLVideoElement)=>!v.paused));
    assert.equal(await post.getByText('Not downloaded',{exact:true}).count(),1);assert.equal(await post.getByRole('button',{name:'Copy local path',exact:true}).count(),0);await post.getByText('Online player · Requires internet · Not saved locally',{exact:true}).waitFor();assert.equal(await post.getByRole('link',{name:'Open original ↗',exact:true}).getAttribute('href'),links[index]!.replace(/^http:/,'https:'));

@@ -3,9 +3,11 @@ import type {StoredPost,MediaSyncState} from '../src/store.ts';
 import type {MediaItem} from '../src/media.ts';
 import {onlineEmbed} from '../src/online-embed.ts';
 import {MediaPreview} from './MediaPreview.tsx';
+import {ExternalLink,useNetworkMode} from './NetworkMode.tsx';
 
 /** Sync owns offline downloads. Known external players remain explicitly online. */
 export function PostMedia({post,syncing,revision,children}:{post:StoredPost;syncing:boolean;revision:number;children?:(controls:React.ReactNode)=>React.ReactNode}) {
+  const {offline}=useNetworkMode();
   const ref=useRef<HTMLDivElement>(null);
   const [visible,setVisible]=useState(false),[items,setItems]=useState<MediaItem[]>([]),[error,setError]=useState<{key:string;message:string}|null>(null),[sync,setSync]=useState<MediaSyncState|null>(null);
   const [loadedKey,setLoadedKey]=useState('');
@@ -56,7 +58,7 @@ export function PostMedia({post,syncing,revision,children}:{post:StoredPost;sync
   return <>{children?.(controls)}{hasMedia&&<div className="post-media" ref={ref} data-read-pending={!checked}>
     {(items.length>1||!post.mediaDiscoveryComplete)&&<p className="media-note">{post.mediaDiscoveryComplete?`${ready.length}/${items.length} files saved offline`:`${ready.length} files saved · Collection not fully discovered`}{ready.length>1?' · Scroll horizontally to view all':''}</p>}
     {ready.length>0&&<div className={'media-items '+(ready.length>1?'gallery':'')} role="group" aria-label={`${ready.length} saved media files`} tabIndex={ready.length>1?0:undefined}>{ready.map((item,index)=><figure key={item.key+':'+index}><MediaPreview kind={item.kind} url={item.url!} title={item.kind==='image'&&ready.length>1?`${post.title} — image ${index+1}`:post.title} caption={item.caption}/>{item.caption&&<figcaption>{item.caption}</figcaption>}</figure>)}</div>}
-    {embed&&<div className="online-media"><p className="media-note">Online player · Requires internet · Not saved locally</p><iframe key={embed.url} src={embed.url} title={`${embed.provider} player: ${post.title}`} loading="lazy" referrerPolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; fullscreen; picture-in-picture" allowFullScreen/></div>}
-    {(!checked||localError||notDownloaded)&&<p className="media-note">{note}{original&&<a href={original} target="_blank" rel="noreferrer" title="Requires internet; this media is not stored locally">Open original ↗</a>}</p>}
+    {embed&&<div className="online-media"><p className="media-note">{offline?'Offline mode · Online player paused':'Online player · Requires internet · Not saved locally'}</p>{!offline&&<iframe key={embed.url} src={'/online-player?url='+encodeURIComponent(embed.url)} title={`${embed.provider} player: ${post.title}`} loading="lazy" referrerPolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; fullscreen; picture-in-picture" allowFullScreen/>}</div>}
+    {(!checked||localError||notDownloaded)&&<p className="media-note">{note}{original&&<ExternalLink href={original} target="_blank" rel="noreferrer" title="Requires internet; this media is not stored locally">Open original ↗</ExternalLink>}</p>}
   </div>}</>;
 }

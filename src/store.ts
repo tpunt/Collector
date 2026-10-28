@@ -125,7 +125,7 @@ export class ReaderStore {
   async snapshot(path:string){await backup(this.db,path);}
   /** Called only with a fully authenticated, schema-validated staged backup. */
   replaceFrom(path:string,portable=true){
-    const generation=this.generation,revision=this.contentRevision,limit=this.storageLimit;
+    const generation=this.generation,revision=this.contentRevision,limit=this.storageLimit,offline=this.getSetting('offlineMode');
     this.db.prepare('ATTACH DATABASE ? AS restored').run(path);
     try{
       this.transaction(()=>{
@@ -137,7 +137,7 @@ export class ReaderStore {
         rebuildSearch(this.db);
         this.db.prepare("UPDATE metadata SET value=? WHERE key='generation'").run(Math.max(generation,this.generation)+1);
         this.db.prepare("UPDATE metadata SET value=? WHERE key='content_revision'").run(revision+1);
-        if(portable){this.db.exec("DELETE FROM settings WHERE key IN ('account','accessPause')");this.setStorageLimit(limit);}
+        if(portable){this.db.exec("DELETE FROM settings WHERE key IN ('account','accessPause','offlineResume')");this.setStorageLimit(limit);if(offline!==null)this.setSetting('offlineMode',offline);else this.db.prepare("DELETE FROM settings WHERE key='offlineMode'").run();}
       });
       recoverInterruptedWork(this.db);
     }finally{this.db.exec('DETACH DATABASE restored');}

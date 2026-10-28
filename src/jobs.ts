@@ -19,6 +19,7 @@ export interface MediaSyncDriver {
   stopPost?(id:string):void;
   reconcile?():Promise<void>;
 }
+export type PausedTask={kind:'media-source'|'body-source';subreddit:string}|{kind:'thread'|'media'|'body';postId:string};
 type Work = ({ id: string; kind: 'target'; targetId: string; head: boolean; deadline: number; generation: number } |
   { id: string; kind: 'thread' | 'media' | 'body'; postId: string; deadline: number; generation: number } |
   {id:string;kind:'media-source'|'body-source';subreddit:string;deadline:number;generation:number}) & {requestBaseline?:number};
@@ -58,7 +59,10 @@ export class ReaderJobs {
   private onPause: () => void;
   private discover: typeof discoverMedia;
   private attemptedBodies=new Set<string>();
+  private network:RequestQueue|undefined;
+  private signingIn:Promise<void>|null=null;
   constructor(store: ReaderStore, dependencies: JobDependencies = {}) {
+    this.network=dependencies.network;
     this.store = store;this.mediaSync=dependencies.mediaSync??null;
     this.onPause = dependencies.onPause ?? (() => {});
     this.discover = dependencies.discoverMedia ?? discoverMedia;
@@ -85,6 +89,7 @@ export class ReaderJobs {
     message: this.message, requests: { ...this.browser.counts, sessionTotal: this.completedRequests + (this.browserOpen ? this.browser.counts.released : 0) },
     accessPause: this.store.getSetting<{reason: string; notBefore: number | null}>('accessPause') }; }
   private allowed(explicitResume: boolean) {
+    this.network?.assertOnline();
     if (this.manual) throw new Error('Finish the manual sign-in before collecting');
     if (this.stopping && this.pumping) throw new Error('The previous operation is stopping. Try again when it has closed.');
     const pause = this.store.getSetting<{reason: string; notBefore: number | null}>('accessPause');
@@ -95,6 +100,22 @@ export class ReaderJobs {
     }
   }
   attachMedia(media:MediaSyncDriver|null){this.mediaSync=media;}
+  /** Capture only work in flight/queued now, never older manually paused scans. */
+  offlineWork(){
+    const work=[...this.queue,...(this.active?[this.active]:[])];
+    const feeds=[...new Set([...this.feedRuns.keys(),...work.filter(item=>item.kind==='target').map(item=>this.sourceOf(item)).filter((name):name is string=>Boolean(name))])];
+    const tasks:PausedTask[]=work.flatMap<PausedTask>(item=>item.kind==='target'||item.kind!=='thread'&&feeds.includes(this.sourceOf(item)??'')?[]:'postId'in item?[{kind:item.kind,postId:item.postId}]:[{kind:item.kind,subreddit:item.subreddit}]);
+    return{feeds,tasks,signIn:this.manual};
+  }
+  resumeOfflineTasks(tasks:PausedTask[]){
+    this.assertCanQueue();this.stopping=false;const deadline=Date.now()+60*60_000;
+    for(const task of tasks){
+      if('subreddit'in task){if(!this.store.followedSources().includes(task.subreddit))continue;}
+      else{const post=this.store.getPost(task.postId);if(!post||task.kind!=='thread'&&!this.store.followedSources().includes(post.subreddit))continue;}
+      this.queue.push({...task,id:randomUUID(),deadline,generation:this.store.generation});
+    }
+    this.start();
+  }
   private totalRequests(){return this.completedRequests+(this.browserOpen?this.browser.counts.released:0)+(this.mediaSync?.status.requests??0);}
   private queueMediaSource(name:string,deadline:number){
     if(!this.mediaSync||this.queue.some(work=>work.kind==='media-source'&&work.subreddit===name))return;
@@ -206,7 +227,7 @@ export class ReaderJobs {
     for (const name of sources) this.store.pauseSource(name, reason);
     this.queue = []; this.message = reason;
     this.manual = false;
-    void this.closeBrowser();
+    void this.closeBrowser().catch(()=>{});
   }
   accessFailure(error: AccessError) {
     this.store.setSetting('accessPause', { reason: error.message, notBefore: error.notBefore });
@@ -235,12 +256,13 @@ export class ReaderJobs {
     if (this.pumping) throw new Error('Stop collection and wait for the browser to close first');
     this.allowed(true); this.manual = true; this.browserOpen = true;
     this.message = 'Sign in in the dedicated Chrome window, then Finish sign-in. Requests have random 4–6 second gaps after response readiness.';
-    try { await this.browser.manualSignIn(); }
+    try { this.signingIn=this.browser.manualSignIn();await this.signingIn; }
     catch (error) { this.pause(error instanceof Error ? error.message : 'Sign-in failed'); throw error; }
+    finally{this.signingIn=null;}
   }
   async finishSignIn() { this.pause('Sign-in browser closed. Resume collection to verify the saved account.'); await this.closeBrowser(); }
-  async close(reason='Application stopped; explicit Resume required') { this.pause(reason); await this.closeBrowser();await this.pumpDone; }
-  private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();this.pumpDone=this.pump(); } }
+  async close(reason='Application stopped; explicit Resume required') { this.pause(reason); await this.closeBrowser();await this.pumpDone;await this.signingIn?.catch(()=>{});await this.closeBrowser(); }
+  private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();this.pumpDone=this.pump();void this.pumpDone.catch(()=>{}); } }
   private async pump() {
     const startingRequests = this.totalRequests();
     try {
@@ -384,10 +406,12 @@ export class ReaderJobs {
         }
       }
     } finally {
-      await this.closeBrowser();
-      this.active = null; this.controller = null; this.pumping = false;
-      this.finishFeeds();
-      if (this.queue.length && !this.stopping) this.start();
+      try { await this.closeBrowser(); }
+      finally {
+        this.active = null; this.controller = null; this.pumping = false;
+        this.finishFeeds();
+        if (this.queue.length && !this.stopping) this.start();
+      }
     }
   }
 }

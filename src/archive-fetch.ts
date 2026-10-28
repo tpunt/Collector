@@ -76,8 +76,8 @@ export class ArchiveFetcher {
   }
   private async response(url: URL, signal: AbortSignal): Promise<unknown[]> {
     return this.deps.queue.run(async () => {
-      signal.throwIfAborted(); this.store.assertStorageAvailable(); this.requests++;
-      const response = await (this.deps.fetch ?? fetch)(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(60_000)]),
+      signal.throwIfAborted();this.deps.queue.assertOnline(); this.store.assertStorageAvailable(); this.requests++;
+      const response = await (this.deps.fetch ?? fetch)(url, { signal: AbortSignal.any([signal,this.deps.queue.signal, AbortSignal.timeout(60_000)]),
         redirect: 'manual', credentials: 'omit', headers: { Accept: 'application/json' } });
       if (response.status !== 200) {
         await response.body?.cancel();

@@ -12,6 +12,8 @@ export class RequestQueue {
   private tail: Promise<unknown> = Promise.resolve();
   private nextAllowedAt: number | null = null;
   private controller = new AbortController();
+  private access = new AbortController();
+  private offlineMode = false;
   private clock: Clock;
   private fromCompletion: boolean;
   private random: () => number;
@@ -27,6 +29,14 @@ export class RequestQueue {
     this.clock = options.clock ?? { now: () => performance.now(), sleep: async (ms, signal) => { await delay(ms, undefined, { signal }); } };
   }
   stop(): void { this.controller.abort(); }
+  get offline(){return this.offlineMode;}
+  get signal(){return this.access.signal;}
+  assertOnline(){if(this.offlineMode)throw new Error('Offline mode is on; external requests are paused');}
+  setOffline(value:boolean){
+    if(value===this.offlineMode)return;
+    this.offlineMode=value;
+    if(value)this.access.abort();else this.access=new AbortController();
+  }
   private sampleInterval(): number {
     if (typeof this.intervalMs === 'number') return this.intervalMs;
     const [min,max] = this.intervalMs;
@@ -36,7 +46,8 @@ export class RequestQueue {
     return min + sample * (max - min);
   }
   private async waitUntil(deadline:number, signal?:AbortSignal):Promise<void> {
-    const combined = signal ? AbortSignal.any([signal,this.controller.signal]) : this.controller.signal;
+    const combined = AbortSignal.any([...(signal?[signal]:[]),this.controller.signal,this.access.signal]);
+    this.assertOnline();
     combined.throwIfAborted();
     while (this.clock.now() < deadline) await this.clock.sleep(deadline-this.clock.now(),combined);
     combined.throwIfAborted();
@@ -46,10 +57,14 @@ export class RequestQueue {
     await this.waitUntil(this.clock.now()+this.sampleInterval(),signal);
   }
   run<T>(release: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if(this.offlineMode)return Promise.reject(new Error('Offline mode is on; external requests are paused'));
+    const access=this.access.signal;
     const task = this.tail.then(async () => {
+      access.throwIfAborted();this.assertOnline();
       signal?.throwIfAborted();
       this.controller.signal.throwIfAborted();
       if (this.nextAllowedAt !== null) await this.waitUntil(this.nextAllowedAt,signal);
+      access.throwIfAborted();this.assertOnline();
       const startedAt = this.clock.now();
       this.released++;
       try { return await release(); }

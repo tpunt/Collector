@@ -8,6 +8,7 @@ import { HISTORY_OPTIONS } from '../src/history-window.ts';
 import type { HistoryMonths } from '../src/history-window.ts';
 import { PostMedia } from './Media.tsx';
 import {PostOrigin} from './PostOrigin.tsx';
+import {ExternalLink,NetworkModeProvider,useNetworkController} from './NetworkMode.tsx';
 import {REDDIT_PLATFORM,redditOrigin} from './reddit-presentation.ts';
 import {useReadTracking} from './read-tracking.ts';
 import {BackupSettings} from './BackupSettings.tsx';
@@ -20,7 +21,7 @@ import type {Author} from '../src/authors.ts';
 import type { StorageStatus } from '../src/storage-limit.ts';
 import './style.css';
 
-type Feed = FeedSource & { offline:OfflineMediaCounts; status: 'idle' | 'queued' | 'syncing' | 'stopping' };
+type Feed = FeedSource & { offline:OfflineMediaCounts;offlinePaused:boolean; status: 'idle' | 'queued' | 'syncing' | 'stopping' };
 type State = {token:string;canQuit:boolean;favourites:{posts:number;users:Author[]};sources:string[];feeds:Feed[];targets:HistoryTarget[];storage:StorageStatus;stats:{posts:number;snapshots:number;mediaPosts:number;contentRevision:number;databaseBytes:number};
   job:{running:boolean;manual:boolean;queued:number;subreddit:string|null;message:string;requests:{released:number;suppressed:number;sessionTotal:number};accessPause:{reason:string;notBefore:number|null}|null};
   media:{pending:number;bytes:number;requests:number;revision:number};import:{state:string;lines:number;accepted:number;omitted:number;bytes:number;reason:string|null}|null;imports:unknown[];archives:(ArchiveFetchState&{offline:OfflineMediaCounts})[];account:string|null};
@@ -29,7 +30,7 @@ const date=(ms:number)=>new Date(ms).toLocaleDateString(undefined,{day:'numeric'
 const timestamp=(ms:number|null)=>ms===null?'Never':new Date(ms).toLocaleString(undefined,{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'});
 const syncing=(feed:Feed)=>feed.status!=='idle';
 const syncLabel=(feed:Feed)=>feed.sync.state==='incomplete'?'Resume':'Sync';
-const syncState=(feed:Feed)=>feed.status==='syncing'?'Syncing':feed.status==='queued'?'Queued':feed.status==='stopping'?'Stopping':
+const syncState=(feed:Feed)=>feed.offlinePaused?'Paused offline':feed.status==='syncing'?'Syncing':feed.status==='queued'?'Queued':feed.status==='stopping'?'Stopping':
   feed.sync.state==='complete'?'Saved offline':feed.sync.state==='gaps'?'Completed with gaps':feed.sync.state==='incomplete'?'Incomplete':'Not synced';
 const storedSize=(bytes:number)=>bytes>=GB?`${(bytes/GB).toLocaleString(undefined,{maximumFractionDigits:2})} GB`:`${(bytes/1_000_000).toFixed(1)} MB`;
 type Collection='all'|'posts'|'users';
@@ -73,6 +74,7 @@ function App() {
   const [readClient]=useState(()=>crypto.randomUUID());
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[modal,setModal]=useState<'source'|'history'|'import'|'clear'|'settings'|'storage'|null>(null),[removeFeed,setRemoveFeed]=useState<string|null>(null);
   const [loadErrors,setLoadErrors]=useState({state:'',feed:''}),retryFeed=useRef(false);
+  const [modeBusy,setModeBusy]=useState(false);
   const visibleError=error||loadErrors.state||loadErrors.feed;
   const [clearFeed,setClearFeed]=useState<string|null>(null);
   const [postToDelete,setPostToDelete]=useState<Pick<StoredPost,'id'|'title'|'subreddit'>|null>(null);
@@ -83,6 +85,7 @@ function App() {
   const [archiveMode,setArchiveMode]=useState<'fetch'|'file'>('fetch'),[archiveName,setArchiveName]=useState('');
   const [archiveFrom,setArchiveFrom]=useState(()=>new Date(historyLowerBound(1,Date.now())!).toISOString().slice(0,10)),[archiveTo,setArchiveTo]=useState(()=>new Date().toISOString().slice(0,10));
   const token=useRef(''),feedVersion=useRef(0),threadId=useRef<string|null>(null),pollVersion=useRef(''),stateVersion=useRef(0),currentQuery=useRef('');
+  const network=useNetworkController(token.current,stopped),offline=network.offline;
   const feedChange=useRef(0),renderedFeedChange=useRef(0);
   const favouriteUsers=state?.favourites?.users??[],selectedAuthor=favouriteUsers.find(author=>authorKey(author)===userFilter);
   const params=new URLSearchParams();if(source)params.set('subreddit',source);if(media)params.set('media',media);if(search)params.set('q',search);
@@ -201,9 +204,9 @@ function App() {
     catch(error){setError((error as Error).message);}finally{setBusy(false);}
   }
   if(stopped)return <div className="empty-state" role="status"><h1>Collector stopped</h1><p>Close this tab, or relaunch Collector.command to keep reading.</p></div>;
-  const feedSync=(feed:Feed)=>syncing(feed)?<button className="button stop" disabled={busy||feed.status==='stopping'} onClick={()=>void action('pause',{name:feed.name})} aria-label={'Stop r/'+feed.name}>{feed.status==='stopping'?'Stopping…':'Stop'}</button>:
-    <button className="button" disabled={busy||Boolean(state?.job.manual)} onClick={()=>void action('sync',{names:[feed.name]})} aria-label={syncLabel(feed)+' r/'+feed.name}>{syncLabel(feed)}</button>;
-  return <div className="app">
+  const feedSync=(feed:Feed)=>network.status?.offline&&network.status.paused.feeds.includes(feed.name)?<button className="button stop" disabled={busy} onClick={()=>void action('pause',{name:feed.name})} aria-label={'Cancel resume for r/'+feed.name}>Cancel resume</button>:syncing(feed)?<button className="button stop" disabled={busy||feed.status==='stopping'} onClick={()=>void action('pause',{name:feed.name})} aria-label={'Stop r/'+feed.name}>{feed.status==='stopping'?'Stopping…':'Stop'}</button>:
+    <button className="button" disabled={busy||offline||Boolean(state?.job.manual)} onClick={()=>void action('sync',{names:[feed.name]})} aria-label={syncLabel(feed)+' r/'+feed.name}>{syncLabel(feed)}</button>;
+  return <NetworkModeProvider value={network}><div className="app">
     <aside className="sidebar">
       <a className="brand" href="#posts" onClick={()=>filterSource('')}><span className="brand-mark" aria-hidden="true">C</span> Collector</a>
       <nav aria-label="Main navigation"><button className={'nav-item '+(view==='feeds'?'active':'')} title="Add, remove and sync feed subscriptions" onClick={()=>navigate('feeds')}>Manage feeds</button><hr className="sidebar-divider"/><button className={'nav-item '+(view==='posts'&&collection==='posts'?'active':'')} onClick={()=>openFavourites('favourites')}>Favourite posts <span>{state?.favourites?.posts??0}</span></button><button className={'nav-item '+(view==='posts'&&collection==='users'?'active':'')} onClick={()=>openFavourites('users')}>Favourite users <span>{favouriteUsers.length}</span></button></nav>
@@ -222,7 +225,7 @@ function App() {
           {source&&!feeds.some(feed=>feed.name===source)&&<button className={'source-item '+(view==='posts'?'selected':'')} aria-pressed={view==='posts'} onClick={()=>selectSource(source)}>{redditOrigin(source).feed.label} (stored)</button>}
         </div></section>
       </div>
-      <div className="sidebar-bottom"><dl className="sidebar-stats" aria-label="Storage and requests">
+      <div className="sidebar-bottom"><div className="offline-mode-control"><span>Offline mode</span><button type="button" className="offline-mode-toggle" role="switch" aria-label="Offline mode" aria-checked={Boolean(network.status?.offline&&!network.status.changing)} aria-busy={modeBusy||network.status?.changing||false} disabled={modeBusy||!network.connected||network.status?.changing} onClick={()=>{const value=!network.status?.offline;if(value)network.beginOffline();setModeBusy(true);void action('offline',{offline:value}).finally(()=>setModeBusy(false));}}><span/></button></div><dl className="sidebar-stats" aria-label="Storage and requests">
         <div className={'storage-stat '+(state?.storage.full?'at-cap':'')}><dt>Stored</dt><dd><span>{(state?.storage.percentUsed??0).toFixed(2)}% used</span><small>{storedSize(state?.storage.usedBytes??0)} / {storedSize(state?.storage.limitBytes??10*GB)}</small></dd></div>
         <div title="Collection requests: a fresh random 4–6 second gap after each response is ready. Online players stream separately."><dt>Request spacing</dt><dd>4–6 s</dd></div>
         <div title="Collection requests only; excludes online video players"><dt>Session requests</dt><dd>{(state?.job.requests.sessionTotal??0).toLocaleString()}</dd></div>
@@ -234,10 +237,12 @@ function App() {
       <header className="page-header"><div><h1>{view==='feeds'?'Feeds':collection==='posts'?'Favourite posts':collection==='users'?'Favourite users':source?redditOrigin(source).feed.label:'All feeds'}</h1><span className="header-meta">{view==='feeds'?`${feeds.length} subscribed feeds`:collection==='posts'?`${state?.favourites?.posts??0} favourite ${(state?.favourites?.posts??0)===1?'post':'posts'}`:collection==='users'?`${favouriteUsers.length} favourite ${favouriteUsers.length===1?'user':'users'}`:`${count.toLocaleString()} stored posts`}</span></div>
         <div className="header-actions">{state?.job.manual?<button className="button primary" disabled={busy} onClick={()=>void action('sign-in/finish')}>Finish sign-in</button>:<>
           {activeFeeds.length>0&&<button className="button stop" disabled={busy} onClick={()=>void action('pause')}>Stop all</button>}
-          {view==='posts'&&currentFeed?feedSync(currentFeed):<button className="button" disabled={busy||!feeds.length||feeds.every(syncing)} onClick={()=>void action('sync')}>Sync all</button>}
-        </>}{view==='feeds'&&<button className="button primary" onClick={()=>{setName('');setMonths(1);setModal('source');}}>＋ Add feed</button>}</div>
+          {view==='posts'&&currentFeed?feedSync(currentFeed):<button className="button" disabled={busy||offline||!feeds.length||feeds.every(syncing)} onClick={()=>void action('sync')}>Sync all</button>}
+        </>}{view==='feeds'&&<button className="button primary" disabled={offline} onClick={()=>{setName('');setMonths(1);setModal('source');}}>＋ Add feed</button>}</div>
       </header>
       {visibleError&&!modal&&!removeFeed&&!clearFeed&&!postToDelete&&<div className="notice error" role="alert"><span>{visibleError}</span><button aria-label="Dismiss error" onClick={()=>{setError('');setLoadErrors({state:'',feed:''});}}>×</button></div>}
+      {network.status?.offline&&<div className="notice offline-notice" role="status"><span>{network.status.changing?'Pausing external connections…':'Offline mode is on. External requests are paused.'}{!network.status.changing&&(network.status.paused.feeds.length>0||network.status.paused.threads>0||network.status.paused.archive||network.status.paused.signIn)&&' Paused work resumes when Offline mode is turned off.'}</span>{(network.status.paused.feeds.length>0||network.status.paused.threads>0||network.status.paused.archive||network.status.paused.signIn)&&<button className="button" disabled={busy||network.status.changing} onClick={()=>void action('pause')}>Cancel automatic resume</button>}</div>}
+      {!network.status?.offline&&network.status?.message&&network.status.message!=='Online'&&<div className="notice" role="status">{network.status.message}</div>}
       {state?.storage.full&&<div className="notice"><span>Storage cap reached. Existing content is kept; increase the cap to continue collecting.</span><button className="button" onClick={openSettings}>Storage settings</button></div>}
       {state?.job.accessPause&&<div className="notice">{state.job.accessPause.reason}<button className="button" disabled={busy} onClick={()=>void action('sync')}>Resume sync</button></div>}
       {archiveActive&&<div className="sync-bar archive-sync" role="status"><span className="status-dot pulse"/><span>r/{archiveActive.subreddit} · {archiveActive.phase==='media'?'Saving archive media':'Fetching archive'} · {archiveActive.observed.toLocaleString()} posts checked</span><button onClick={openArchives}>Progress</button><button disabled={busy} onClick={()=>void action('archive/stop',{id:archiveActive.id})}>Stop archive</button></div>}
@@ -265,7 +270,7 @@ function App() {
             {feed.sync.reason&&!syncing(feed)&&<p className="feed-issue"><span aria-hidden="true">!</span>{feed.sync.reason}</p>}
             {feed.sync.state==='incomplete'&&!syncing(feed)&&<p className="feed-resume-note">Resume continues unfinished history and retries pending or failed downloads.</p>}
             <footer className="feed-card-footer">
-              <div className="feed-history-settings"><div className="feed-history-controls"><label htmlFor={'history-'+feed.name}>History limit</label><select id={'history-'+feed.name} aria-label={'History limit for r/'+feed.name} aria-describedby="feed-history-note" value={feed.historyMonths} disabled={busy||state?.job.manual} onChange={e=>void action('history',{name:feed.name,months:Number(e.target.value)})}>{HISTORY_OPTIONS.map(option=><option key={option.months} value={option.months}>{option.label}</option>)}</select>
+              <div className="feed-history-settings"><div className="feed-history-controls"><label htmlFor={'history-'+feed.name}>History limit</label><select id={'history-'+feed.name} aria-label={'History limit for r/'+feed.name} aria-describedby="feed-history-note" value={feed.historyMonths} disabled={busy||offline||state?.job.manual} onChange={e=>void action('history',{name:feed.name,months:Number(e.target.value)})}>{HISTORY_OPTIONS.map(option=><option key={option.months} value={option.months}>{option.label}</option>)}</select>
               </div></div>
               <div className="feed-row-actions" role="group" aria-label={'Manage r/'+feed.name}><button disabled={busy} aria-label={'Clear data for r/'+feed.name} onClick={()=>{setError('');setClearFeed(feed.name);}}>Clear data</button><button disabled={busy} aria-label={'Remove r/'+feed.name} onClick={()=>setRemoveFeed(feed.name)}>Remove feed</button></div>
             </footer>
@@ -289,7 +294,7 @@ function App() {
     {thread&&<div className="drawer-backdrop" onClick={()=>{setThread(null);threadId.current=null;}}><section className="thread-drawer" role="dialog" aria-modal="true" aria-label="Thread details" onClick={e=>e.stopPropagation()}>
       <div className="drawer-top"><span><PostOrigin origin={redditOrigin(thread.post.subreddit)}/> · {date(thread.post.createdMs)}</span><button autoFocus aria-label="Close thread" onClick={()=>{setThread(null);threadId.current=null;}}>×</button></div><h2>{thread.post.title}</h2>
       <div className="thread-author">{authorControls(thread.post)}<FavouriteButton active={thread.post.favourite} label={(thread.post.favourite?'Unfavourite post: ':'Favourite post: ')+thread.post.title} disabled={busy} onClick={()=>void togglePostFavourite(thread.post)}/></div>
-      <div className="thread-actions"><button className="button" disabled={busy} onClick={()=>void action('thread',{id:thread.post.id})}>{thread.snapshot?'Re-read discussion':'Read discussion in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setPostToDelete(thread.post);}}>Delete post</button><a href={thread.post.permalink} target="_blank" rel="noreferrer">Open original post ↗</a></div>
+      <div className="thread-actions"><button className="button" disabled={busy||offline} onClick={()=>void action('thread',{id:thread.post.id})}>{thread.snapshot?'Re-read discussion':'Read discussion in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setPostToDelete(thread.post);}}>Delete post</button><ExternalLink href={thread.post.permalink} target="_blank" rel="noreferrer">Open original post ↗</ExternalLink></div>
       <PostMedia post={thread.post} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===thread.post.subreddit)&&syncing(feeds.find(feed=>feed.name===thread.post.subreddit)!))}>
         {mediaControls=><div className="badges thread-media-badges">{thread.post.media.map(type=><span key={type}>{type}</span>)}{mediaControls}</div>}
       </PostMedia>
@@ -308,10 +313,10 @@ function App() {
         <p className="muted">{storedSize(state?.storage.usedBytes??0)} stored. Includes the database and saved media. Browser profile and temporary files are excluded.</p>
         <p className="muted">Sync and imports pause at the cap. Lowering it keeps existing content. Raise it, then Resume to continue saving.</p>
         <div className="settings-save"><button className="button primary" disabled={busy||!state}>Save cap</button>{storageSaved&&<span role="status">Saved</span>}</div>
-      </form><p><button className="button" disabled={busy} onClick={()=>{setError('');setModal('storage');}}>Manage storage</button></p><BackupSettings token={token.current} setBusy={setBusy} changed={async(replaced)=>{await loadState();if(!replaced)return;setSource('');setMedia('');setSearch('');setSearchScope('both');setReadFilter('all');setReadBefore(Date.now());setThread(null);threadId.current=null;}}/><div className="settings-account"><p>{state?.account?'Signed in as '+state.account:'Account verified on collection'}</p><button className="button" disabled={busy} onClick={()=>void action(state?.job.manual?'sign-in/finish':'sign-in')}>{state?.job.manual?'Finish sign-in':'Open sign-in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setModal('clear');}}>Clear collected content</button></div>{state?.canQuit&&<div className="settings-account"><p>Quit stops collection and preserves saved files and checkpoints.</p><button className="button" disabled={busy} onClick={()=>void quit()}>Quit app</button></div>}</>}
+      </form><p><button className="button" disabled={busy} onClick={()=>{setError('');setModal('storage');}}>Manage storage</button></p><BackupSettings token={token.current} setBusy={setBusy} changed={async(replaced)=>{await loadState();if(!replaced)return;setSource('');setMedia('');setSearch('');setSearchScope('both');setReadFilter('all');setReadBefore(Date.now());setThread(null);threadId.current=null;}}/><div className="settings-account"><p>{state?.account?'Signed in as '+state.account:'Account verified on collection'}</p><button className="button" disabled={busy||(offline&&!state?.job.manual)} onClick={()=>void action(state?.job.manual?'sign-in/finish':'sign-in')}>{state?.job.manual?'Finish sign-in':'Open sign-in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setModal('clear');}}>Clear collected content</button></div>{state?.canQuit&&<div className="settings-account"><p>Quit stops collection and preserves saved files and checkpoints.</p><button className="button" disabled={busy} onClick={()=>void quit()}>Quit app</button></div>}</>}
       {modal==='source'&&<form onSubmit={e=>{e.preventDefault();void action('sources',{name,historyMonths:months}).then(result=>{if(result){setModal(null);setName('');}});}}>
         <label>Subreddit<input required placeholder="e.g. python or r/aww" value={name} onChange={e=>setName(e.target.value)}/></label><label>History limit<select value={months} onChange={e=>setMonths(Number(e.target.value) as HistoryMonths)}>{HISTORY_OPTIONS.map(option=><option key={option.months} value={option.months}>{option.label}</option>)}</select></label>
-        <p className="muted">Saves recent posts, history and supported media locally, up to 60 minutes and 120 requests per session. Stop anytime and Resume from saved progress.</p><button className="button primary" disabled={busy}>Add &amp; sync</button>
+        <p className="muted">Saves recent posts, history and supported media locally, up to 60 minutes and 120 requests per session. Stop anytime and Resume from saved progress.</p><button className="button primary" disabled={busy||offline}>Add &amp; sync</button>
       </form>}
       {modal==='history'&&<><p className="muted">Saved page checkpoints are diagnostic history. Use Sync or Resume on Feeds to collect posts and save their media together. A finished page scan alone does not mean the feed is saved offline.</p>
         {state?.targets.map(target=><article className="history-item" key={target.id}><div><strong>r/{target.subreddit}</strong><span className="badge">{target.status==='done'?'Scan finished':target.status}</span><p>{target.lowerMs===null?'As far back as available':'Since '+date(target.lowerMs)} · {target.observedCount} encountered · {target.omissionCount} omitted</p>{target.oldestMs&&<p>Oldest: {timestamp(target.oldestMs)}</p>}<p className="muted">{target.reason??'Waiting'}{target.continuation?' · Checkpoint saved':''}</p></div></article>)}{!state?.targets.length&&<p>No collection history yet.</p>}</>}
@@ -322,8 +327,8 @@ function App() {
           <div className="archive-dates"><label>From (optional)<input type="date" value={archiveFrom} max={archiveTo||undefined} onInput={e=>setArchiveFrom(e.currentTarget.value)}/></label><label>To<input type="date" required value={archiveTo} min={archiveFrom||undefined} max={new Date().toISOString().slice(0,10)} onInput={e=>setArchiveTo(e.currentTarget.value)}/></label></div>
           <p className="muted">Dates include the whole day in UTC. Leave From blank for all available history. New subreddits are added to your feeds.</p>
           <button type="button" className="archive-all-time" onClick={()=>setArchiveFrom('')}>Use all available history</button>
-          <p className="muted">Downloads posts from <a href="https://arctic-shift.photon-reddit.com" target="_blank" rel="noreferrer">Arctic Shift</a> and saves supported media for offline reading. Random 4–6 second gaps between requests; you can stop and resume. Archives and older media may have gaps.</p>
-          <button className="button primary" disabled={busy||Boolean(archiveActive)||importBusy||state?.import?.state==='running'}>Fetch archive</button>
+          <p className="muted">Downloads posts from <ExternalLink href="https://arctic-shift.photon-reddit.com" target="_blank" rel="noreferrer">Arctic Shift</ExternalLink> and saves supported media for offline reading. Random 4–6 second gaps between requests; you can stop and resume. Archives and older media may have gaps.</p>
+          <button className="button primary" disabled={busy||offline||Boolean(archiveActive)||importBusy||state?.import?.state==='running'}>Fetch archive</button>
         </form>}
         {archiveMode==='file'&&<><p className="muted">Import an existing JSONL / NDJSON export, including .zst. Files are streamed in batches and pause at your storage cap.</p><label>Community<select value={importSource||state?.sources[0]||''} onChange={e=>setImportSource(e.target.value)}>{state?.sources.map(item=><option key={item}>{item}</option>)}</select></label><label>Comment post IDs (optional)<input placeholder="e.g. t3_abc, t3_def" value={importPostIds} onChange={e=>setImportPostIds(e.target.value)}/></label><p className="muted">For comment archives, enter up to 10 post IDs from Reddit links. Import their posts first. Leave blank for post archives.</p><label>Archive file<input type="file" accept=".jsonl,.ndjson,.zst" onChange={e=>setUpload(e.target.files?.[0]??null)}/></label>
         <p className="muted">Reimport the same file from the beginning to resume; earlier observations are reused.</p><button className="button primary" disabled={!upload||!feeds.length||importBusy||Boolean(archiveActive)} onClick={()=>void importFile()}>{importBusy?'Importing…':'Import file'}</button>{importBusy&&<button className="button stop" onClick={()=>void action('import/stop')}>Stop import</button>}{state?.import&&<div className="sample-note">{state.import.state} · {state.import.lines.toLocaleString()} lines · {state.import.accepted.toLocaleString()} accepted · {state.import.omitted} omitted<p>{state.import.reason}</p></div>}</>}
@@ -334,12 +339,12 @@ function App() {
           {job.oldestMs!==null&&<p>Oldest saved: {timestamp(job.oldestMs)}</p>}
           {job.offline.total>0&&<p>Media {job.offline.ready}/{job.offline.total} offline{job.offline.failed?` · ${job.offline.failed} failed`:''}{job.offline.unavailable?` · ${job.offline.unavailable} unavailable`:''}</p>}
           {job.reason&&<p className="archive-reason">{job.reason}</p>}{job.notBefore&&job.notBefore>Date.now()&&<p>Retry after {timestamp(job.notBefore)}</p>}
-          <div className="archive-job-actions">{job.state==='running'?<button className="button stop" disabled={busy} onClick={()=>void action('archive/stop',{id:job.id})}>Stop archive</button>:job.state==='paused'?<button className="button" disabled={busy||Boolean(archiveActive)||Boolean(job.notBefore&&job.notBefore>Date.now())} onClick={()=>void action('archive/resume',{id:job.id})}>Resume archive</button>:null}</div>
+          <div className="archive-job-actions">{job.state==='running'?<button className="button stop" disabled={busy} onClick={()=>void action('archive/stop',{id:job.id})}>Stop archive</button>:job.state==='paused'?<button className="button" disabled={busy||offline||Boolean(archiveActive)||Boolean(job.notBefore&&job.notBefore>Date.now())} onClick={()=>void action('archive/resume',{id:job.id})}>Resume archive</button>:null}</div>
         </article>)}</section>}
       </>}
       {modal==='clear'&&<><p>Deletes collected posts, discussions and history checkpoints, and stops active work. Your feeds and browser sign-in remain. The next sync verifies the current browser account again. Locally deleted posts stay excluded.</p><button className="button danger" disabled={busy} onClick={()=>void action('clear').then(result=>{if(result){setThread(null);threadId.current=null;setModal(null);}})}>Clear content</button></>}
       {error&&<p className="notice error" role="alert">{error}</p>}
     </Modal>}
-  </div>;
+  </div></NetworkModeProvider>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);
