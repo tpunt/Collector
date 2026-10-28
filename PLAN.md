@@ -1,5 +1,29 @@
 # Collector — implementation plan
 
+## Collection reports, media browsing and public Tumblr — 28 October 2026
+
+Implemented compact media grids with the existing shared filters; fullscreen
+navigation across loaded local files, 100–400% image zoom and video playback
+speed. Video focus keeps arrow-key seeking; Escape exits fullscreen first.
+
+Implemented one persisted latest collection report per feed and a paginated local
+media-issues view. Targeted repair retries pending/failed files and needed
+individual-post discovery, preserving listings/history and saved attachments.
+It never treats unsupported media as downloaded. Reports cover sync, archive and
+explicit retry attempts and clear with feed content. File imports keep their
+existing counters. Request counts are preserved across source profile switches. Sync/retry report
+ownership is bound to a run id; stopping a queued feed settles it immediately.
+Tumblr service/layout pauses are isolated from Reddit. Media serving detects
+missing files, and verified restore recreates a missing old cache directory.
+
+Public Tumblr extraction now reads captured post-bound legacy photoset/video
+frames, source-element video files, full-size photo links and ordered NPF media
+without thumbnail duplication. Unknown layouts, missing dates, unsafe frames and
+invalid pagination remain retryable failures. Tumblr login was deferred at the
+user's request. A single paced live Staff request on 28 October returned HTTP403;
+collection stopped. Live access remains a limitation, and Tumblr stays experimental.
+
+
 ## Organisation and second source — 28 October 2026
 
 Implemented local post tags and a sidebar tag filter, composing with search,

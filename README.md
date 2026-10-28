@@ -37,21 +37,29 @@ The existing random 4–6 second shared request spacing, session budgets, storag
 cap, Stop/Resume and Offline mode apply. Nothing collects on startup.
 
 Supported themes must expose post identities, absolute dates, complete post
-content and direct Tumblr CDN image/video files. Full supported attachments are
+content and direct Tumblr CDN image/video files. Captured legacy photoset and native video iframe URLs are validated against the
+post/blog and visited explicitly through the same paced browser queue. They are
+read from their rendered HTML with scripts disabled; iframe/API URLs are never
+guessed. Inline `<video><source>` files, linked full-size photos and rendered NPF
+media variants are handled without saving preview duplicates. Full supported attachments are
 saved locally and work with the common reader controls. Access gates, missing
-dates, unfamiliar layouts and hidden photoset/native-player content pause or
+dates, unfamiliar layouts and unsupported or inaccessible media frames pause or
 leave work incomplete, rather than silently advancing its checkpoint. External
 players retain the existing online-only treatment. In mixed posts, hosted media
 is saved while a separate external player keeps an orange offline warning; a
 cached image never counts as a downloaded external video. Private/dashboard-only blogs,
 custom-domain blogs, Tumblr sign-in, replies/notes and third-party Tumblr archives
-are not supported. An end-of-listing result discloses that older history could
+are not supported. Tumblr service access failures pause Tumblr collection separately;
+layout/post errors stop only the affected feed.
+Reddit and its archives can continue. Bulk Sync skips paused Tumblr until an
+explicit **Resume Tumblr** (respecting any cooldown). An end-of-listing result discloses that older history could
 not be verified. Reddit's archive tools remain Reddit-specific.
 
 The collector has local end-to-end coverage for paginated history, full text,
 multiple attachments, local serving and Offline pause/resume. Live public Staff
-and Changes probes returned HTTP 403 during development; live Tumblr access is
-therefore unverified and this source is explicitly experimental.
+and Changes probes returned HTTP 403 during development. The new Staff probe on
+28 October 2026 was also denied on its first request and stopped immediately;
+live Tumblr access is therefore unverified and this source is explicitly experimental.
 
 Star a post to save it in **Favourite posts**, or star the author beside their
 username to add them to **Favourite users**. Both views work offline with the
@@ -80,6 +88,48 @@ stays unread while it remains on screen. All / Unread / Read filters compose wit
 the existing filters; newly read cards stay in an Unread view until **Refresh
 view** or a filter change. Sync, import and restart retain read status. Deletion
 and Clear remove it with the content.
+
+## Collection reports and download repair
+
+Each feed's **Report** shows its latest sync, archive collection or download-retry
+attempt: start/end time, posts checked, new/updated posts, and newly saved
+file/byte counts. Finishing previously incomplete text is counted separately from
+updates to a known full body. Read status,
+favourites, tags and observation timestamps do not count as content updates. Counts are persisted locally,
+included in encrypted library backups and cleared by Clear data. A restart never
+resumes collection; an interrupted report is shown as paused. These reports are
+separate from the problems-only diagnostic log. File imports retain their own
+progress counters. Archive-page fingerprints are released after saving, so wide
+date ranges do not accumulate an in-memory report entry for every historical post.
+
+The report also lists current media issues, with local pagination and links to
+post details. **Retry incomplete downloads** retries pending/failed media for that
+feed without creating or advancing any listing/history targets or fetching unrelated
+post text. It keeps completed files and leaves unavailable files and online-only
+players alone. Discovery may revisit the individual post to obtain a full file
+list or an expired URL. Existing request spacing, session budget, cooldowns,
+storage cap, Stop and Offline pause/resume apply. A completed repair can finish a
+previous sync only when all its saved history targets and text are already complete;
+its freshness timestamp remains the original sync attempt, not the later repair.
+Missing cached files return a clean unavailable response and become pending; a
+verified backup can restore them even if the entire old media directory is missing.
+Starting any collection or retry requires explicitly disabling Offline mode.
+
+## Media browsing
+
+**Media**, **Image** and **Video** default to a compact grid. Toggle **Grid view** /
+**List view** without changing the active feed, tag, search, favourites or read
+filters. Text-only posts remain excluded from Media. Image/Video also restrict the
+attachments shown in mixed posts. Media lookups, thumbnails and playback use local
+files; the existing labelled online-only players remain blocked in Offline mode.
+
+Fullscreen **Previous media** / **Next media** and left/right arrows browse the
+ready files in the currently loaded filtered posts. A post drawer browses only
+that post's files. Image zoom supports buttons and **+ / − / 0** (100–400%); enlarged
+images can be scrolled. Videos offer 0.5×–2× playback speed, seeking and volume.
+Arrow keys on a focused video seek rather than changing the selected file. Only
+one local video plays at a time. **Escape** closes fullscreen before the post
+drawer. Native fullscreen and the fallback viewport viewer share the controls.
 
 ## Parser failures and local diagnostics
 

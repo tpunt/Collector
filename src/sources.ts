@@ -33,6 +33,18 @@ export function tumblrUrl(input:string,feed:string,listing=false):URL {
   if(!valid)throw new Error('Invalid Tumblr '+(listing?'listing':'post')+' URL');
   return url;
 }
+/** Only a captured, post-bound native media frame may be visited. No APIs,
+ * arbitrary embeds or cross-blog redirects are permitted. */
+export function tumblrEmbedUrl(input:string,feed:string,expectedId?:string):URL {
+  const blog=tumblrBlog(feed),url=new URL(input,`https://${blog}.tumblr.com/`);
+  if(url.protocol!=='https:'||url.username||url.password||url.port||url.hash||url.search)throw new Error('Invalid Tumblr media frame');
+  const match=url.hostname===blog+'.tumblr.com'?/^\/photoset_iframe\/([1-9][0-9]{0,19})(?:\/[a-zA-Z0-9_-]{1,100})*\/?$/.exec(url.pathname):url.hostname==='www.tumblr.com'?new RegExp(`^/video/${blog}/([1-9][0-9]{0,19})(?:/[a-zA-Z0-9_-]{1,100})*/?$`).exec(url.pathname):null;
+  if(!match||expectedId&&match[1]!==expectedId)throw new Error('Tumblr media frame does not belong to the requested post');
+  return url;
+}
+export function tumblrContentUrl(input:string,feed:string):URL {
+  try{return tumblrUrl(input,feed,!new URL(input).pathname.startsWith('/post/'));}catch{return tumblrEmbedUrl(input,feed);}
+}
 export function listingUrl(feed:string){const identity=feedIdentity(feed);return identity.platform==='tumblr'?`https://${identity.name}.tumblr.com/`:`https://old.reddit.com/r/${identity.name}/new/`;}
 export function validateListingUrl(input:string,feed:string){
   if(feedIdentity(feed).platform==='tumblr')return tumblrUrl(input,feed,true);
@@ -40,13 +52,13 @@ export function validateListingUrl(input:string,feed:string){
 }
 /** A public theme may contain frames or links to legacy APIs. Navigation and
  * styles are the only allowed resources; hidden embeds must not dispatch them. */
-export function tumblrResourceAllowed(input:string,type:string,blog:string|null):boolean {
+export function tumblrResourceAllowed(input:string,type:string,blog:string|null,navigation?:string):boolean {
   try{
     const url=new URL(input);
     if(url.protocol!=='https:'||url.port||url.username||url.password||!blog)return false;
     if(type==='Document'){
       const feed='tumblr:'+tumblrBlog(blog);
-      tumblrUrl(input,feed,!url.pathname.startsWith('/post/'));return true;
+      try{tumblrUrl(input,feed,!url.pathname.startsWith('/post/'));return true;}catch{tumblrEmbedUrl(input,feed);return input===navigation;}
     }
     return type==='Stylesheet'&&[blog+'.tumblr.com','static.tumblr.com','assets.tumblr.com'].includes(url.hostname)&&/\.css$/.test(url.pathname);
   }catch{return false;}

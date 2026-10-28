@@ -193,7 +193,7 @@ export class LibraryBackups {
     // A publication in progress must not expire and delete its rollback files.
     prepared.expires=Infinity;
     const stage=prepared.directory;
-    try{await this.store.snapshot(join(stage,'previous.sqlite'));await chmod(join(stage,'previous.sqlite'),0o600);journal(this.directory,stage,false);}
+    try{await mkdir(this.mediaDirectory,{recursive:true,mode:0o700});await this.store.snapshot(join(stage,'previous.sqlite'));await chmod(join(stage,'previous.sqlite'),0o600);journal(this.directory,stage,false);}
     catch(error){prepared.expires=Date.now()+10*60_000;throw error;}
     this.prepared.delete(id);
     try{

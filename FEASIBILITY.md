@@ -747,3 +747,13 @@ video enlargement, the second gallery image, its caption and Esc. That browser
 used the viewport-sized fallback. No Reddit or media-provider requests were
 made. TypeScript checking, the production build and all 77 browser/integration
 tests pass. `manual-compact-video.png` is saved with the other ignored screenshots.
+
+## 28 October 2026 — public Tumblr follow-up
+
+One live `https://staff.tumblr.com/` probe through Collector's own Chrome profile
+and the shared random 4–6 second queue was denied with HTTP403. Counters showed
+one released request; collection stopped immediately, with no retries, alternate
+endpoints or authentication bypass. Live compatibility is still unverified.
+Local browser fixtures verify complete ordered NPF/inline media, captured
+post-bound legacy photosets/native video frames, mixed-source request accounting,
+pagination, offline serving and pause/resume. Tumblr sign-in remains deferred.

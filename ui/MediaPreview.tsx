@@ -1,27 +1,33 @@
 import React,{useEffect,useRef,useState} from 'react';
+import type {MediaSlide} from './MediaBrowsing.tsx';
 
 function Icon({name}:{name:'expand'|'play'|'pause'|'sound'|'muted'}){
   return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">{name==='expand'?<path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/>:name==='play'?<path d="m8 4 12 8-12 8Z" fill="currentColor" stroke="none"/>:name==='pause'?<path d="M7 4v16M17 4v16" strokeWidth="4"/>:<><path d="M11 4 5 9H2v6h3l6 5Z"/>{name==='sound'?<path d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/>:<path d="m16 9 6 6m0-6-6 6"/>}</>}</svg>;
 }
 
 /** Keep the same media element playing when entering or leaving full screen. */
-export function MediaPreview({kind,url,title,caption}:{kind:'image'|'video';url:string;title:string;caption?:string}){
+export function MediaPreview({kind,url,title,caption,sequence,slideId}:{sequence?:()=>MediaSlide[];slideId?:string;kind:'image'|'video';url:string;title:string;caption?:string}){
   const frame=useRef<HTMLDivElement>(null),native=useRef(false),returnFocus=useRef<HTMLElement|null>(null);
+  const [viewer,setViewer]=useState<{slides:MediaSlide[];index:number}|null>(null),[zoom,setZoom]=useState(1);
+  const selected=viewer?.slides[viewer.index],shown=selected??{kind,url,title,caption};
+  function move(amount:number){setZoom(1);setViewer(old=>old?{...old,index:Math.max(0,Math.min(old.slides.length-1,old.index+amount))}:old);}
   const [expanded,setExpanded]=useState<{width:number;height:number}|null>(null);
   function close(){
-    setExpanded(null);
+    setExpanded(null);setViewer(null);setZoom(1);
     if(document.fullscreenElement===frame.current)void document.exitFullscreen().catch(()=>{});
   }
   async function expand(){
     const element=frame.current;if(!element)return;
     returnFocus.current=document.activeElement as HTMLElement|null;
-    const {width,height}=element.getBoundingClientRect();setExpanded({width,height});
+    const {width,height}=element.getBoundingClientRect();
+    const slides=sequence?.()??[],index=slides.findIndex(slide=>slide.id===slideId);
+    setViewer(index>=0?{slides,index}:null);setExpanded({width,height});
     // Embedded browsers may deny native full screen. The enlarged viewer still works.
     try{if(document.fullscreenEnabled&&element.requestFullscreen)await element.requestFullscreen();}catch{/* Use the viewport-sized viewer. */}
   }
   useEffect(()=>{
     const element=frame.current;
-    const changed=()=>{if(document.fullscreenElement===element)native.current=true;else if(native.current){native.current=false;setExpanded(null);}};
+    const changed=()=>{if(document.fullscreenElement===element)native.current=true;else if(native.current){native.current=false;setExpanded(null);setViewer(null);setZoom(1);}};
     document.addEventListener('fullscreenchange',changed);
     return()=>{document.removeEventListener('fullscreenchange',changed);if(document.fullscreenElement===element)void document.exitFullscreen().catch(()=>{});};
   },[]);
@@ -37,19 +43,25 @@ export function MediaPreview({kind,url,title,caption}:{kind:'image'|'video';url:
     if(!expanded)return;
     event.stopPropagation();
     if(event.key==='Escape'){event.preventDefault();close();}
+    if((event.key==='ArrowLeft'||event.key==='ArrowRight')&&!(event.target as HTMLElement).closest('video,input,select')){event.preventDefault();move(event.key==='ArrowLeft'?-1:1);}
+    if(shown.kind==='image'&&['+','=','-','0'].includes(event.key)){event.preventDefault();setZoom(old=>event.key==='0'?1:Math.max(1,Math.min(4,old+(event.key==='-'?-.5:.5))));}
     if(event.key==='Tab'){
-      const targets=[...frame.current!.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),video[tabindex="0"]')].filter(element=>element.tabIndex>=0&&element.getClientRects().length);
+      const targets=[...frame.current!.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),video[tabindex="0"]')].filter(element=>element.tabIndex>=0&&element.getClientRects().length);
       const first=targets[0],last=targets.at(-1);
       if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
       else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}
     }
   }
   return <div className={'media-slot '+(kind==='video'?'has-video':'')} style={expanded?{width:expanded.width,height:expanded.height}:undefined}>
-    <div ref={frame} className={'media-frame '+(expanded?'is-expanded':'')} data-media-expanded={Boolean(expanded)} role={expanded?'dialog':undefined} aria-modal={expanded?true:undefined} aria-label={expanded?`Full screen: ${title}`:undefined} onKeyDown={keys} onClick={event=>{if(expanded)event.stopPropagation();}}>
+    <div ref={frame} className={'media-frame '+(expanded?'is-expanded':'')} data-media-expanded={Boolean(expanded)} role={expanded?'dialog':undefined} aria-modal={expanded?true:undefined} aria-label={expanded?`Full screen: ${shown.title}`:undefined} onKeyDown={keys} onClick={event=>{if(expanded)event.stopPropagation();}}>
       {expanded&&<button type="button" className="media-viewer-close" aria-label="Close full screen" title="Close full screen (Esc)" onClick={close}>×</button>}
-      {kind==='image'?<button type="button" className="media-image" aria-label={`View image full screen: ${title}`} tabIndex={expanded?-1:0} onClick={()=>{if(!expanded)void expand();}}><img src={url} alt={title} loading="lazy"/>{!expanded&&<span className="media-expand-icon"><Icon name="expand"/></span>}</button>:
-        <LocalVideo url={url} title={title} expanded={Boolean(expanded)} toggleFullscreen={()=>expanded?close():void expand()}/>}
-      {expanded&&caption&&<p className="media-viewer-caption">{caption}</p>}
+      {expanded&&<div className="media-viewer-toolbar" role="group" aria-label="Media viewer controls">
+        {viewer&&viewer.slides.length>1&&<><button type="button" aria-label="Previous media" disabled={viewer.index===0} onClick={()=>move(-1)}>←</button><span aria-live="polite">{viewer.index+1} / {viewer.slides.length}</span><button type="button" aria-label="Next media" disabled={viewer.index===viewer.slides.length-1} onClick={()=>move(1)}>→</button></>}
+        {shown.kind==='image'&&<><button type="button" aria-label="Zoom out" disabled={zoom===1} onClick={()=>setZoom(old=>Math.max(1,old-.5))}>−</button><button type="button" aria-label="Reset zoom" onClick={()=>setZoom(1)}>{Math.round(zoom*100)}%</button><button type="button" aria-label="Zoom in" disabled={zoom===4} onClick={()=>setZoom(old=>Math.min(4,old+.5))}>+</button></>}
+      </div>}
+      {shown.kind==='image'?<button type="button" className={'media-image '+(expanded&&zoom>1?'is-zoomed':'')} aria-label={`View image full screen: ${title}`} tabIndex={expanded?-1:0} onClick={()=>{if(!expanded)void expand();}}><img style={expanded&&zoom>1?{width:`${zoom*100}%`,height:`${zoom*100}%`,maxWidth:'none',maxHeight:'none',flexShrink:0}:undefined} src={shown.url} alt={shown.title} loading="lazy"/>{!expanded&&<span className="media-expand-icon"><Icon name="expand"/></span>}</button>:
+        <LocalVideo key={shown.url} url={shown.url} title={shown.title} expanded={Boolean(expanded)} toggleFullscreen={()=>expanded?close():void expand()}/>}
+      {expanded&&shown.caption&&<p className="media-viewer-caption">{shown.caption}</p>}
     </div>
   </div>;
 }
@@ -58,7 +70,7 @@ const time=(seconds:number)=>{const value=Math.max(0,Math.floor(seconds)),hours=
 
 function LocalVideo({url,title,expanded,toggleFullscreen}:{url:string;title:string;expanded:boolean;toggleFullscreen:()=>void}){
   const ref=useRef<HTMLVideoElement>(null);
-  const [playing,setPlaying]=useState(false),[position,setPosition]=useState(0),[duration,setDuration]=useState(0),[volume,setVolume]=useState(1),[muted,setMuted]=useState(false),[error,setError]=useState('');
+  const [playing,setPlaying]=useState(false),[position,setPosition]=useState(0),[duration,setDuration]=useState(0),[volume,setVolume]=useState(1),[muted,setMuted]=useState(false),[error,setError]=useState(''),[speed,setSpeed]=useState(1);
   async function togglePlay(){
     const video=ref.current;if(!video)return;
     setError('');if(!video.paused){video.pause();return;}
@@ -75,13 +87,14 @@ function LocalVideo({url,title,expanded,toggleFullscreen}:{url:string;title:stri
     else if(event.key==='f'){event.preventDefault();toggleFullscreen();}
   }
   return <div className="local-video">
-    <video ref={ref} src={url} preload="metadata" playsInline aria-label={title} tabIndex={0} onClick={()=>void togglePlay()} onKeyDown={keys} onLoadedMetadata={metadata} onDurationChange={metadata} onTimeUpdate={()=>setPosition(ref.current?.currentTime??0)} onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)} onEnded={()=>setPlaying(false)} onVolumeChange={volumeChanged} onError={()=>setError('Could not play this video. Try opening the local file.')}/>
+    <video ref={ref} src={url} preload="metadata" playsInline aria-label={title} tabIndex={0} onClick={()=>void togglePlay()} onKeyDown={keys} onLoadedMetadata={metadata} onDurationChange={metadata} onTimeUpdate={()=>setPosition(ref.current?.currentTime??0)} onPlay={()=>{document.querySelectorAll('video').forEach(video=>{if(video!==ref.current)video.pause();});setPlaying(true);}} onPause={()=>setPlaying(false)} onEnded={()=>setPlaying(false)} onVolumeChange={volumeChanged} onError={()=>setError('Could not play this video. Try opening the local file.')}/>
     <div className="video-controls" role="group" aria-label={`Video controls: ${title}`}>
       <button type="button" aria-label={`${playing?'Pause':'Play'}: ${title}`} title={playing?'Pause (Space)':'Play (Space)'} onClick={()=>void togglePlay()}><Icon name={playing?'pause':'play'}/></button>
       <input className="video-position" type="range" min="0" max={duration} step="0.01" value={Math.min(position,duration)} disabled={!duration} aria-label={`Playback position: ${title}`} aria-valuetext={`${time(position)} of ${time(duration)}`} onChange={event=>seek(Number(event.target.value))}/>
       <span className="video-time">{time(position)} / {time(duration)}</span>
       <button type="button" aria-label={`${muted||volume===0?'Unmute':'Mute'}: ${title}`} title={muted||volume===0?'Unmute (M)':'Mute (M)'} onClick={toggleMute}><Icon name={muted||volume===0?'muted':'sound'}/></button>
       <input className="video-volume" type="range" min="0" max="1" step="0.05" value={muted?0:volume} aria-label={`Volume: ${title}`} onChange={event=>{const video=ref.current;if(video){video.volume=Number(event.target.value);video.muted=video.volume===0;volumeChanged();}}}/>
+      <select className="video-speed" aria-label={`Playback speed: ${title}`} value={speed} onChange={event=>{const rate=Number(event.target.value);if(ref.current){ref.current.playbackRate=rate;setSpeed(rate);}}}>{[.5,.75,1,1.25,1.5,2].map(rate=><option value={rate} key={rate}>{rate}×</option>)}</select>
       <button type="button" aria-label={`${expanded?'Exit':'Enter'} full screen: ${title}`} title={expanded?'Exit full screen (Esc)':'Full screen (F)'} onClick={toggleFullscreen}><Icon name="expand"/></button>
     </div>
     {error&&<p className="media-playback-error" role="alert">{error}</p>}

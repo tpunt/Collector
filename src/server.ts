@@ -28,6 +28,7 @@ import {NetworkMode} from './network-mode.ts';
 import {onlinePlayer} from './online-player.ts';
 import {WebSocketServer} from 'ws';
 import {ProblemLog} from './problems.ts';
+import {CollectionReports} from './collection-report.ts';
 
 export function createReaderServer(options: { database?: string; port?: number; root?:string; onShutdown?:()=>Promise<void>; backup?:{workFactor?:number}; archive?:{fetch?:typeof fetch}; jobs?: JobDependencies; media?: Partial<Pick<MediaDependencies,'directory'|'fetch'|'maxBytes'|'maxRequests'>> } = {}) {
   const database=options.database??databasePath;
@@ -43,12 +44,13 @@ export function createReaderServer(options: { database?: string; port?: number; 
   const network = options.jobs?.network ?? new RequestQueue({fromCompletion:true});
   let media: MediaCache;
   let archive:ArchiveFetcher;
-  const jobs = new ReaderJobs(store, {...options.jobs,problems:(context,error)=>{problems.report(context,error);options.jobs?.problems?.(context,error);},network,onPause:()=>{media?.stop();archive?.pause(store.getSetting<{reason:string}>('accessPause')?.reason??'Collection stopped; Resume archive to continue');options.jobs?.onPause?.();}});
-  media = new MediaCache(store,{...options.media,directory:mediaDirectory,queue:network,onAccess:error=>jobs.accessFailure(error)});
+  const reports=new CollectionReports(store);
+  const jobs = new ReaderJobs(store, {...options.jobs,reports,problems:(context,error)=>{problems.report(context,error);options.jobs?.problems?.(context,error);},network,onPause:()=>{media?.stop();archive?.pause(store.getSetting<{reason:string}>('accessPause')?.reason??'Collection stopped; Resume archive to continue');options.jobs?.onPause?.();}});
+  media = new MediaCache(store,{...options.media,directory:mediaDirectory,queue:network,onSaved:(feed,bytes)=>reports.saved(feed,bytes),onAccess:error=>jobs.accessFailure(error)});
   jobs.attachMedia(options.jobs?.mediaSync===undefined?media:options.jobs.mediaSync);
   const importer = new ArchiveImporter(store,problems.report);
   const backups=new LibraryBackups(store,media,backupDirectory,mediaDirectory,options.backup?.workFactor);
-  archive=new ArchiveFetcher(store,{...options.archive,problems:problems.report,queue:network,assertCanStart:resume=>{
+  archive=new ArchiveFetcher(store,{...options.archive,reports,problems:problems.report,queue:network,assertCanStart:resume=>{
     if(importer.progress?.state==='running')throw new Error('Stop the file import before fetching an archive');
     jobs.assertCanQueue(resume);
   },onRunStart:()=>jobs.beginArchiveRun(),saveMedia:(ids,signal)=>jobs.archiveMedia(ids,signal)});
@@ -234,6 +236,11 @@ export function createReaderServer(options: { database?: string; port?: number; 
             if(job||paused)networkMode.cancel({source:(job??paused)!.subreddit});
             json(res,{ok:true});return;
           }
+          case '/api/media/retry': {
+            const names=Array.isArray(data.names)?[...new Set(data.names.map(name=>feedName(String(name))))]:[];
+            if(names.some(name=>feedStatus(name)!=='idle'))throw new Error('Wait for this feed to finish before retrying downloads');
+            jobs.retryMedia(names);json(res,{queued:true});return;
+          }
           case '/api/sync': {
             jobs.assertCanQueue(true);
             const followed = store.followedSources();
@@ -312,8 +319,9 @@ export function createReaderServer(options: { database?: string; port?: number; 
         res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':'attachment; filename="collector.tar.age"','Content-Length':file.bytes,'Cache-Control':'no-store'});
         await pipeline(createReadStream(file.path),res);return;
       }
-      if (url.pathname === '/api/state') { const policy=networkMode.status;json(res,{ token, network:policy, problems:problems.status, canQuit:Boolean(options.onShutdown), generation:store.generation,tags:store.tags(), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name),offlinePaused:policy.offline&&policy.paused.feeds.includes(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
+      if (url.pathname === '/api/state') { const policy=networkMode.status;json(res,{ token, network:policy, problems:problems.status, canQuit:Boolean(options.onShutdown), generation:store.generation,tags:store.tags(), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,report:reports.get(feed.name),offline:store.offlineMedia(feed.name),offlinePaused:policy.offline&&policy.paused.feeds.includes(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
         storage:store.storage, import:importer.progress, imports:store.getSetting('imports') ?? [], account:store.getSetting('account') }); return; }
+      if(url.pathname==='/api/media/issues'){json(res,store.incompleteMedia(url.searchParams.get('feed')??'',url.searchParams.get('after')));return;}
       if (url.pathname === '/api/feed') {
         json(res,store.queryFeed(feedQuery(url.searchParams)));return;
       }

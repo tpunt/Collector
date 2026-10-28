@@ -63,3 +63,12 @@ test('Tumblr browser resources cannot dispatch legacy API frames, unrelated blog
  for(const [url,type] of [['https://staff.tumblr.com/api/read/json','Document'],['https://api.tumblr.com/v2/blog/staff/posts','Document'],['https://other.tumblr.com/','Document'],['https://staff.tumblr.com/','Script'],['https://staff.tumblr.com/','XHR'],['https://staff.tumblr.com/api/read/json','Stylesheet'],['https://evil.test/track.css','Stylesheet'],['http://staff.tumblr.com/','Document']])assert.equal(tumblrResourceAllowed(url!,type!,'staff'),false);
  assert.equal(tumblrResourceAllowed('https://staff.tumblr.com/','Document',null),false);
 });
+
+
+test('Tumblr native frames require explicit navigation and remain bound to their blog and post',()=>{
+ const frame='https://staff.tumblr.com/photoset_iframe/12345/token/500/';
+ assert.equal(tumblrResourceAllowed(frame,'Document','staff'),false);
+ assert(tumblrResourceAllowed(frame,'Document','staff',frame));
+ assert.equal(tumblrResourceAllowed(frame.replace('staff','other'),'Document','staff',frame),false);
+ assert.equal(tumblrResourceAllowed('https://www.tumblr.com/video/staff/12345/500/','Document','staff',frame),false);
+});

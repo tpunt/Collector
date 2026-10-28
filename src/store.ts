@@ -145,7 +145,7 @@ export class ReaderStore {
         this.db.prepare("UPDATE metadata SET value=? WHERE key='content_revision'").run(revision+1);
         if(!portable&&resume?.generation===restoredGeneration)this.setSetting('offlineResume',{...resume,generation:nextGeneration});
         else this.db.exec("DELETE FROM settings WHERE key='offlineResume'");
-        if(portable){this.db.exec("DELETE FROM settings WHERE key IN ('account','accessPause')");this.setStorageLimit(limit);}
+        if(portable){this.db.exec("DELETE FROM settings WHERE key IN ('account','accessPause','accessPause:tumblr')");this.setStorageLimit(limit);}
         // Network permission belongs to this running app, even when content rolls back.
         if(offline!==null)this.setSetting('offlineMode',offline);else this.db.prepare("DELETE FROM settings WHERE key='offlineMode'").run();
       });
@@ -449,6 +449,14 @@ export class ReaderStore {
     return result;
   }
 
+  incompleteMedia(source:string,after:string|null=null,limit=30){
+    const name=feedName(source);if(after!==null)postId(after);
+    const rows=this.db.prepare(`SELECT p.id,m.status,m.reason FROM posts p JOIN media_sync m ON m.post_id=p.id
+      WHERE p.subreddit=? AND m.status<>'ready' AND (? IS NULL OR p.id>?) ORDER BY p.id LIMIT ?`).all(name,after,after,limit+1);
+    const items=rows.slice(0,limit).map(row=>({id:String(row.id),title:this.getPost(String(row.id))!.title,status:String(row.status),reason:row.reason as string|null}));
+    return{items,next:rows.length>limit?items.at(-1)!.id:null};
+  }
+
   feedSync(input:string):FeedSyncSummary {
     const name=feedName(input),row=this.db.prepare('SELECT * FROM feed_sync WHERE subreddit=?').get(name);
     if(row){
@@ -490,11 +498,12 @@ export class ReaderStore {
   }
   noteSyncGap(input:string):void {this.db.prepare("UPDATE feed_sync SET gap_count=gap_count+1 WHERE subreddit=? AND state='running'").run(feedName(input));}
   /** Called after this feed's queue drains. Saved pages alone are never success. */
-  finishFeedSync(input:string,runId:string,now=Date.now()):void {
+  finishFeedSync(input:string,runId:string,now=Date.now(),repair=false):void {
     const name=feedName(input);
     this.transaction(()=>{
-      const row=this.db.prepare("SELECT * FROM feed_sync WHERE subreddit=? AND run_id=? AND state='running'").get(name,runId);if(!row)return;
+      const row=this.db.prepare("SELECT * FROM feed_sync WHERE subreddit=? AND run_id=? AND (state='running' OR (? AND state='incomplete'))").get(name,runId,Number(repair));if(!row)return;
       const targets=(JSON.parse(String(row.targets)) as string[]).map(id=>this.getTarget(id));
+      if(repair&&targets.some(target=>target?.status!=='done'))return;
       const unfinished=targets.find(target=>target?.status!=='done');
       const media=this.offlineMedia(name),bodies=this.missingBodyCount(name);
       let reason=unfinished?.reason??(targets.some(target=>!target)?'A sync checkpoint is no longer available':null);
@@ -515,8 +524,13 @@ export class ReaderStore {
       }
       this.db.prepare(`UPDATE feed_sync SET state=?,reason=?,last_success_ms=CASE WHEN ?='complete' THEN ? ELSE last_success_ms END,
         last_completed_ms=CASE WHEN ? IN ('complete','gaps') THEN ? ELSE last_completed_ms END WHERE subreddit=? AND run_id=?`)
-        .run(state,reason,state,now,state,now,name,runId);
+        .run(state,reason,state,repair?Number(row.started_ms):now,state,now,name,runId);
     });
+  }
+
+  settleMediaRetry(input:string){
+    const name=feedName(input),row=this.db.prepare("SELECT run_id FROM feed_sync WHERE subreddit=? AND state='incomplete'").get(name);
+    if(row)this.finishFeedSync(name,String(row.run_id),Date.now(),true);
   }
 
   listFeed(limit = 100): StoredPost[] {
@@ -532,7 +546,7 @@ export class ReaderStore {
         UPDATE metadata SET value = value + 1 WHERE key = 'generation';
         DELETE FROM comment_states WHERE availability='available';
         DELETE FROM targets; DELETE FROM observations; DELETE FROM media_sync; DELETE FROM media_evidence; DELETE FROM post_media;
-        DELETE FROM settings WHERE key='account' OR key GLOB 'fileImport:*';
+        DELETE FROM settings WHERE key IN ('account','accessPause:tumblr') OR key GLOB 'fileImport:*' OR key GLOB 'collectionReport:*';
         DELETE FROM posts WHERE live_availability IS NULL OR live_availability = 'available';`);
       // Followed namespaces are retained. Keep only identity/time/deletion state for removed posts,
       // so a subsequent old archive import cannot restore cleared, known-deleted content.
@@ -600,6 +614,7 @@ export class ReaderStore {
       this.db.prepare("DELETE FROM settings WHERE key GLOB 'fileImport:*' AND json_extract(value,'$.subreddit')=?").run(name);
       this.db.prepare('DELETE FROM archive_fetches WHERE subreddit=?').run(name);
       this.db.prepare('DELETE FROM feed_sync WHERE subreddit=?').run(name);
+      this.db.prepare('DELETE FROM settings WHERE key=?').run('collectionReport:'+name);
       this.db.prepare('DELETE FROM comment_states WHERE post_id IN (SELECT id FROM posts WHERE subreddit=?)').run(name);
       this.db.prepare('UPDATE feeds SET history_target_id=NULL,requested_ms=NULL WHERE name=?').run(name);
       this.db.prepare('DELETE FROM targets WHERE subreddit=?').run(name);

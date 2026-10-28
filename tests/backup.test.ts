@@ -176,3 +176,8 @@ test('portable restore keeps the destination cap and reclaims the previous datab
   assert.equal(h.store.storageLimit,destinationCap);assert.equal(h.store.storage.full,false);assert.equal(h.store.stats().posts,1);assert.equal((await h.media.items('abc'))[0]!.state,'ready');assert.equal(h.store.compactionWarning,null);
  }finally{await h.close();}
 });
+
+test('a verified backup restores all cached files even if the current media directory was removed',async()=>{
+ const h=await setup();
+ try{const backup=await h.backups.create(secret),file=h.backups.download(backup.id);await rm(h.mediaDirectory,{recursive:true,force:true});const preview=await h.backups.prepare(createReadStream(file.path),secret);await h.backups.restore(preview.id);const item=(await h.media.items('abc'))[0]!;assert.equal(item.state,'ready');assert.equal((await stat(item.localPath!)).size,8*1024*1024);await h.backups.close();assert.equal((await stat(item.localPath!)).size,8*1024*1024);}finally{await h.close();}
+});

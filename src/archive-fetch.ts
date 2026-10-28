@@ -6,6 +6,7 @@ import { subredditName, postId } from './domain.ts';
 import type { PostObservation } from './domain.ts';
 import type { ReaderStore } from './store.ts';
 import type { RequestQueue } from './request-gate.ts';
+import type {CollectionReports} from './collection-report.ts';
 import type {ProblemReporter} from './problems.ts';
 import { retryAfter } from './limiter.ts';
 
@@ -14,6 +15,7 @@ const PAGE_LIMIT = 100;
 const MAX_RESPONSE = 32 * 1024 ** 2;
 export interface ArchiveFetchDependencies {
   queue: RequestQueue;
+  reports?:CollectionReports;
   problems?:ProblemReporter;
   fetch?: typeof fetch;
   assertCanStart?: (resume: boolean) => void;
@@ -72,9 +74,10 @@ export class ArchiveFetcher {
   }
   async close(reason='Application stopped; Resume to continue') { await this.stop(undefined,reason); }
   private launch(id: string) {
+    const reportId=this.deps.reports?.begin(this.store.archiveFetch(id)!.subreddit,'archive');
     this.deps.onRunStart?.();
     this.activeId = id; this.controller = new AbortController();
-    this.completion = this.run(id, this.controller.signal).finally(() => { this.activeId = null; this.controller = null; this.completion = null; });
+    this.completion = this.run(id, this.controller.signal,reportId).finally(() => { this.activeId = null; this.controller = null; this.completion = null; });
   }
   private async response(url: URL, signal: AbortSignal): Promise<unknown[]> {
     return this.deps.queue.run(async () => {
@@ -115,7 +118,7 @@ export class ArchiveFetcher {
       return result.data;
     }, signal);
   }
-  private async run(id: string, signal: AbortSignal) {
+  private async run(id: string, signal: AbortSignal,reportId?:string) {
     const generation = this.store.generation, initial = this.store.archiveFetch(id)!;
     const revision = this.store.sourceRevision(initial.subreddit);
     const current = () => {
@@ -130,6 +133,7 @@ export class ArchiveFetcher {
         let job = current(); this.store.assertStorageAvailable();
         if (job.phase === 'media') {
           await this.deps.saveMedia(job.mediaIds, signal); job = current();
+          this.deps.reports?.releaseArchivePage(job.subreddit,job.mediaIds);
           job = { ...job, phase: 'fetching', mediaIds: [], updatedAt: Date.now() };
           this.store.saveArchiveFetch(job);
         }
@@ -172,7 +176,9 @@ export class ArchiveFetcher {
           newestMs: records.length ? Math.max(job.newestMs ?? 0, ...records.map(record => record.created.epochMs)) : job.newestMs,
           updatedAt: Date.now(), reason: null };
         // Content, counters and next cursor are one transaction, including skipped-only pages.
+        const before=records.map(record=>this.store.getPost(record.id));
         this.store.commitArchiveFetch(generation, revision, updated, records);
+        this.deps.reports?.observe(job.subreddit,before,records.map(record=>record.id));
         if(omitted)this.deps.problems?.({operation:'archive-records',code:'archive-records',feed:job.subreddit,checkpoint:id,url:ENDPOINT,occurrences:omitted,facts:{rows:rows.length,accepted:records.length,rejected:omitted}},new Error('Invalid archive records'));
         if (denseFailure) throw new Error('Too many posts share one timestamp to advance safely. Partial data saved; use a bulk archive for this range.');
       }
@@ -182,6 +188,8 @@ export class ArchiveFetcher {
       if (job?.state === 'running') this.store.saveArchiveFetch({ ...job, state: 'paused',
         reason: error instanceof Error ? error.message : 'Archive fetch interrupted; Resume to continue',
         notBefore: this.store.getSetting<number>('archiveCooldown'), updatedAt: Date.now() });
+    }finally{
+      const job=this.store.archiveFetch(id);this.deps.reports?.finish(initial.subreddit,job?.state==='done'?'finished':'paused',job?.reason??null,reportId);
     }
   }
 }

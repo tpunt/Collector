@@ -6,6 +6,9 @@ import type { ArchiveFetchState } from '../src/archive-fetch-state.ts';
 import { historyLowerBound } from '../src/history-window.ts';
 import { HISTORY_OPTIONS } from '../src/history-window.ts';
 import type { HistoryMonths } from '../src/history-window.ts';
+import type {CollectionReport} from '../src/collection-report.ts';
+import {CollectionReportPanel} from './CollectionReport.tsx';
+import {MediaBrowsingProvider} from './MediaBrowsing.tsx';
 import { PostMedia } from './Media.tsx';
 import {PostOrigin} from './PostOrigin.tsx';
 import {PostTags,TagEditor} from './PostTags.tsx';
@@ -25,9 +28,9 @@ import type {Author} from '../src/authors.ts';
 import type { StorageStatus } from '../src/storage-limit.ts';
 import './style.css';
 
-type Feed = FeedSource & { offline:OfflineMediaCounts;offlinePaused:boolean; status: 'idle' | 'queued' | 'syncing' | 'stopping' };
+type Feed = FeedSource & { report:CollectionReport|null; offline:OfflineMediaCounts;offlinePaused:boolean; status: 'idle' | 'queued' | 'syncing' | 'stopping' };
 type State = {problems:ProblemLog['status'];generation:number;tags:{name:string;posts:number}[];token:string;canQuit:boolean;favourites:{posts:number;users:Author[]};sources:string[];feeds:Feed[];targets:HistoryTarget[];storage:StorageStatus;stats:{posts:number;snapshots:number;mediaPosts:number;contentRevision:number;databaseBytes:number};
-  job:{running:boolean;manual:boolean;queued:number;subreddit:string|null;message:string;requests:{released:number;suppressed:number;sessionTotal:number};accessPause:{reason:string;notBefore:number|null}|null};
+  job:{sourcePause?:{reason:string;notBefore:number|null}|null;running:boolean;manual:boolean;queued:number;subreddit:string|null;message:string;requests:{released:number;suppressed:number;sessionTotal:number};accessPause:{reason:string;notBefore:number|null}|null};
   media:{pending:number;bytes:number;requests:number;revision:number};import:{state:string;lines:number;accepted:number;omitted:number;bytes:number;reason:string|null}|null;imports:unknown[];archives:(ArchiveFetchState&{offline:OfflineMediaCounts})[];account:string|null};
 type Thread = {post:StoredPost;snapshot:ThreadSnapshot|null};
 const date=(ms:number)=>new Date(ms).toLocaleDateString(undefined,{day:'numeric',month:'short',year:'numeric'});
@@ -71,7 +74,9 @@ function App() {
   const postRows=useRef<StoredPost[]>([]),loadedQuery=useRef(''),loadedNext=useRef<string|null>(null),scrollAnchor=useRef<{id:string;top:number}|null>(null);
   const [view,setView]=useState(location.hash==='#feeds'?'feeds':'posts');
   const [collection,setCollection]=useState<Collection>(hashCollection),[userFilter,setUserFilter]=useState('');
+  const [reportFeed,setReportFeed]=useState<string|null>(null),[grid,setGrid]=useState(true);
   const [source,setSource]=useState(''),[media,setMedia]=useState(''),[search,setSearch]=useState('');
+  const mediaView=['Media','Image','Video'].includes(media);
   const [searchScope,setSearchScope]=useState('both'),[tag,setTag]=useState('');
   const [tagPost,setTagPost]=useState<StoredPost|null>(null),[bulkRead,setBulkRead]=useState<{query:string;generation:number;revision:number}|null>(null),[activePost,setActivePost]=useState('');
   const [readFilter,setReadFilter]=useState('all'),[readBefore,setReadBefore]=useState(Date.now);
@@ -110,6 +115,7 @@ function App() {
   const feeds=state?.feeds??[],activeFeeds=feeds.filter(syncing),pending=state?.targets.filter(target=>['queued','paused'].includes(target.status))??[];
   const totalPosts=feeds.reduce((sum,feed)=>sum+feed.postCount,0);
   const count=source?feeds.find(feed=>feed.name===source)?.postCount??0:totalPosts;
+  const selectedReport=feeds.find(feed=>feed.name===reportFeed);
   const currentFeed=feeds.find(feed=>feed.name===source);
   const archiveActive=state?.archives.find(job=>job.state==='running');
   function openArchives(){setArchiveName(old=>old||(source&&feedIdentity(source).platform==='reddit'?source:state?.sources.find(feed=>feedIdentity(feed).platform==='reddit'))||'');setError('');setModal('import');}
@@ -192,7 +198,7 @@ function App() {
   },[]);
   useEffect(()=>{
     const keys=(event:KeyboardEvent)=>{
-      if(event.defaultPrevented||event.ctrlKey||event.metaKey||event.altKey||view!=='posts'||modal||thread||removeFeed||clearFeed||postToDelete||tagPost||bulkRead||document.querySelector('[data-media-expanded="true"]'))return;
+      if(event.defaultPrevented||event.ctrlKey||event.metaKey||event.altKey||view!=='posts'||modal||thread||removeFeed||clearFeed||postToDelete||tagPost||bulkRead||reportFeed||document.querySelector('[data-media-expanded="true"]'))return;
       if((event.target as HTMLElement)?.closest('input,textarea,select,button,a,video,[contenteditable="true"]'))return;
       const cards=[...document.querySelectorAll<HTMLElement>('.post-card[data-post-id]')];if(!cards.length)return;
       if(event.key==='j'||event.key==='k'){
@@ -203,8 +209,8 @@ function App() {
       }else if(activePost&&postRows.current.some(post=>post.id===activePost)&&(event.key==='o'||event.key==='Enter')){event.preventDefault();void openThread(activePost);}
       else if(activePost&&event.key==='r'){event.preventDefault();const post=postRows.current.find(post=>post.id===activePost);if(post){const read=post.readAt===null;if(!read)suppressedReads.current.add(post.id);else suppressedReads.current.delete(post.id);void markRead(post.id,read).catch(()=>{});}}
     };window.addEventListener('keydown',keys);return()=>window.removeEventListener('keydown',keys);
-  },[view,modal,thread,removeFeed,clearFeed,postToDelete,tagPost,bulkRead,activePost]);
-  useReadTracking(!stopped&&view==='posts'&&!modal&&!thread&&!removeFeed&&!clearFeed&&!postToDelete&&!tagPost&&!bulkRead&&Boolean(state),markRead,suppressedReads.current);
+  },[view,modal,thread,removeFeed,clearFeed,postToDelete,tagPost,bulkRead,reportFeed,activePost]);
+  useReadTracking(!stopped&&view==='posts'&&!modal&&!thread&&!removeFeed&&!clearFeed&&!postToDelete&&!tagPost&&!bulkRead&&!reportFeed&&Boolean(state),markRead,suppressedReads.current);
   useEffect(()=>{if(state&&userFilter&&!selectedAuthor)setUserFilter('');},[Boolean(state),userFilter,selectedAuthor?.platform,selectedAuthor?.id]);
   useEffect(()=>{if(state&&view==='posts'&&collection==='all'&&source&&!state.sources.includes(source))setSource('');},[state?.sources,view,collection,source]);
   useEffect(()=>setReadBefore(Date.now()),[source,media,search,searchScope,collection,userFilter,tag]);
@@ -222,7 +228,7 @@ function App() {
     },2000);
     return()=>{disposed=true;clearInterval(timer);};
   },[]);
-  useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!busy){setModal(null);setRemoveFeed(null);setClearFeed(null);setPostToDelete(null);setTagPost(null);setBulkRead(null);setThread(null);threadId.current=null;}};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close);},[busy]);
+  useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!busy){setModal(null);setRemoveFeed(null);setClearFeed(null);setPostToDelete(null);setTagPost(null);setBulkRead(null);setReportFeed(null);setThread(null);threadId.current=null;}};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close);},[busy]);
   async function openThread(id:string){threadId.current=id;try{const value=await get<Thread>('/api/post/'+id);if(threadId.current===id&&value.post)setThread(value);}catch(e){if(threadId.current===id)setError((e as Error).message);}}
   async function importFile(){
     if(!upload)return;setImportBusy(true);setError('');
@@ -238,7 +244,7 @@ function App() {
   if(stopped)return <div className="empty-state" role="status"><h1>Collector stopped</h1><p>Close this tab, or relaunch Collector.command to keep reading.</p></div>;
   const feedSync=(feed:Feed)=>network.status?.offline&&network.status.paused.feeds.includes(feed.name)?<button className="button stop" disabled={busy} onClick={()=>void action('pause',{name:feed.name})} aria-label={'Cancel resume for '+feedLabel(feed.name)}>Cancel resume</button>:syncing(feed)?<button className="button stop" disabled={busy||feed.status==='stopping'} onClick={()=>void action('pause',{name:feed.name})} aria-label={'Stop '+feedLabel(feed.name)}>{feed.status==='stopping'?'Stopping…':'Stop'}</button>:
     <button className="button" disabled={busy||offline||Boolean(state?.job.manual)} onClick={()=>void action('sync',{names:[feed.name]})} aria-label={syncLabel(feed)+' '+feedLabel(feed.name)}>{syncLabel(feed)}</button>;
-  return <NetworkModeProvider value={network}><div className="app" ref={appRef}>
+  return <NetworkModeProvider value={network}><MediaBrowsingProvider order={posts.map(post=>post.id)}><div className="app" ref={appRef}>
       {network.status?.offline&&<div ref={offlineBannerRef} className="notice offline-notice offline-banner" role="status"><span>{network.status.changing?'Pausing external connections…':network.status.pendingReaders?`Collection is paused. Waiting for ${network.status.pendingReaders} open reader/player connection(s) to confirm playback has paused. Close unresponsive tabs or cancel this request.`:'Offline mode is on. External requests are paused.'}{!network.status.changing&&!network.status.pendingReaders&&(network.status.paused.feeds.length>0||network.status.paused.threads>0||network.status.paused.archive||network.status.paused.signIn)&&' Paused work resumes when Offline mode is turned off.'}</span>{Boolean(network.status.pendingReaders)&&!network.status.changing&&<button className="button" disabled={modeBusy} onClick={()=>void toggleOffline(false)}>Cancel Offline request</button>}{(network.status.paused.feeds.length>0||network.status.paused.threads>0||network.status.paused.archive||network.status.paused.signIn)&&<button className="button" disabled={busy||network.status.changing} onClick={()=>void action('pause')}>Cancel automatic resume</button>}</div>}
     <aside className="sidebar">
       <a className="brand" href="#posts" onClick={()=>filterSource('')}><span className="brand-mark" aria-hidden="true">C</span> Collector</a>
@@ -279,6 +285,7 @@ function App() {
       {!network.status?.offline&&network.status?.message&&network.status.message!=='Online'&&<div className="notice" role="status">{network.status.message}</div>}
       {state?.storage.full&&<div className="notice"><span>Storage cap reached. Existing content is kept; increase the cap to continue collecting.</span><button className="button" onClick={openSettings}>Storage settings</button></div>}
       {state?.job.accessPause&&<div className="notice">{state.job.accessPause.reason}<button className="button" disabled={busy||offline} onClick={()=>void action('sync')}>Resume sync</button></div>}
+      {state?.job.sourcePause&&state.sources.some(name=>feedIdentity(name).platform==='tumblr')&&<div className="notice"><span>Tumblr collection paused: {state.job.sourcePause.reason}. Other sources can continue.</span><button className="button" disabled={busy||offline} onClick={()=>void action('sync',{names:state.sources.filter(name=>feedIdentity(name).platform==='tumblr')})}>Resume Tumblr</button></div>}
       {archiveActive&&<div className="sync-bar archive-sync" role="status"><span className="status-dot pulse"/><span>r/{archiveActive.subreddit} · {archiveActive.phase==='media'?'Saving archive media':'Fetching archive'} · {archiveActive.observed.toLocaleString()} posts checked</span><button onClick={openArchives}>Progress</button><button disabled={busy} onClick={()=>void action('archive/stop',{id:archiveActive.id})}>Stop archive</button></div>}
       {(state?.job.running||Boolean(state?.media.pending))&&<div className="sync-bar" role="status"><span className="status-dot pulse"/><span>{state!.job.running?state!.job.message:`Loading media · ${state!.media.pending} files queued`}</span>{state!.job.queued>0&&<span className="muted">{state!.job.queued} queued</span>}
         {state!.job.subreddit&&<button onClick={()=>void action('pause',{name:state!.job.subreddit})} disabled={busy}>Stop {feedLabel(state!.job.subreddit)}</button>}
@@ -288,7 +295,7 @@ function App() {
           {feeds.map(feed=><article className="feed-card" key={feed.name} data-feed={feed.name} aria-labelledby={'feed-title-'+feed.name}>
             <header className="feed-card-header">
               <div className="feed-identity"><h2 id={'feed-title-'+feed.name}><button onClick={()=>filterSource(feed.name)}>{feedLabel(feed.name)}</button></h2><p><span>{feed.postCount.toLocaleString()} posts</span><span className="feed-provenance">{feed.liveCount.toLocaleString()} live{feed.archiveCount>0?` · ${feed.archiveCount.toLocaleString()} archive`:''}{feed.historyTarget?.omissionCount?` · ${feed.historyTarget.omissionCount} omitted`:''}</span></p></div>
-              <div className="feed-header-actions"><span className={'status-label '+(syncing(feed)?feed.status:feed.sync.state==='incomplete'||feed.sync.state==='gaps'?'stopped':'')}><i/>{syncState(feed)}</span>{feedSync(feed)}</div>
+              <div className="feed-header-actions"><span className={'status-label '+(syncing(feed)?feed.status:feed.sync.state==='incomplete'||feed.sync.state==='gaps'?'stopped':'')}><i/>{syncState(feed)}</span><button className="button" onClick={()=>setReportFeed(feed.name)} aria-label={"Collection report for "+feedLabel(feed.name)}>Report</button>{feedSync(feed)}</div>
             </header>
             <div className="feed-card-body">
               <section className="feed-detail-group" aria-label={'Activity for '+feedLabel(feed.name)}><h3>Activity</h3><dl className="feed-facts">
@@ -312,10 +319,10 @@ function App() {
         </div><p className="feed-page-note" id="feed-history-note">Sync saves recent posts, unfinished history and supported media locally. Expanding the history limit starts a sync; reducing it keeps saved posts. Older archives and stored date ranges may have gaps.</p></>:<div className="empty-state"><h2>No feeds yet</h2><button className="button primary" onClick={()=>{setName('');setMonths(1);setModal('source');}}>Add a feed</button></div>}
       </section>:<>
         {collection==='users'&&<section className="favourite-users" aria-label="Favourited users"><p>Posts already stored in Collector, across all your favourite users. New posts appear when you sync their feeds.</p><div className="user-chips"><button className={'user-filter'+(!selectedAuthor?' selected':'')} onClick={()=>setUserFilter('')}>All favourite users</button>{favouriteUsers.map(author=><div className="user-chip" key={authorKey(author)}><button className={'user-filter'+(selectedAuthor&&authorKey(selectedAuthor)===authorKey(author)?' selected':'')} onClick={()=>setUserFilter(authorKey(author))}>{authorLabel(author)}</button><FavouriteButton active label={'Unfavourite user: '+authorLabel(author)} disabled={busy} onClick={()=>void toggleUserFavourite(author,true)}/></div>)}</div></section>}
-        <section className="feed-tools" aria-label="Feed filters"><div className="type-tabs">{['',...MEDIA_FILTERS].map(type=><button key={type} className={media===type?'selected':''} onClick={()=>setMedia(type)}>{type||'All posts'}</button>)}</div></section>
+        <section className="feed-tools" aria-label="Feed filters"><div className="type-tabs">{['',...MEDIA_FILTERS].map(type=><button key={type} className={media===type?'selected':''} onClick={()=>setMedia(type)}>{type||'All posts'}</button>)}</div>{mediaView&&<button className="button layout-toggle" aria-label="Grid view" aria-pressed={grid} onClick={()=>setGrid(!grid)}>{grid?'Grid view':'List view'}</button>}</section>
         <div className="feed-meta"><span title="J/K: next/previous post · O or Enter: open · R: toggle read · Esc: close">Newest first · <button onClick={()=>setReadBefore(Date.now())}>Refresh view</button> · <button disabled={busy||!posts.length} onClick={()=>setBulkRead({query:currentQuery.current,generation:state!.generation,revision:state!.stats.contentRevision})}>Mark matching posts read</button></span>{currentFeed?<span>Last successful sync: {timestamp(currentFeed.sync.lastSuccessAt)} · {syncState(currentFeed)}{currentFeed.offline.total>0&&` · Media ${currentFeed.offline.ready}/${currentFeed.offline.total} offline`}</span>:<button onClick={()=>navigate('feeds')}>Manage feeds &amp; sync status →</button>}</div>
-        <div className="feed">{posts.map(post=><article className={"post-card "+(post.readAt!==null?"is-read ":"")+(activePost===post.id?"keyboard-active":"")} tabIndex={-1} onFocus={event=>{if(event.target===event.currentTarget)setActivePost(post.id);}} data-post-id={post.id} data-read={post.readAt!==null} key={post.id}>
-          <div className="post-content"><PostMedia post={post} filter={media==='Image'?'image':media==='Video'?'video':undefined} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===post.subreddit)&&syncing(feeds.find(feed=>feed.name===post.subreddit)!))}>
+        <div className={"feed "+(grid&&mediaView?'media-grid':'')}>{posts.map(post=><article className={"post-card "+(post.readAt!==null?"is-read ":"")+(activePost===post.id?"keyboard-active":"")} tabIndex={-1} onFocus={event=>{if(event.target===event.currentTarget)setActivePost(post.id);}} data-post-id={post.id} data-read={post.readAt!==null} key={post.id}>
+          <div className="post-content"><PostMedia eager={mediaView} post={post} filter={media==='Image'?'image':media==='Video'?'video':undefined} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===post.subreddit)&&syncing(feeds.find(feed=>feed.name===post.subreddit)!))}>
             {mediaControls=><><div className="post-meta"><PostOrigin origin={sourceOrigin(post.subreddit)} onSelectFeed={origin=>selectSource(origin.feed.id)}/>{authorControls(post)}<time dateTime={new Date(post.createdMs).toISOString()}>{date(post.createdMs)}</time>{post.source==='archive'&&<span className="archive-label">Archive</span>}<div className="badges">{post.media.map(type=><span key={type}>{type}</span>)}{post.availability!=='available'&&<span>{post.availability}</span>}{mediaControls}</div></div>
             <button className="post-title" onClick={()=>void openThread(post.id)}>{post.title}</button>{media!=='Media'&&post.body&&<p className="post-preview">{post.body.slice(0,200)}</p>}</>}
           </PostMedia>
@@ -331,7 +338,7 @@ function App() {
       <PostTags post={thread.post} select={tag=>{setTag(tag);setThread(null);threadId.current=null;showFeedView();}} edit={()=>setTagPost(thread.post)}/>
       <div className="thread-author">{authorControls(thread.post)}<FavouriteButton active={thread.post.favourite} label={(thread.post.favourite?'Unfavourite post: ':'Favourite post: ')+thread.post.title} disabled={busy} onClick={()=>void togglePostFavourite(thread.post)}/></div>
       <div className="thread-actions"><button className="button" disabled={busy||offline||feedIdentity(thread.post.subreddit).platform!=='reddit'} onClick={()=>void action('thread',{id:thread.post.id})}>{thread.snapshot?'Re-read discussion':'Read discussion in browser'}</button><button className="button danger" disabled={busy} onClick={()=>{setError('');setPostToDelete(thread.post);}}>Delete post</button><ExternalLink href={thread.post.permalink} target="_blank" rel="noreferrer">Open original post ↗</ExternalLink></div>
-      <PostMedia post={thread.post} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===thread.post.subreddit)&&syncing(feeds.find(feed=>feed.name===thread.post.subreddit)!))}>
+      <PostMedia scope="thread" post={thread.post} revision={state?.media.revision??0} syncing={Boolean(feeds.find(feed=>feed.name===thread.post.subreddit)&&syncing(feeds.find(feed=>feed.name===thread.post.subreddit)!))}>
         {mediaControls=><div className="badges thread-media-badges">{thread.post.media.map(type=><span key={type}>{type}</span>)}{mediaControls}</div>}
       </PostMedia>
       <div className="prose">{thread.post.body??thread.snapshot?.body??(thread.post.availability!=='available'?'Post '+thread.post.availability+'.':thread.post.media.includes('Text')?'Post body has not been read.':'')}</div>
@@ -339,6 +346,7 @@ function App() {
         <div className="comments">{thread.snapshot.comments.map(comment=><article key={comment.id} className="comment"><div>{comment.id} {comment.ancestry==='unresolved'?'· parent unavailable':comment.parentId?.startsWith('t1_')?'· reply to '+comment.parentId:'· top-level'}</div><p>{comment.availability==='available'?comment.body:'['+comment.availability+']'}</p></article>)}</div>
       </>:<p className="sample-note">{feedIdentity(thread.post.subreddit).platform==='tumblr'?'Tumblr replies are not collected. Full post content and supported media are saved during sync.':'Read discussion saves up to 100 initially rendered comments. Collapsed and unloaded branches are omitted.'}</p>}
     </section></div>}
+    {selectedReport&&<Modal title={'Collection report · '+feedLabel(selectedReport.name)} close={()=>setReportFeed(null)} wide><CollectionReportPanel feed={selectedReport.name} report={selectedReport.report} counts={selectedReport.offline} offline={offline} busy={busy||syncing(selectedReport)} retry={()=>void action('media/retry',{names:[selectedReport.name]})} openPost={id=>{setReportFeed(null);void openThread(id);}}/>{error&&<p className="notice error" role="alert">{error}</p>}</Modal>}
     {tagPost&&<Modal title="Edit post tags" close={()=>{if(!busy)setTagPost(null);}}><TagEditor post={tagPost} available={state?.tags??[]} busy={busy} save={async tags=>{const result=await action('tags',{id:tagPost.id,context:tagPost.readContext,tags});if(result){setThread(old=>old?.post.id===tagPost.id?{...old,post:result.post}:old);setTagPost(null);}return Boolean(result);}}/>{error&&<p role="alert">{error}</p>}</Modal>}
     {bulkRead&&<Modal title="Mark matching posts read?" close={()=>{if(!busy)setBulkRead(null);}}><p>This marks every post matching the current filters as read, including posts beyond the loaded page.</p><div className="dialog-actions"><button className="button" disabled={busy} onClick={()=>setBulkRead(null)}>Cancel</button><button className="button primary" disabled={busy} onClick={()=>void action('read/bulk',{...bulkRead,confirm:true}).then(result=>{if(result){setReadBefore(Date.now());setBulkRead(null);}})}>Mark all matching posts read</button></div>{error&&<p role="alert">{error}</p>}</Modal>}
     {removeFeed&&<Modal title={'Remove '+feedLabel(removeFeed)+'?'} close={()=>setRemoveFeed(null)}><p>This stops its sync and removes it from your subscribed feeds. Collected content and history remain stored.</p><div className="dialog-actions"><button className="button" onClick={()=>setRemoveFeed(null)}>Keep feed</button><button className="button danger" disabled={busy} onClick={()=>{const name=removeFeed;void action('remove',{name,confirm:true}).then(result=>{if(result){if(source===name)setSource('');setRemoveFeed(null);}});}}>Remove feed</button></div>{error&&<p className="notice error" role="alert">{error}</p>}</Modal>}
@@ -386,6 +394,6 @@ function App() {
       {modal==='clear'&&<><p>Deletes collected posts, discussions and history checkpoints, and stops active work. Your feeds and browser sign-in remain. The next sync verifies the current browser account again. Locally deleted posts stay excluded.</p><button className="button danger" disabled={busy} onClick={()=>void action('clear').then(result=>{if(result){setThread(null);threadId.current=null;setModal(null);}})}>Clear content</button></>}
       {error&&<p className="notice error" role="alert">{error}</p>}
     </Modal>}
-  </div></NetworkModeProvider>;
+  </div></MediaBrowsingProvider></NetworkModeProvider>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);

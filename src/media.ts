@@ -1,4 +1,4 @@
-import {hasExternalAttachment,EXTERNAL_ATTACHMENT_NOTE} from './sources.ts';
+import {hasExternalAttachment,EXTERNAL_ATTACHMENT_NOTE,feedIdentity} from './sources.ts';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile, open } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
@@ -21,7 +21,7 @@ interface Cached { key: string; type: string; bytes: number }
 interface Task { postId: string; subreddit:string; revision:number; reference: MediaReference; generation: number; controller: AbortController; started?:boolean; pending?:Promise<unknown> }
 export interface MediaItem { key: string; kind: 'image' | 'video'; state: 'idle' | 'queued' | 'loading' | 'ready' | 'error'; url: string | null; localPath: string | null; message?: string;caption?:string }
 export interface MediaInventory {key:string;kind:'image'|'video'|'other';bytes:number;owners:{postId:string;feed:string}[]}
-export interface MediaDependencies { directory: string; queue: RequestQueue; fetch?: typeof fetch; onAccess: (error: AccessError) => void; maxRequests?: number; maxBytes?: number }
+export interface MediaDependencies { directory: string; queue: RequestQueue; fetch?: typeof fetch; onAccess: (error: AccessError) => void; maxRequests?: number; maxBytes?: number; onSaved?:(feed:string,bytes:number)=>void }
 
 /** Downloads public, observed media URLs. Browser navigation and CDN requests share one queue. */
 export class MediaCache {
@@ -230,6 +230,7 @@ export class MediaCache {
     if (this.store.generation !== task.generation || this.store.sourceRevision(task.subreddit)!==task.revision || post?.availability !== 'available' || !post.attachments.some(item=>mediaKey(item)===mediaKey(task.reference))
       || !this.store.followedSources().includes(post.subreddit)) throw new Error('Media was removed or cleared');
     if (this.store.getSetting('accessPause')) throw new Error('Collection is paused. Resume to revalidate access first.');
+    if(feedIdentity(task.subreddit).platform==='tumblr'&&this.store.getSetting('accessPause:tumblr'))throw new Error('Tumblr collection is paused. Resume Tumblr to revalidate access first.');
   }
   private async response(task:Task,url:string,accept:string) {
     const visited=new Set<string>();
@@ -255,7 +256,7 @@ export class MediaCache {
         // its URLs before the global pause aborts this task. Only explicit Resume retries.
         if(response.status===403)
           this.store.setMediaSync(task.generation,task.postId,'failed','Media URL expired or access denied; Resume will rediscover it');
-        const error=new AccessError(`Media host returned ${response.status}; all collection stopped`,retryAfter(response.headers.get('retry-after')??undefined));this.options.onAccess(error);throw error;
+        const platform=feedIdentity(task.subreddit).platform==='tumblr'&&/^(?:[a-z0-9-]+\.)?media\.tumblr\.com$/.test(new URL(url).hostname)?'tumblr':'reddit';const error=new AccessError(`Media host returned ${response.status}; ${platform==='tumblr'?'Tumblr collection paused':'all collection stopped'}`,retryAfter(response.headers.get('retry-after')??undefined),platform);this.options.onAccess(error);throw error;
       }
       if(response.status!==200){await response.body?.cancel();const Failure=[404,410].includes(response.status)?UnsupportedMediaError:Error;throw new Failure(`Media unavailable (HTTP ${response.status}); no automatic retry.`);}
       return response;
@@ -306,7 +307,7 @@ export class MediaCache {
       await rename(metadataTemporary,join(this.options.directory,`${key}.json`));
       this.assertCurrent(task);this.store.assertStorageFits(saved.bytes+metadataBytes);
       this.cached.set(key,entry);this.bytes+=saved.bytes-(this.diskFiles.get(key)??0);this.metadataBytes+=metadataBytes-(this.diskFiles.get(key+'.json')??0);
-      this.diskFiles.set(key,saved.bytes);this.diskFiles.set(key+'.json',metadataBytes);published=true;
+      this.diskFiles.set(key,saved.bytes);this.diskFiles.set(key+'.json',metadataBytes);published=true;this.options.onSaved?.(task.subreddit,saved.bytes);
     }finally{
       await Promise.all([temporary,audio,muxed,metadataTemporary,...(!published&&renamed?[join(this.options.directory,key),join(this.options.directory,`${key}.json`)]:[])].map(path=>rm(path,{force:true})));
       if(!published&&renamed){this.bytes-=this.diskFiles.get(key)??0;this.metadataBytes-=this.diskFiles.get(key+'.json')??0;this.diskFiles.delete(key);this.diskFiles.delete(key+'.json');}
@@ -358,6 +359,8 @@ export class MediaCache {
     await this.ready;
     const post=this.store.getPost(postId),saved=this.cached.get(key);
     if(!post||post.availability!=='available'||!saved||!post.attachments.some(item=>mediaKey(item)===key)) {res.writeHead(404).end();return;}
+    try{const file=await stat(join(this.options.directory,key));if(!file.isFile()||file.size!==saved.bytes)throw new Error('Invalid saved media');}
+    catch{await this.inventory();res.writeHead(404).end();return;}
     let start=0,end=saved.bytes-1;
     if(range){const match=/^bytes=(\d*)-(\d*)$/.exec(range);if(!match||(!match[1]&&!match[2])){res.writeHead(416,{'Content-Range':`bytes */${saved.bytes}`}).end();return;}
       if(!match[1])start=Math.max(0,saved.bytes-Number(match[2]));else{start=Number(match[1]);if(match[2])end=Math.min(end,Number(match[2]));}
