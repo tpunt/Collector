@@ -26,7 +26,7 @@ test('Settings creates a downloadable encrypted backup and validates before conf
  const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
   const page=await browser.newPage();await page.route('**/*',route=>route.request().url().startsWith(origin)?route.continue():route.abort());await page.goto(origin);
-  await page.getByLabel('Search stored posts',{exact:true}).fill('Offline');await page.getByLabel('Search scope',{exact:true}).selectOption('body');await page.getByLabel('Read status',{exact:true}).selectOption('read');
+  await page.getByLabel('Search stored posts',{exact:true}).fill('Offline');await page.getByLabel('Search scope',{exact:true}).selectOption('body');await page.getByRole('button',{name:'Search',exact:true}).click();await page.getByLabel('Read status',{exact:true}).selectOption('read');
   await page.getByRole('button',{name:'Settings',exact:true}).click();await page.getByLabel('Backup passphrase',{exact:true}).fill('backup fixture password');await page.getByLabel('Repeat passphrase',{exact:true}).fill('backup fixture password');
   await page.getByRole('button',{name:'Create encrypted backup',exact:true}).click();const link=page.getByRole('link',{name:'Download backup',exact:true});await link.waitFor();assert.match(app.jobs.state.message,/create a backup/i);
   const event=page.waitForEvent('download');await link.click();const download=await event,path=join(directory,'collector.tar.age');await download.saveAs(path);await page.waitForFunction(()=>Array.from(document.querySelectorAll('button')).some(button=>button.textContent==='Create encrypted backup'&&!button.disabled));
