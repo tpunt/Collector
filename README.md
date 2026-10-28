@@ -81,6 +81,45 @@ the existing filters; newly read cards stay in an Unread view until **Refresh
 view** or a filter change. Sync, import and restart retain read status. Deletion
 and Clear remove it with the content.
 
+## Parser failures and local diagnostics
+
+Website updates can invalidate HTML extraction. Missing required listing fields,
+unrecognised layouts, unexpected post identities and invalid next-page links
+pause collection and leave the page checkpoint unchanged for explicit retry.
+Reddit no longer silently skips malformed visible post cards, including cards
+whose ID attribute disappeared. Partial text/media work stays incomplete.
+Explicit removals, unavailable content and an end-of-listing result retain their
+existing disclosed coverage semantics; no parser can guarantee detection of every
+possible presentation change.
+
+The **Problems** sidebar button opens local diagnostics. New problems also show
+an amber notice across app views. Records identify the source/feed, operation,
+post/checkpoint where available, first/last timestamps, occurrence counts,
+structural extraction facts, safe HTTP/system error codes and Collector source
+locations. **Mark displayed problems as seen** clears the notice for those
+occurrences without deleting diagnostics or resuming collection. Newer repeats
+remain unseen. **Download diagnostics** exports the bounded, sanitised snapshot;
+its absolute local path is omitted from the export.
+
+The local file is `.local-data/logs/problems.json` (or `logs/` beside the configured
+library database). It contains problems only: no successful-request trace,
+post/comment text, raw HTML, screenshots, error-message payloads, headers,
+credentials, cookies, query strings, title slugs or signed CDN paths. Source/feed
+and item identities are intentionally retained for debugging. It includes the
+Node runtime version. Diagnostics are excluded from library backups and Git.
+
+Repeated problems are grouped by code, operation and feed, retaining at most
+three bounded samples per group. Counters update in memory on each occurrence;
+repeat-only disk updates coalesce for one minute. New groups can flush sooner,
+but all automatic write attempts, including failed writes, share a limit of
+20 per minute. Normal shutdown flushes pending counters; a crash can lose the
+latest coalescing window. At most 200 groups / 256 KiB are retained; atomic writes
+can temporarily use a second file of the same maximum size. Older groups rotate
+out. Logging failures stay visible in the UI and do not stop collection.
+Deliberate Stop/Offline pauses, configured collection budgets and expected
+online-only embeds do not generate problem activity. Archive/service failures
+and malformed archive-record counts are recorded without their record contents.
+
 ## Run
 
 After the initial setup below, double-click **Collector.command** in Finder, or

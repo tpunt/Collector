@@ -57,3 +57,21 @@ export function hasExternalAttachment(post:{subreddit:string;outbound:string|nul
   return feedIdentity(post.subreddit).platform==='tumblr'&&Boolean(post.outbound)&&post.media.includes('Video');
 }
 export const EXTERNAL_ATTACHMENT_NOTE='An embedded player requires internet; hosted attachments are saved locally';
+
+/** Only known public origins and structural identifiers. Never query parameters,
+ * fragments, URL credentials, post-title slugs or signed CDN paths. */
+export function diagnosticPage(input:unknown):string|undefined {
+  try{
+    if(typeof input!=='string'||input.length>8000)return;
+    const url=new URL(input);if(url.protocol!=='https:'||url.port)return;
+    if(['old.reddit.com','www.reddit.com','reddit.com'].includes(url.hostname)){
+      const match=/^\/r\/([a-z0-9_]{2,21})\/(new|comments\/([a-z0-9]{1,16}))\/?/i.exec(url.pathname);
+      return url.origin+(match?`/r/${match[1]!.toLowerCase()}/${match[2]}/`:'/');
+    }
+    if(/^[a-z0-9-]+\.tumblr\.com$/.test(url.hostname)&&!['api','assets','static'].includes(url.hostname.split('.')[0]!)){
+      const match=/^\/(post\/[0-9]{1,20}|page\/[0-9]{1,9})(?:\/|$)/.exec(url.pathname);return url.origin+(match?'/'+match[1]+'/':'/');
+    }
+    if(url.hostname==='arctic-shift.photon-reddit.com')return url.origin+'/api/posts/search';
+    if(['i.redd.it','v.redd.it','i.imgur.com','preview.redd.it','external-preview.redd.it'].includes(url.hostname)||/^(?:[a-z0-9-]+\.)?media\.tumblr\.com$/.test(url.hostname))return url.origin+'/[media]';
+  }catch{/* URLs are optional diagnostic context. */}
+}

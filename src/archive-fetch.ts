@@ -6,6 +6,7 @@ import { subredditName, postId } from './domain.ts';
 import type { PostObservation } from './domain.ts';
 import type { ReaderStore } from './store.ts';
 import type { RequestQueue } from './request-gate.ts';
+import type {ProblemReporter} from './problems.ts';
 import { retryAfter } from './limiter.ts';
 
 const ENDPOINT = 'https://arctic-shift.photon-reddit.com/api/posts/search';
@@ -13,6 +14,7 @@ const PAGE_LIMIT = 100;
 const MAX_RESPONSE = 32 * 1024 ** 2;
 export interface ArchiveFetchDependencies {
   queue: RequestQueue;
+  problems?:ProblemReporter;
   fetch?: typeof fetch;
   assertCanStart?: (resume: boolean) => void;
   onRunStart?: () => void;
@@ -171,9 +173,11 @@ export class ArchiveFetcher {
           updatedAt: Date.now(), reason: null };
         // Content, counters and next cursor are one transaction, including skipped-only pages.
         this.store.commitArchiveFetch(generation, revision, updated, records);
+        if(omitted)this.deps.problems?.({operation:'archive-records',code:'archive-records',feed:job.subreddit,checkpoint:id,url:ENDPOINT,occurrences:omitted,facts:{rows:rows.length,accepted:records.length,rejected:omitted}},new Error('Invalid archive records'));
         if (denseFailure) throw new Error('Too many posts share one timestamp to advance safely. Partial data saved; use a bulk archive for this range.');
       }
     } catch (error) {
+      if(!signal.aborted)this.deps.problems?.({operation:'archive-page',feed:initial.subreddit,checkpoint:id,url:ENDPOINT},error);
       const job = this.store.archiveFetch(id);
       if (job?.state === 'running') this.store.saveArchiveFetch({ ...job, state: 'paused',
         reason: error instanceof Error ? error.message : 'Archive fetch interrupted; Resume to continue',

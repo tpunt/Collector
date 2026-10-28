@@ -11,6 +11,7 @@ import type { CommentRecord, ThreadSnapshot } from './extract.ts';
 import { postId, subredditName, validateObservation } from './domain.ts';
 import type { PostObservation, Availability } from './domain.ts';
 import {redditAuthor} from './reddit-author.ts';
+import type {ProblemReporter} from './problems.ts';
 import type { ReaderStore } from './store.ts';
 
 function seconds(value: unknown, required = true): number | undefined {
@@ -64,7 +65,8 @@ export class ArchiveImporter {
   private completion: Promise<void> | null = null;
   private source:string|null=null;
   progress: ImportProgress | null = null;
-  constructor(store: ReaderStore) { this.store = store; }
+  private problems:ProblemReporter|undefined;
+  constructor(store: ReaderStore,problems?:ProblemReporter) { this.store = store;this.problems=problems; }
   stop() { this.abort?.abort(); }
   async close() { this.stop(); await this.completion; }
   async stopSource(name:string) {if(this.source===name)await this.close();}
@@ -119,7 +121,7 @@ export class ArchiveImporter {
     let pipelineError: unknown;
     const piping = (/\.zst$/i.test(options.filename) ? pipeline(input,meter,new ZstdFrameGuard(),decoded,{signal:controller.signal}) : pipeline(input,meter,decoded,{signal:controller.signal})).catch(error => { pipelineError = error; });
     const decoder = new TextDecoder('utf-8', { fatal: true });
-    let pending = '';
+    let pending = '';let invalidRecords=0;
     const line = (value: string) => {
       progress.lines++;
       if (!value.trim()) return;
@@ -151,7 +153,7 @@ export class ArchiveImporter {
           }
           samples.set(parentPost, sample); progress.accepted++;
         } else { const post=archivePost(row,name,exportId!,startedAt);if(this.store.isPostExcluded(post.id)){progress.filtered++;return;}batch.push(post); progress.accepted++; }
-      } catch { progress.omitted++; }
+      } catch { progress.omitted++;invalidRecords++; }
     };
     try {
       for await (const chunk of decoded) {
@@ -191,13 +193,16 @@ export class ArchiveImporter {
       }
       progress.state = 'done'; progress.reason = 'Selected file processed; this does not establish complete historical coverage';
     } catch (error) {
+      if(!controller.signal.aborted)this.problems?.({operation:'import',feed:name,checkpoint:id},error);
       progress.state = 'paused'; progress.reason = error instanceof Error ? error.message : 'Import interrupted';
       controller.abort(); input.destroy(); decoded.destroy(); await piping;
     } finally {
+      if(invalidRecords)this.problems?.({operation:'import',code:'archive-records',feed:name,checkpoint:id,occurrences:invalidRecords,facts:{rows:progress.lines,accepted:progress.accepted,rejected:invalidRecords}},new Error('Invalid import records'));
       try {
         const previous = this.store.getSetting<unknown[]>('imports') ?? [];
         if (generation === this.store.generation) this.store.setSetting('imports', [{ ...progress, subreddit: name, size: options.size, modified: options.modified }, ...previous].slice(0,20));
       } catch (error) {
+        this.problems?.({operation:'import',feed:name,checkpoint:id},error);
         progress.state='paused';progress.reason=error instanceof Error?error.message:'Could not save import progress';
         throw error;
       } finally {

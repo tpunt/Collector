@@ -89,3 +89,16 @@
 .tag-editor-list{margin-bottom:12px}
 .post-card.keyboard-active{outline:1px solid #6d9fc4;outline-offset:2px}
 .post-card:focus{outline:1px solid #6d9fc4}
+
+.problem-tools{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+.problem-path{font-size:11px;overflow-wrap:anywhere;color:var(--muted)}
+.problem-record{border:1px solid var(--line);border-radius:5px;padding:9px;margin:8px 0}
+.problem-record summary{cursor:pointer;font-size:12px}
+.problem-record summary span{display:block;font-size:11px;color:var(--muted);margin-top:4px}
+.problem-record dl{font-size:11px;margin:10px 0}
+.problem-record dl>div{display:flex;gap:12px;margin:3px 0;flex-wrap:wrap}
+.problem-record dt{color:var(--muted);min-width:90px}
+.problem-record dd{margin:0;overflow-wrap:anywhere}
+.problem-record pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px;max-height:320px;overflow:auto;background:#101417;padding:9px}
+
+.problem-notice{border-color:#856335;background:#2e271b;color:#e5cc98}

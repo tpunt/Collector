@@ -1,5 +1,11 @@
 export class SyncLimitError extends Error {}
 export class UnsupportedMediaError extends Error {}
+import type {ExtractionFacts,ProblemCode} from './problems.ts';
+export class ExtractionError extends Error {
+  readonly code:ProblemCode;
+  readonly facts:ExtractionFacts;
+  constructor(code:ProblemCode,message:string,facts:ExtractionFacts={}){super(message);this.name='ExtractionError';this.code=code;this.facts=facts;}
+}
 
 export class PostUnavailableError extends Error {
   readonly availability:'removed'|'deleted';

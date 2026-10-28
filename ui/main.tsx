@@ -15,6 +15,8 @@ import {feedIdentity} from '../src/sources.ts';
 import {useReadTracking} from './read-tracking.ts';
 import {BackupSettings} from './BackupSettings.tsx';
 import {StorageSettings} from './StorageSettings.tsx';
+import {ProblemsPanel} from './Problems.tsx';
+import type {ProblemLog} from '../src/problems.ts';
 import { MEDIA_FILTERS } from '../src/domain.ts';
 import { GB } from '../src/storage-limit.ts';
 import {feedCursor} from '../src/feed-cursor.ts';
@@ -24,7 +26,7 @@ import type { StorageStatus } from '../src/storage-limit.ts';
 import './style.css';
 
 type Feed = FeedSource & { offline:OfflineMediaCounts;offlinePaused:boolean; status: 'idle' | 'queued' | 'syncing' | 'stopping' };
-type State = {generation:number;tags:{name:string;posts:number}[];token:string;canQuit:boolean;favourites:{posts:number;users:Author[]};sources:string[];feeds:Feed[];targets:HistoryTarget[];storage:StorageStatus;stats:{posts:number;snapshots:number;mediaPosts:number;contentRevision:number;databaseBytes:number};
+type State = {problems:ProblemLog['status'];generation:number;tags:{name:string;posts:number}[];token:string;canQuit:boolean;favourites:{posts:number;users:Author[]};sources:string[];feeds:Feed[];targets:HistoryTarget[];storage:StorageStatus;stats:{posts:number;snapshots:number;mediaPosts:number;contentRevision:number;databaseBytes:number};
   job:{running:boolean;manual:boolean;queued:number;subreddit:string|null;message:string;requests:{released:number;suppressed:number;sessionTotal:number};accessPause:{reason:string;notBefore:number|null}|null};
   media:{pending:number;bytes:number;requests:number;revision:number};import:{state:string;lines:number;accepted:number;omitted:number;bytes:number;reason:string|null}|null;imports:unknown[];archives:(ArchiveFetchState&{offline:OfflineMediaCounts})[];account:string|null};
 type Thread = {post:StoredPost;snapshot:ThreadSnapshot|null};
@@ -75,7 +77,7 @@ function App() {
   const [readFilter,setReadFilter]=useState('all'),[readBefore,setReadBefore]=useState(Date.now);
   const suppressedReads=useRef(new Set<string>()),readRequests=useRef(new Map<string,number>()),readSequence=useRef(0),readChanges=useRef(0),readResults=useRef(new Map<string,{version:number;context:string;readAt:number|null}>());
   const [readClient]=useState(()=>crypto.randomUUID());
-  const [error,setError]=useState(''),[busy,setBusy]=useState(false),[modal,setModal]=useState<'source'|'history'|'import'|'clear'|'settings'|'storage'|null>(null),[removeFeed,setRemoveFeed]=useState<string|null>(null);
+  const [error,setError]=useState(''),[busy,setBusy]=useState(false),[modal,setModal]=useState<'source'|'history'|'import'|'clear'|'settings'|'storage'|'problems'|null>(null),[removeFeed,setRemoveFeed]=useState<string|null>(null);
   const [loadErrors,setLoadErrors]=useState({state:'',feed:''}),retryFeed=useRef(false);
   const [modeBusy,setModeBusy]=useState(false);
   const visibleError=error||loadErrors.state||loadErrors.feed;
@@ -261,7 +263,7 @@ function App() {
         <div className={'storage-stat '+(state?.storage.full?'at-cap':'')}><dt>Stored</dt><dd><span>{(state?.storage.percentUsed??0).toFixed(2)}% used</span><small>{storedSize(state?.storage.usedBytes??0)} / {storedSize(state?.storage.limitBytes??10*GB)}</small></dd></div>
         <div title="Collection requests: a fresh random 4–6 second gap after each response is ready. Online players stream separately."><dt>Request spacing</dt><dd>4–6 s</dd></div>
         <div title="Collection requests only; excludes online video players"><dt>Session requests</dt><dd>{(state?.job.requests.sessionTotal??0).toLocaleString()}</dd></div>
-      </dl><button onClick={()=>setModal('history')}>Collection history <span>{pending.length||''}</span></button><button onClick={openArchives}>Import an archive</button>
+      </dl><button onClick={()=>setModal('history')}>Collection history <span>{pending.length||''}</span></button><button onClick={openArchives}>Import an archive</button><button onClick={()=>{setError('');setModal('problems');}}>Problems <span>{state?.problems?.unseen||''}</span></button>
         <button className="settings-button" onClick={openSettings}>Settings</button>
       </div>
     </aside>
@@ -273,6 +275,7 @@ function App() {
         </>}{view==='feeds'&&<button className="button primary" disabled={offline} onClick={()=>{setName('');setMonths(1);setModal('source');}}>＋ Add feed</button>}</div>
       </header>
       {visibleError&&!modal&&!removeFeed&&!clearFeed&&!postToDelete&&<div className="notice error" role="alert"><span>{visibleError}</span><button aria-label="Dismiss error" onClick={()=>{setError('');setLoadErrors({state:'',feed:''});}}>×</button></div>}
+      {(Boolean(state?.problems?.unseen)||state?.problems?.writeError)&&modal!=='problems'&&<div className="notice problem-notice" role="status"><span>{state?.problems?.writeError??`Collector encountered ${state?.problems?.unseen} new problem ${state?.problems?.unseen===1?'occurrence':'occurrences'}. Check collection status and diagnostics.`}</span><button className="button" onClick={()=>{setError('');setModal('problems');}}>View problems</button></div>}
       {!network.status?.offline&&network.status?.message&&network.status.message!=='Online'&&<div className="notice" role="status">{network.status.message}</div>}
       {state?.storage.full&&<div className="notice"><span>Storage cap reached. Existing content is kept; increase the cap to continue collecting.</span><button className="button" onClick={openSettings}>Storage settings</button></div>}
       {state?.job.accessPause&&<div className="notice">{state.job.accessPause.reason}<button className="button" disabled={busy||offline} onClick={()=>void action('sync')}>Resume sync</button></div>}
@@ -341,7 +344,8 @@ function App() {
     {removeFeed&&<Modal title={'Remove '+feedLabel(removeFeed)+'?'} close={()=>setRemoveFeed(null)}><p>This stops its sync and removes it from your subscribed feeds. Collected content and history remain stored.</p><div className="dialog-actions"><button className="button" onClick={()=>setRemoveFeed(null)}>Keep feed</button><button className="button danger" disabled={busy} onClick={()=>{const name=removeFeed;void action('remove',{name,confirm:true}).then(result=>{if(result){if(source===name)setSource('');setRemoveFeed(null);}});}}>Remove feed</button></div>{error&&<p className="notice error" role="alert">{error}</p>}</Modal>}
     {postToDelete&&<Modal title="Delete this post?" close={()=>setPostToDelete(null)}><p className="delete-post-title">{postToDelete.title}</p><p>Delete this post and its saved discussion from Collector. Media files are removed unless another post uses them.</p><p>It will stay excluded from future refreshes, history fetching and archive imports, even after clearing collected data. Deletion applies only to your local library.</p><div className="dialog-actions"><button className="button" disabled={busy} onClick={()=>setPostToDelete(null)}>Keep post</button><button className="button danger" disabled={busy} onClick={()=>{const id=postToDelete.id;void action('delete-post',{id,confirm:true}).then(result=>{if(result){if(threadId.current===id){setThread(null);threadId.current=null;}setPostToDelete(null);}});}}>Delete post</button></div>{error&&<p className="notice error" role="alert">{error}</p>}</Modal>}
     {clearFeed&&<Modal title={'Clear all data for '+feedLabel(clearFeed)+'?'} close={()=>setClearFeed(null)}><p>This stops syncing {feedLabel(clearFeed)} and permanently deletes its posts, discussions, saved media and history checkpoints. Your subscription and history limit stay in place. Locally deleted posts stay excluded.</p><p>Other feeds keep their data. Media files shared with another feed are kept. You can refresh this feed to collect it again.</p><div className="dialog-actions"><button className="button" disabled={busy} onClick={()=>setClearFeed(null)}>Keep data</button><button className="button danger" disabled={busy} onClick={()=>{const name=clearFeed;void action('clear-source',{name,confirm:true}).then(result=>{if(result){if(thread?.post.subreddit===name){setThread(null);threadId.current=null;}setClearFeed(null);}});}}>Clear data</button></div>{error&&<p className="notice error" role="alert">{error}</p>}</Modal>}
-    {modal&&<Modal title={modal==='source'?'Add feed':modal==='history'?'Collection history':modal==='import'?'Import archive':modal==='settings'?'Settings':modal==='storage'?'Storage':'Clear content?'} close={()=>{if(!busy)setModal(null);}} wide={modal==='history'||modal==='storage'}>
+    {modal&&<Modal title={modal==='source'?'Add feed':modal==='history'?'Collection history':modal==='import'?'Import archive':modal==='settings'?'Settings':modal==='storage'?'Storage':modal==='problems'?'Problems':'Clear content?'} close={()=>{if(!busy)setModal(null);}} wide={modal==='history'||modal==='storage'||modal==='problems'}>
+      {modal==='problems'&&<ProblemsPanel token={token.current} changed={async()=>{await loadState();}} setBusy={setBusy}/>}
       {modal==='storage'&&<StorageSettings token={token.current} setBusy={setBusy} changed={async()=>{await loadState();setReadBefore(Date.now());}}/>}
       {modal==='settings'&&<><form onSubmit={e=>{e.preventDefault();void action('settings',{maxStoredBytes:Math.round(Number(storageGb)*GB)}).then(result=>{if(result)setStorageSaved(true);});}}>
         <label>Max stored size (GB)<input type="number" min="0.001" max="10000" step="0.001" required value={storageGb} onChange={e=>{setStorageGb(e.target.value);setStorageSaved(false);}}/></label>

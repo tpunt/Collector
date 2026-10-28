@@ -4,7 +4,7 @@ import type {PostObservation,MediaKind} from './domain.ts';
 import {feedIdentity,tumblrItem,tumblrUrl} from './sources.ts';
 import {mediaReferences,MAX_MEDIA_REFERENCES} from './media-reference.ts';
 import type {Listing} from './extract.ts';
-import {PostIdentityError} from './sync-errors.ts';
+import {PostIdentityError,ExtractionError} from './sync-errors.ts';
 
 /** Public theme HTML only: attached content and explicit attributes. No API,
  * hydration-state traversal, screenshots or page-script execution. */
@@ -66,7 +66,7 @@ function observation(row:ReturnType<typeof collectTumblrDom>['rows'][number],fee
   if(files.length>MAX_MEDIA_REFERENCES)throw new Error('Tumblr post contains too many attachments');
   const unknownFiles=row.files.filter(url=>!mediaReferences([new URL(url,`https://${identity.name}.tumblr.com`).href]).length);
   const embedded=row.frames.find(url=>!url.includes('assets.tumblr.com')&&!url.includes('like_iframe'));
-  if(complete&&(row.readMore||unknownFiles.length||row.frames.some(url=>/photoset_iframe|video_file|video\.tumblr\.com/i.test(url))))throw new Error('Tumblr theme hides some content or media; this post cannot yet be saved completely');
+  if(complete&&(row.readMore||unknownFiles.length||row.frames.some(url=>/photoset_iframe|video_file|video\.tumblr\.com/i.test(url))))throw new ExtractionError('post-content','Tumblr theme hides some content or media; this post cannot yet be saved completely',{missingFields:['body','attachments']});
   const media:MediaKind[]=['Text',...new Set(files.map(file=>file.kind==='image'?'Image' as const:'Video' as const)),...(embedded?['Video' as const]:[])];
   const itemId=`tumblr:${identity.name}:${id}`;
   return validateObservation({id:itemId,subreddit:feed,title:row.title||`Post by @${identity.name}`,permalink:`https://${identity.name}.tumblr.com/post/${id}/`,
@@ -75,13 +75,14 @@ function observation(row:ReturnType<typeof collectTumblrDom>['rows'][number],fee
 }
 export async function readTumblrListing(page:Page,feed:string):Promise<Listing>{
   tumblrUrl(page.url(),feed,true);const dom=await page.evaluate(collectTumblrDom);
-  if(dom.blocked)throw new Error('Tumblr requires sign-in or access confirmation; public-blog collection paused');
-  if(!dom.rows.length&&!dom.empty)throw new Error('Tumblr theme was not recognised; no explicit empty state');
+  const evidence={rows:dom.rows.length,selector:'article,[data-post-id],.post[id]',emptyMarker:dom.empty,nextPresent:Boolean(dom.next)};
+  if(dom.blocked)throw new ExtractionError('access','Tumblr requires sign-in or access confirmation; public-blog collection paused',evidence);
+  if(!dom.rows.length&&!dom.empty)throw new ExtractionError('listing-layout','Tumblr theme was not recognised; no explicit empty state',evidence);
   const posts:PostObservation[]=[];let omissions=0;
   for(const row of dom.rows)try{posts.push(observation(row,feed));}catch{omissions++;}
   // Unknown dates/identity must remain retryable, rather than permanently skip a
   // page or report that all history was collected.
-  if(omissions)throw new Error(`${omissions} Tumblr post(s) lacked a supported identity or absolute time; page checkpoint kept for retry`);
+  if(omissions)throw new ExtractionError('listing-records',`${omissions} Tumblr post(s) lacked a supported identity or absolute time; page checkpoint kept for retry`,{...evidence,accepted:posts.length,rejected:omissions,missingFields:['id','datetime','permalink']});
   const next=dom.next?tumblrUrl(dom.next,feed,true).href:null;
   return{account:'',posts,ordinary:posts.filter((_,index)=>!dom.rows[index]?.pinned).map(post=>({id:post.id,createdMs:post.created.epochMs,precisionMs:post.created.precisionMs})),unknownTime:false,omissions:0,next,empty:dom.empty,signature:posts.map(post=>post.id).join(',')};
 }

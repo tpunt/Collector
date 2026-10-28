@@ -3,7 +3,7 @@ import { absoluteTime, canonicalPostUrl, postId, redditUrl, subredditName, valid
 import type { MediaKind, PostObservation, Availability } from './domain.ts';
 import { mediaReferences, postMediaReferences,isGallery } from './media-reference.ts';
 import type { MediaReference } from './media-reference.ts';
-import {PostIdentityError} from './sync-errors.ts';
+import {PostIdentityError,ExtractionError} from './sync-errors.ts';
 import {onlineEmbed} from './online-embed.ts';
 import {redditDomAuthor} from './reddit-author.ts';
 import type {Author} from './authors.ts';
@@ -36,7 +36,8 @@ export function collectClassicListingDom() {
   }
   const accountLink = Array.from(document.querySelectorAll('#header .user a')).find(el => rendered(el) && /\/user\//.test(el.getAttribute('href') ?? ''));
   const table = document.querySelector('#siteTable');
-  const rows = Array.from(table?.querySelectorAll(':scope > .thing[data-fullname^="t3_"]')??[]).filter(rendered);
+  // A missing ID is an extraction failure, rather than a card to silently hide.
+  const rows = Array.from(table?.querySelectorAll(':scope > .thing')??[]).filter(rendered);
   const posts: RawPost[] = rows.map(el => {
     const title = el.querySelector('a.title');
     const time = el.querySelector('.tagline time:not(.edited-timestamp)');
@@ -89,9 +90,9 @@ export function classifyMedia(row: Pick<RawPost, 'self' | 'body' | 'outbound' | 
 
 export function validateNext(input: string | null, subreddit: string): string | null {
   if (!input) return null;
-  const url = redditUrl(input);
+  let url:URL;try{url=redditUrl(input);}catch{throw new ExtractionError('pagination','Pagination left the selected subreddit/new listing');}
   if (url.hostname !== 'old.reddit.com' || url.hash || !new RegExp(`^/r/${subredditName(subreddit)}/new/?$`, 'i').test(url.pathname)) {
-    throw new Error('Pagination left the selected subreddit/new listing');
+    throw new ExtractionError('pagination','Pagination left the selected subreddit/new listing');
   }
   return url.href;
 }
@@ -99,20 +100,23 @@ export function validateNext(input: string | null, subreddit: string): string | 
 export async function readListing(page: Page, input: string): Promise<Listing> {
   const subreddit = subredditName(input);
   const dom = await page.evaluate(collectClassicListingDom);
-  if (dom.blocked) throw new Error('Reddit displayed an access or verification block');
-  if (!dom.account || !/^[a-z0-9_-]{3,24}$/i.test(dom.account) || !dom.accountHref) throw new Error('Sign-in is unavailable; no rendered account header');
+  const evidence={rows:dom.posts.length,selector:'#siteTable',emptyMarker:dom.empty,nextPresent:Boolean(dom.next)};
+  if (dom.blocked) throw new ExtractionError('access','Reddit displayed an access or verification block',evidence);
+  if (!dom.account || !/^[a-z0-9_-]{3,24}$/i.test(dom.account) || !dom.accountHref) throw new ExtractionError('access','Sign-in is unavailable; no rendered account header',{...evidence,missingFields:['account']});
   const accountLink = redditUrl(dom.accountHref);
   if (accountLink.pathname.replace(/\/$/, '').toLowerCase() !== `/user/${dom.account.toLowerCase()}`) throw new Error('Account header identity is inconsistent');
-  if (dom.sort !== 'new') throw new Error('Expected the subreddit’s New listing');
-  if (!dom.posts.length && !dom.empty) throw new Error('Listing layout was not recognised; no explicit empty state');
+  if (dom.sort !== 'new') throw new ExtractionError('listing-layout','Expected the subreddit’s New listing',{...evidence,missingFields:['sort']});
+  if (!dom.posts.length && !dom.empty) throw new ExtractionError('listing-layout','Listing layout was not recognised; no explicit empty state',evidence);
   const posts: PostObservation[] = [];
   const ordinary: Listing['ordinary'] = [];
   let omissions = 0;
   let unknownTime = false;
+  const missing=new Set<string>();
   const now = Date.now();
   for (const row of dom.posts) {
     if (row.promoted) continue;
     const created = row.datetime ? absoluteTime(row.datetime) : null;
+    if(!created)missing.add('datetime');if(!row.id)missing.add('id');if(!row.permalink)missing.add('permalink');if(!row.subreddit)missing.add('subreddit');if(!row.title.trim())missing.add('title');
     if (!created && !row.pinned) unknownTime = true;
     try {
       if (!created || !row.id || !row.permalink || !row.subreddit || subredditName(row.subreddit) !== subreddit) throw new Error('Incomplete identity/time');
@@ -124,7 +128,7 @@ export async function readListing(page: Page, input: string): Promise<Listing> {
       if (!row.pinned) ordinary.push({ id: observation.id, createdMs: created.epochMs, precisionMs: created.precisionMs });
     } catch { omissions++; }
   }
-  if (dom.posts.some(row => !row.promoted) && !posts.length) throw new Error('All ordinary posts failed identity/time validation');
+  if(omissions)throw new ExtractionError('listing-records',`${omissions} post(s) could not be parsed; collection paused and page checkpoint kept for retry`,{...evidence,accepted:posts.length,rejected:omissions,missingFields:[...missing]});
   return { account: dom.account, posts, ordinary, unknownTime, omissions,
     next: validateNext(dom.next, subreddit), empty: dom.empty,
     signature: posts.map(post => post.id).join(',') };

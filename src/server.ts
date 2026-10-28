@@ -27,6 +27,7 @@ import {claimInstance} from './instance.ts';
 import {NetworkMode} from './network-mode.ts';
 import {onlinePlayer} from './online-player.ts';
 import {WebSocketServer} from 'ws';
+import {ProblemLog} from './problems.ts';
 
 export function createReaderServer(options: { database?: string; port?: number; root?:string; onShutdown?:()=>Promise<void>; backup?:{workFactor?:number}; archive?:{fetch?:typeof fetch}; jobs?: JobDependencies; media?: Partial<Pick<MediaDependencies,'directory'|'fetch'|'maxBytes'|'maxRequests'>> } = {}) {
   const database=options.database??databasePath;
@@ -38,15 +39,16 @@ export function createReaderServer(options: { database?: string; port?: number; 
   const backupDirectory=database===':memory:'?join(tmpdir(),'collector-backups-'+randomBytes(12).toString('hex')):join(dirname(database),'.backup-work');
   recoverLibraryRestore(database,mediaDirectory,backupDirectory);
   const store = startupStore = new ReaderStore(database);
+  const problems=new ProblemLog(database===':memory:'?join(mediaDirectory,'.problems'):join(dirname(resolve(database)),'logs'));
   const network = options.jobs?.network ?? new RequestQueue({fromCompletion:true});
   let media: MediaCache;
   let archive:ArchiveFetcher;
-  const jobs = new ReaderJobs(store, {...options.jobs,network,onPause:()=>{media?.stop();archive?.pause(store.getSetting<{reason:string}>('accessPause')?.reason??'Collection stopped; Resume archive to continue');options.jobs?.onPause?.();}});
+  const jobs = new ReaderJobs(store, {...options.jobs,problems:(context,error)=>{problems.report(context,error);options.jobs?.problems?.(context,error);},network,onPause:()=>{media?.stop();archive?.pause(store.getSetting<{reason:string}>('accessPause')?.reason??'Collection stopped; Resume archive to continue');options.jobs?.onPause?.();}});
   media = new MediaCache(store,{...options.media,directory:mediaDirectory,queue:network,onAccess:error=>jobs.accessFailure(error)});
   jobs.attachMedia(options.jobs?.mediaSync===undefined?media:options.jobs.mediaSync);
-  const importer = new ArchiveImporter(store);
+  const importer = new ArchiveImporter(store,problems.report);
   const backups=new LibraryBackups(store,media,backupDirectory,mediaDirectory,options.backup?.workFactor);
-  archive=new ArchiveFetcher(store,{...options.archive,queue:network,assertCanStart:resume=>{
+  archive=new ArchiveFetcher(store,{...options.archive,problems:problems.report,queue:network,assertCanStart:resume=>{
     if(importer.progress?.state==='running')throw new Error('Stop the file import before fetching an archive');
     jobs.assertCanQueue(resume);
   },onRunStart:()=>jobs.beginArchiveRun(),saveMedia:(ids,signal)=>jobs.archiveMedia(ids,signal)});
@@ -66,7 +68,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
   const json = (res: ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value)); };
   const body = async (req: IncomingMessage) => {
     let content = ''; for await (const chunk of req) { content += chunk; if (content.length > 32_000) throw new Error('Request too large'); }
-    return JSON.parse(content || '{}') as Record<string, unknown>;
+    const value=JSON.parse(content||'{}');if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Expected a JSON object');return value as Record<string,unknown>;
   };
   const date = (value: unknown): number | undefined => {
     if (value === undefined || value === null || value === '') return undefined;
@@ -124,6 +126,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
         if(cleansContent)cleaningContent=true;
         try {
         switch (url.pathname) {
+          case '/api/problems/acknowledge': problems.acknowledge(data.records as {id:string;count:number}[]);json(res,problems.list());return;
           case '/api/offline': {
             if(typeof data.offline!=='boolean')throw new Error('Choose Offline mode on or off');
             if(!data.offline&&cleaningContent)throw new Error('Wait for local maintenance before resuming online work');
@@ -299,6 +302,8 @@ export function createReaderServer(options: { database?: string; port?: number; 
         } finally {if(cleansContent)cleaningContent=false;}
       }
       if (req.method !== 'GET') { json(res,{error:'Method not allowed'},405); return; }
+      if(url.pathname==='/api/problems'){json(res,problems.list());return;}
+      if(url.pathname==='/api/problems/download'){const {path,...diagnostics}=problems.list();res.setHeader('Content-Disposition','attachment; filename="collector-problems.json"');json(res,diagnostics);return;}
       if(url.pathname==='/api/network/events'){json(res,{error:'WebSocket connection required'},426);return;}
       if(url.pathname==='/online-player'){network.assertOnline();const player=onlinePlayer(url.searchParams.get('url')??'',token,origin);res.setHeader('Content-Security-Policy',player.csp);res.setHeader('Content-Type','text/html; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(player.body);return;}
       if(url.pathname==='/api/storage'){json(res,storageBreakdown(store,await media.inventory()));return;}
@@ -307,7 +312,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
         res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':'attachment; filename="collector.tar.age"','Content-Length':file.bytes,'Cache-Control':'no-store'});
         await pipeline(createReadStream(file.path),res);return;
       }
-      if (url.pathname === '/api/state') { const policy=networkMode.status;json(res,{ token, network:policy, canQuit:Boolean(options.onShutdown), generation:store.generation,tags:store.tags(), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name),offlinePaused:policy.offline&&policy.paused.feeds.includes(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
+      if (url.pathname === '/api/state') { const policy=networkMode.status;json(res,{ token, network:policy, problems:problems.status, canQuit:Boolean(options.onShutdown), generation:store.generation,tags:store.tags(), favourites:store.favourites(), sources:store.followedSources(), feeds:store.feedSources().map(feed => ({...feed,offline:store.offlineMedia(feed.name),offlinePaused:policy.offline&&policy.paused.feeds.includes(feed.name), status:feedStatus(feed.name)})), targets:store.listTargets(), stats:store.stats(), job:{...jobs.state,requests:{...jobs.state.requests,sessionTotal:jobs.state.requests.sessionTotal+media.status.requests+archive.requests}},media:media.status,archives:archive.list(),
         storage:store.storage, import:importer.progress, imports:store.getSetting('imports') ?? [], account:store.getSetting('account') }); return; }
       if (url.pathname === '/api/feed') {
         json(res,store.queryFeed(feedQuery(url.searchParams)));return;
@@ -324,7 +329,12 @@ export function createReaderServer(options: { database?: string; port?: number; 
         res.setHeader('Content-Type', ({'.html':'text/html; charset=utf-8','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'} as Record<string,string>)[extname(path)] ?? 'application/octet-stream');
         res.end(content);
       } catch { json(res,{error:'UI missing. Run npm run build first.'},404); }
-    } catch (error) { if (!res.headersSent) json(res,{error:error instanceof Error ? error.message : 'Request failed'},400); else res.end(); }
+    } catch (error) {
+      // Invalid user input is already shown by the requesting form. Only unexpected
+      // runtime failures belong in the persistent problem log.
+      if(error instanceof TypeError||error instanceof RangeError||/^ERR_SQLITE|^EIO$|^ENOSPC$/.test(String((error as NodeJS.ErrnoException)?.code??'')))problems.report({operation:'request'},error);
+      if (!res.headersSent) json(res,{error:error instanceof Error ? error.message : 'Request failed'},400); else res.end();
+    }
   };
   const server=createServer((req,res)=>{const work=handle(req,res);requests.add(work);void work.finally(()=>requests.delete(work));});
   const policySockets=new WebSocketServer({noServer:true,maxPayload:1024,perMessageDeflate:false});
@@ -340,7 +350,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
     }catch{socket.destroy();}
   });
   server.requestTimeout = 60 * 60_000;
-  return { server, store, jobs, importer, media, archive, backups, networkMode, async listen(port=options.port??Number(process.env.PORT??3210)) {
+  return { server, store, jobs, importer, media, archive, backups, networkMode, problems, async listen(port=options.port??Number(process.env.PORT??3210)) {
     await media.initialize();
     await new Promise<void>((resolve,reject)=>{
       const fail=(error:Error)=>{server.removeListener('listening',ready);reject(error);};
@@ -359,7 +369,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
     await Promise.allSettled([...requests]);await drained;
     // Do not release ownership while the primary database is still open, even
     // if a cache/temporary-file cleanup failed during shutdown.
-    store.close();lease?.release();
+    problems.close();store.close();lease?.release();
     if(temporaryMedia)try{await rm(mediaDirectory,{recursive:true,force:true});}catch(error){failures.push(error);}
     if(failures.length)throw new AggregateError(failures,'Collector stopped, but some temporary files could not be cleaned up');
   })();} };

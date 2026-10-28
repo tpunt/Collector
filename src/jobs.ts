@@ -8,8 +8,9 @@ import {feedName,feedIdentity,listingUrl} from './sources.ts';
 import type { Page } from 'playwright';
 import type { RequestQueue } from './request-gate.ts';
 import { discoverMedia } from './media-discovery.ts';
-import { SyncLimitError, UnsupportedMediaError, PostUnavailableError,PostIdentityError } from './sync-errors.ts';
+import { SyncLimitError, UnsupportedMediaError, PostUnavailableError,PostIdentityError,ExtractionError } from './sync-errors.ts';
 import {readTumblrListing,readTumblrPost} from './tumblr.ts';
+import type {ProblemContext,ProblemReporter} from './problems.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export interface MediaSyncDriver {
@@ -26,6 +27,7 @@ type Work = ({ id: string; kind: 'target'; targetId: string; head: boolean; dead
   { id: string; kind: 'thread' | 'media' | 'body'; postId: string; deadline: number; generation: number } |
   {id:string;kind:'media-source'|'body-source';subreddit:string;deadline:number;generation:number}) & {requestBaseline?:number};
 export interface JobDependencies {
+  problems?:ProblemReporter;
   network?: RequestQueue;
   mediaSync?:MediaSyncDriver|null;
   onPause?: () => void;
@@ -63,18 +65,25 @@ export class ReaderJobs {
   private attemptedBodies=new Set<string>();
   private network:RequestQueue|undefined;
   private signingIn:Promise<void>|null=null;
+  private reported=new WeakSet<Error>();
+  private problems:ProblemReporter;
+  private pageUrl:string|null=null;
   constructor(store: ReaderStore, dependencies: JobDependencies = {}) {
-    this.network=dependencies.network;
+    this.network=dependencies.network;this.problems=dependencies.problems??(()=>{});
     this.store = store;this.mediaSync=dependencies.mediaSync??null;
     this.onPause = dependencies.onPause ?? (() => {});
     this.discover = dependencies.discoverMedia ?? discoverMedia;
     this.browser = dependencies.browser ?? new ReaderBrowser(error => {
-      this.store.setSetting('accessPause', { reason: error.message, notBefore: error.notBefore });
-      this.pause(error.message);
+      this.accessFailure(error);
     }, dependencies.network);
     this.listing = dependencies.readListing ?? readListing;
     this.discussion = dependencies.readThread ?? readThread;
     this.account = dependencies.readAccount ?? (async page => (await page.evaluate(collectClassicListingDom)).account);
+  }
+  private problem(error:unknown,extra:Partial<ProblemContext>={}){
+    if(error instanceof Error){if(this.reported.has(error))return;this.reported.add(error);}
+    const work=this.active,feed=work?this.sourceOf(work):null;
+    this.problems({operation:work?.kind==='target'?'listing':work?.kind==='media'?'download':work?.kind==='thread'?'discussion':work?.kind==='body'?'body':this.manual?'sign-in':'collection',feed,post:work&&'postId'in work?work.postId:null,checkpoint:work?.kind==='target'?work.targetId:null,url:this.pageUrl,...extra},error);
   }
   private sourceOf(work: Work): string | null {
     if('subreddit' in work)return work.subreddit;
@@ -231,9 +240,10 @@ export class ReaderJobs {
     for (const name of sources) this.store.pauseSource(name, reason);
     this.queue = []; this.message = reason;
     this.manual = false;
-    void this.closeBrowser().catch(()=>{});
+    void this.closeBrowser().catch(error=>this.problem(error,{operation:'browser-close'}));
   }
   accessFailure(error: AccessError) {
+    this.problem(error);
     this.store.setSetting('accessPause', { reason: error.message, notBefore: error.notBefore });
     this.pause(error.message);
   }
@@ -261,12 +271,12 @@ export class ReaderJobs {
     this.allowed(true); this.manual = true; this.browserOpen = true;
     this.message = 'Sign in in the dedicated Chrome window, then Finish sign-in. Requests have random 4–6 second gaps after response readiness.';
     try { this.signingIn=this.browser.manualSignIn();await this.signingIn; }
-    catch (error) { this.pause(error instanceof Error ? error.message : 'Sign-in failed'); throw error; }
+    catch (error) { if(this.manual)this.problem(error,{operation:'sign-in'});this.pause(error instanceof Error ? error.message : 'Sign-in failed'); throw error; }
     finally{this.signingIn=null;}
   }
   async finishSignIn() { this.pause('Sign-in browser closed. Resume collection to verify the saved account.'); await this.closeBrowser(); }
   async close(reason='Application stopped; explicit Resume required') { this.pause(reason); await this.closeBrowser();await this.pumpDone;await this.signingIn?.catch(()=>{});await this.closeBrowser(); }
-  private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();const done=this.pump();this.pumpDone=done;void done.catch(()=>{}).finally(()=>{if(this.pumpDone===done)this.pumpDone=null;}); } }
+  private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();const done=this.pump();this.pumpDone=done;void done.catch(error=>this.problem(error,{operation:'collection'})).finally(()=>{if(this.pumpDone===done)this.pumpDone=null;}); } }
   private async pump() {
     const startingRequests = this.totalRequests();
     try {
@@ -278,7 +288,7 @@ export class ReaderJobs {
         if(index<0){for(const work of this.queue)if(work.kind==='target')this.store.pauseTarget(work.targetId,'Newer catch-up is unfinished; Resume to continue');this.queue=[];break;}
         const work = this.queue.splice(index, 1)[0]!;
         const workSession=this.feedRuns.get(this.sourceOf(work)??'')??this.session;
-        this.active = work;
+        this.active = work;this.pageUrl=null;
         this.controller = new AbortController();
         if (Date.now() >= work.deadline) {
           if (work.kind === 'target') this.store.pauseTarget(work.targetId, 'Session time budget reached; Resume to fetch more');
@@ -313,14 +323,14 @@ export class ReaderJobs {
               if(this.browserOpen&&this.mediaMode)await this.closeBrowser();
               await this.browser.open(120-(this.totalRequests()-requestBaseline),'tumblr');this.browserOpen=true;this.mediaMode=false;
               this.attemptedBodies.add(post.id);
-              const page=await this.browser.navigate(post.permalink,this.controller.signal),saved=await readTumblrPost(page,post.id);this.controller.signal.throwIfAborted();
+              const page=await this.browser.navigate(this.pageUrl=post.permalink,this.controller.signal),saved=await readTumblrPost(page,post.id);this.controller.signal.throwIfAborted();
               this.store.savePostBody(work.generation,post.id,saved.body??'',saved.observedAt,saved.author);
               if(!saved.attachments?.length)throw new UnsupportedMediaError('This Tumblr media is hosted by an unsupported external provider');
               this.store.saveMediaReferences(work.generation,post.id,saved.attachments);
             }else if(plan.discover){
               if(this.browserOpen&&!this.mediaMode)await this.closeBrowser();
               await this.browser.open(120-(this.totalRequests()-requestBaseline),'media');this.browserOpen=true;this.mediaMode=true;
-              const page=await this.browser.navigate(post.permalink.replace('https://www.reddit.com','https://old.reddit.com'),this.controller.signal);
+              const page=await this.browser.navigate(this.pageUrl=post.permalink.replace('https://www.reddit.com','https://old.reddit.com'),this.controller.signal);
               const account=await this.account(page);this.controller.signal.throwIfAborted();if(!account)throw new AccessError('Saved sign-in is unavailable');this.store.bindAccount(account);
               let attachments;
               try{attachments=await this.discover(page,post.id,()=>this.browser.mediaCandidates??[],this.controller.signal);}
@@ -355,7 +365,7 @@ export class ReaderJobs {
             this.message = `Syncing ${feedIdentity(target.subreddit).label} · ${target.observedCount} posts encountered`;
             const head = target.continuation === null || target.continuation===listingUrl(target.subreddit);
             const url = target.continuation ?? listingUrl(target.subreddit);
-            const listing = await (tumblr?readTumblrListing:this.listing)(await this.browser.navigate(url, this.controller.signal), target.subreddit);
+            const listing = await (tumblr?readTumblrListing:this.listing)(await this.browser.navigate(this.pageUrl=url, this.controller.signal), target.subreddit);
             this.controller.signal.throwIfAborted();
             if (this.store.getTarget(target.id)?.status === 'cancelled') continue;
             if(!tumblr)this.store.bindAccount(listing.account);
@@ -378,7 +388,7 @@ export class ReaderJobs {
               this.attemptedBodies.add(post.id);this.store.setBodySync(work.generation,post.id,'fetching');
             }
             this.message = work.kind==='body'?`Saving post text: ${post.title}`:`Reading discussion: ${post.title}`;
-            const page = await this.browser.navigate(post.permalink.replace('https://www.reddit.com', 'https://old.reddit.com'), this.controller.signal);
+            const page = await this.browser.navigate(this.pageUrl=post.permalink.replace('https://www.reddit.com', 'https://old.reddit.com'), this.controller.signal);
             if(tumblr&&work.kind==='body'){
               const saved=await readTumblrPost(page,post.id);this.controller.signal.throwIfAborted();
               this.store.savePostBody(work.generation,post.id,saved.body??'',saved.observedAt,saved.author);
@@ -395,7 +405,7 @@ export class ReaderJobs {
             this.controller.signal.throwIfAborted();
             if(work.kind==='body'){
               if(snapshot.availability!=='available'){this.store.markPostUnavailable(work.generation,post.id,snapshot.availability,snapshot.observedAt);this.store.noteSyncGap(post.subreddit);}
-              else if(snapshot.body===null)throw new Error('The complete post body was not exposed; Resume to retry');
+              else if(snapshot.body===null)throw new ExtractionError('post-content','The complete post body was not exposed; Resume to retry',{missingFields:['body']});
               else this.store.savePostBody(work.generation,post.id,snapshot.body,snapshot.observedAt,snapshot.author);
             }else this.store.saveSnapshot(work.generation, snapshot);
             if(attachments)this.store.saveMediaReferences(work.generation,post.id,attachments);
@@ -408,6 +418,7 @@ export class ReaderJobs {
           if (this.stoppedWork.has(work.id)) {
             await this.closeBrowser();
           } else if (!this.stopping) {
+            this.problem(error);
             if(error instanceof SyncLimitError){this.accessFailure(new AccessError(reason));}
             else if((work.kind==='media'||work.kind==='body')&&(error instanceof UnsupportedMediaError||(!(error instanceof AccessError)&&!(error instanceof PostIdentityError)&&!/sign.in|account|block|verification|layout|does not match|request control/i.test(reason)))){
               if(work.kind==='media')this.store.setMediaSync(work.generation,work.postId,error instanceof UnsupportedMediaError?'unavailable':'failed',reason,workSession);
