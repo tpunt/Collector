@@ -56,7 +56,7 @@ leave work incomplete, rather than silently advancing its checkpoint. External
 players retain the existing online-only treatment. In mixed posts, hosted media
 is saved while a separate external player keeps an orange offline warning; a
 cached image never counts as a downloaded external video. Blogs requiring sign-in,
-custom-domain blogs, Tumblr sign-in, replies/notes and third-party Tumblr archives
+custom-domain blogs, replies/notes and third-party Tumblr archives
 are not supported. Tumblr service access failures pause Tumblr collection separately;
 layout/post errors stop only the affected feed.
 Reddit and its archives can continue. Bulk Sync skips paused Tumblr until an
@@ -72,6 +72,27 @@ or claim all-time coverage. Local end-to-end tests cover both layouts, reblogs,
 paginated themes, full text, multiple attachments, local serving and interrupted
 collection. The integration remains experimental because public visibility and
 website layouts vary by blog.
+
+**Tumblr sign-in:** turn Offline mode off, open **Settings → Open Tumblr sign-in
+browser**, complete sign-in in Chrome, then click **Finish Tumblr sign-in**.
+This uses a separate local browser profile from Reddit. Credentials are entered
+only on Tumblr's website; profiles are excluded from Git and library backups.
+The manual browser loads normal website resources, with the same random 4–6
+second request spacing and sign-in request budget as Reddit. Offline mode closes
+it and preserves which source to reopen. Finishing closes the browser and keeps
+its saved session; it does not certify that authentication succeeded.
+
+**Deep Tumblr history is not yet implemented beyond captured theme pages.**
+Live investigation found that documented public date searches can discover older
+posts: a January 2025 search returned three Staff posts, and Collector extracted
+one full post with 20 attachment references. Search results are capped, may omit
+reblogs/unindexed posts, and have indexing restrictions before 2017. Empty server-rendered search
+pages also do not provide a dependable explicit empty marker. Search alone cannot
+prove complete coverage. The Staff `/archive` page remained 403-blocked, and a
+bounded Internet Archive index probe timed out. The next step is to inspect the
+archive and older-post controls with a user-completed Tumblr sign-in, then build
+and verify resumable history traversal against that actual layout. Signing in
+alone does not change the current history collector or verify private-blog access.
 
 Star a post to save it in **Favourite posts**, or star the author beside their
 username to add them to **Favourite users**. Both views work offline with the

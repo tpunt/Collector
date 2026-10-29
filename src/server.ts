@@ -271,7 +271,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             if(selection.source){await archive.stop(selection.source);media.stop(selection.source);await jobs.stopSource(selection.source);}else{await archive.stop();jobs.pause();}
             networkMode.cancel(selection);break;
           }
-          case '/api/sign-in': if(archive.running)throw new Error('Pause archive collection before signing in');await jobs.signIn(); break;
+          case '/api/sign-in': if(archive.running)throw new Error('Pause archive collection before signing in');if(data.platform!==undefined&&data.platform!=='reddit'&&data.platform!=='tumblr')throw new Error('Choose Reddit or Tumblr sign-in');await jobs.signIn(data.platform??'reddit'); break;
           case '/api/sign-in/finish': await jobs.finishSignIn(); break;
           case '/api/remove': {
             if (data.confirm !== true) throw new Error('Confirm feed removal first');

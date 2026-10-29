@@ -9,6 +9,7 @@ import { ChromiumRequestGate, chromiumControlUrl, RequestQueue, DEFAULT_REQUEST_
 import type { RequestInterval } from './request-gate.ts';
 import { redditUrl } from './domain.ts';
 import {tumblrResourceAllowed,tumblrContentUrl,tumblrBlog} from './sources.ts';
+import type {Platform} from './sources.ts';
 import {join} from 'node:path';
 
 export class AccessError extends Error {
@@ -41,9 +42,9 @@ export class ReaderBrowser {
   }
   get counts() { return this.gate?.counts ?? this.requestCounts; }
 
-  async open(maxRequests = 100, interactive: boolean | 'media' | 'tumblr' = false): Promise<void> {
+  async open(maxRequests = 100, interactive: boolean | 'media' | 'tumblr' | 'tumblr-sign-in' = false): Promise<void> {
     this.queue.assertOnline();
-    const platform=interactive==='tumblr'?'tumblr':'reddit';
+    const platform=interactive==='tumblr'||interactive==='tumblr-sign-in'?'tumblr':'reddit';
     if (this.context) { if(!this.failure&&this.platform===platform)return;await this.close(); }
     this.platform=platform;
     const lifecycle=this.lifecycle;
@@ -87,7 +88,8 @@ export class ReaderBrowser {
     const gate = await ChromiumRequestGate.install(control, {
       queue: this.queue,
       onMediaRequest: interactive==='media' ? url=>this.observedMedia.add(url) : undefined,
-      // Media controls need Reddit's scripts, not unrelated embeds or tracking.
+      // Interactive sign-in uses normal website resources (including identity
+      // providers). Extraction returns to the stricter source policy on reopen.
       allowResource:interactive==='tumblr'?(input,type)=>tumblrResourceAllowed(input,type,this.tumblrBlog,this.tumblrNavigation??undefined):interactive==='media'?url=>{try{const host=new URL(url).hostname;return ['reddit.com','old.reddit.com','www.reddit.com'].includes(host)||host==='redditstatic.com'||host.endsWith('.redditstatic.com')||host==='redditmedia.com'||host.endsWith('.redditmedia.com');}catch{return false;}}:undefined,
       blockedResourceTypes: interactive === 'media' ? ['Image', 'Media', 'Font', 'Ping', 'Other'] : interactive&&interactive!=='tumblr' ? [] : ['Image', 'Media', 'Font', 'Script', 'XHR', 'Fetch', 'Ping', 'Other'], maxRequests,
       isPaused: () => this.failure !== null||this.queue.offline,
@@ -99,11 +101,11 @@ export class ReaderBrowser {
     }catch(error){if(this.context===context)await this.close();throw error;}
   }
 
-  async manualSignIn() {
+  async manualSignIn(platform:Platform='reddit') {
     this.queue.assertOnline();
     await this.close();
-    await this.open(150, true);
-    await this.page!.goto('https://www.reddit.com/login/', { waitUntil: 'commit', timeout: 180_000 });
+    await this.open(150, platform==='tumblr'?'tumblr-sign-in':true);
+    await this.page!.goto(platform==='tumblr'?'https://www.tumblr.com/login':'https://www.reddit.com/login/', { waitUntil: 'commit', timeout: 180_000 });
   }
 
   async navigate(urlInput: string, signal?: AbortSignal): Promise<Page> {

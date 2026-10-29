@@ -6,7 +6,7 @@ import type {ArchiveFetcher} from './archive-fetch.ts';
 import type {MediaCache} from './media.ts';
 import type {RequestQueue} from './request-gate.ts';
 
-interface PausedWork {generation:number;feeds:string[];tasks:PausedTask[];archive:string|null;signIn:boolean}
+interface PausedWork {generation:number;feeds:string[];tasks:PausedTask[];archive:string|null;signIn:boolean;signInPlatform?:'tumblr'}
 export interface NetworkStatus {offline:boolean;changing:boolean;pendingReaders:number;revision:number;message:string;paused:{feeds:string[];threads:number;archive:boolean;signIn:boolean}}
 const REASON='Paused for Offline mode; progress saved';
 
@@ -37,7 +37,7 @@ export class NetworkMode {
     const followed=this.store.followedSources();
     return{generation:value.generation,feeds:Array.isArray(value.feeds)?value.feeds.filter(name=>followed.includes(name)):[],
       tasks:Array.isArray(value.tasks)?value.tasks.filter(task=>task&&(['media-source','body-source'].includes(task.kind)?'subreddit'in task&&followed.includes(task.subreddit):['thread','media','body'].includes(task.kind)&&'postId'in task&&typeof task.postId==='string'&&this.store.getPost(task.postId))):[],
-      archive:typeof value.archive==='string'&&this.store.archiveFetch(value.archive)&&followed.includes(this.store.archiveFetch(value.archive)!.subreddit)?value.archive:null,signIn:value.signIn===true};
+      archive:typeof value.archive==='string'&&this.store.archiveFetch(value.archive)&&followed.includes(this.store.archiveFetch(value.archive)!.subreddit)?value.archive:null,signIn:value.signIn===true,...value.signIn===true&&value.signInPlatform==='tumblr'?{signInPlatform:'tumblr' as const}:{}};
   }
   private save(plan:PausedWork){this.store.setSetting('offlineResume',plan);}
   private pendingReaders(){return this.readers?.ids.filter(id=>{const client=this.clients.get(id);return client&&client.ack<this.readers!.revision;}).length??0;}
@@ -110,7 +110,7 @@ export class NetworkMode {
         if(plan.archive)try{this.archive.resume(plan.archive);}catch(error){errors.push((error as Error).message);}
         if(plan.feeds.length)try{this.jobs.syncFeeds(plan.feeds);}catch(error){errors.push((error as Error).message);}
         if(plan.tasks.length)try{this.jobs.resumeOfflineTasks(plan.tasks);}catch(error){errors.push((error as Error).message);}
-        if(plan.signIn)void this.jobs.signIn().catch(error=>{if(!this.network.offline){this.message='Sign-in needs attention: '+(error as Error).message;this.publish();}});
+        if(plan.signIn)void this.jobs.signIn(plan.signInPlatform??'reddit').catch(error=>{if(!this.network.offline){this.message='Sign-in needs attention: '+(error as Error).message;this.publish();}});
       }
       if(errors.length)this.message='Online. Some work remains paused: '+[...new Set(errors)].join('; ');
       this.publish();

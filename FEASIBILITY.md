@@ -798,3 +798,62 @@ integration tests, and a subsequent focused run of the 11 Tumblr browser tests
 covering reblogs/self-reblogs, identity rejection, date provenance, ordered media,
 partial-page pause/resume and retained checkpoints. Screenshot and diagnostics
 are in the ignored `.local-data/qa/2026-10-29/tumblr/` directory.
+
+
+## 29 October 2026 — older Tumblr discovery and sign-in prerequisite
+
+Primary guidance:
+- Archive/month filters and dated theme pages:
+  https://help.tumblr.com/knowledge-base/lesser-known-features/
+- Documented `from`, `year`, `since` and `before` search operators and pre-2017
+  indexing restrictions:
+  https://help.tumblr.com/knowledge-base/search-and-filtering-basics/
+- Logged-out browsing can deliberately require sign-in partway through:
+  https://help.tumblr.com/knowledge-base/appearing-in-search-results/
+- Tag search does not include reblogs (same visibility guidance above).
+- Third-party backup options are not browser-only substitutes: tumblr-utils
+  requires a personal Tumblr API key, while TumblThree documents SVC/API routes:
+  https://github.com/bbolli/tumblr-utils/blob/master/tumblr_backup.md
+  https://github.com/TumblThreeApp/TumblThree
+- Internet Archive documents resumable URL-index queries:
+  https://github.com/internetarchive/wayback/tree/master/wayback-cdx-server
+
+Bounded live results, all through the existing random 4–6 second queue:
+- Public Staff listing: 17 articles, no captured archive/next link.
+- Documented `staff.tumblr.com/archive`: HTTP403 JavaScript challenge; stopped.
+- `from:staff year:2025`: HTTP200, 15 rendered articles. The captured `/recent`
+  link returned 15 articles too, with no older-page anchor. Ranking must not be
+  treated as chronological cursor evidence.
+- `from:staff since:2025-01-01 before:2025-02-01/recent`: HTTP200, three posts
+  dated January 7, 14 and 28. This demonstrates genuine discovery beyond the
+  initial listing without a Tumblr API call.
+- One captured January permalink: the production extractor returned a full
+  2,990-character post and 20 ordered attachment references with three released
+  requests. No gallery downloads were triggered in this investigation.
+- Year 2010 and October 2026 intervals: HTTP200 but no articles, explicit empty
+  text or JSON-LD result count. The public DOM included the matching query input,
+  timeline identifier, suggestions and a loading skeleton. This is insufficient
+  evidence to classify an interval as completely empty or permanently advance a
+  history checkpoint.
+- One documented Wayback CDX prefix query, limited to three URL records: response
+  timed out; one request was released and the browser closed. Archive discovery
+  remains unverified. No repeated requests or alternate archive hosts were tried.
+
+The user explicitly approved adding manual Tumblr sign-in if needed. Implemented
+separate Settings controls and a Tumblr interactive browser using its isolated
+local profile, the same request gate and 150-request sign-in budget as Reddit.
+Normal interactive resources support the site's login flow; collection still
+reopens under the existing stricter script-disabled Tumblr policy. Offline mode
+closes the window and resumes the same platform when allowed again. A denied
+Tumblr manual login ends manual state and preserves its source service pause.
+No passwords, cookies, tokens or authenticated page data were extracted.
+
+The real login page exposed Email/Password fields and the Log in button under
+the production profile/routing code. The first bounded readiness check stopped
+before the body appeared; a longer check verified the form, releasing five
+requests before closing. No form was submitted. Successful authentication and
+signed-in archive/history remain blocked on the user completing login. Local
+UI checks exercised the controls with a fake driver to avoid extra external
+requests; browser fixtures cover both sources, invalid source rejection,
+source cooldowns, source-preserving Offline resume and stale Finish rejection.
+Normal-library collection was never enabled.

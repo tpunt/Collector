@@ -5,6 +5,7 @@ import { advanceBoundary } from './history.ts';
 import type { ReaderStore } from './store.ts';
 import {postId} from './domain.ts';
 import {feedName,feedIdentity,listingUrl,tumblrPostUrl} from './sources.ts';
+import type {Platform} from './sources.ts';
 import type { Page } from 'playwright';
 import type { RequestQueue } from './request-gate.ts';
 import { discoverMedia } from './media-discovery.ts';
@@ -55,6 +56,7 @@ export class ReaderJobs {
   private session='';
   private stopping = false;
   private manual = false;
+  private manualPlatform:Platform='reddit';
   private stoppedWork = new Set<string>();
   private browserOpen = false;
   private mediaMode = false;
@@ -103,7 +105,7 @@ export class ReaderJobs {
     return this.queue.some(work => this.sourceOf(work) === name) ? 'queued' : 'idle';
   }
   hasTarget(id:string):boolean{return (this.active?.kind==='target'&&this.active.targetId===id)||this.queue.some(work=>work.kind==='target'&&work.targetId===id);}
-  get state() { return { running: this.pumping || this.manual, manual: this.manual, queued: this.queue.length, active: this.manual ? 'sign-in' : this.active?.kind ?? null,
+  get state() { return { running: this.pumping || this.manual, manual: this.manual, manualPlatform:this.manual?this.manualPlatform:null, queued: this.queue.length, active: this.manual ? 'sign-in' : this.active?.kind ?? null,
     subreddit: this.active ? this.sourceOf(this.active) : null,
     message: this.message, requests: { ...this.browser.counts, sessionTotal: this.completedRequests + (this.browserOpen ? this.browser.counts.released : 0) },
     sourcePause:this.store.getSetting<{reason:string;notBefore:number|null}>('accessPause:tumblr'),
@@ -121,9 +123,12 @@ export class ReaderJobs {
   }
   private sourceAllowed(name:string,resume=false){
     if(feedIdentity(name).platform!=='tumblr')return;
+    this.tumblrAllowed(resume);
+  }
+  private tumblrAllowed(resume=false,checkOnly=false){
     const pause=this.store.getSetting<{reason:string;notBefore:number|null}>('accessPause:tumblr');if(!pause)return;
     if(!resume||pause.notBefore&&pause.notBefore>Date.now())throw new AccessError(pause.reason+(pause.notBefore?` · Cooldown until ${new Date(pause.notBefore).toLocaleString()}`:''),pause.notBefore,'tumblr');
-    this.store.setSetting('accessPause:tumblr',null);
+    if(!checkOnly)this.store.setSetting('accessPause:tumblr',null);
   }
   private selectSources(names:string[]){
     const mixed=new Set(names.map(name=>feedIdentity(name).platform)).size>1;
@@ -139,7 +144,7 @@ export class ReaderJobs {
     const work=[...this.queue,...(this.active?[this.active]:[])].filter(item=>!this.stoppedWork.has(item.id));
     const feeds=[...new Set([...this.feedRuns.keys()].filter(name=>work.some(item=>this.sourceOf(item)===name)).concat(work.filter(item=>item.kind==='target').map(item=>this.sourceOf(item)).filter((name):name is string=>Boolean(name))))];
     const tasks:PausedTask[]=work.flatMap<PausedTask>(item=>item.kind==='target'||item.kind!=='thread'&&feeds.includes(this.sourceOf(item)??'')?[]:'postId'in item?[{kind:item.kind,postId:item.postId}]:[{kind:item.kind,subreddit:item.subreddit}]);
-    return{feeds,tasks,signIn:this.manual};
+    return{feeds,tasks,signIn:this.manual,...this.manual&&this.manualPlatform==='tumblr'?{signInPlatform:'tumblr' as const}:{}};
   }
   resumeOfflineTasks(tasks:PausedTask[]){
     this.assertCanQueue();this.stopping=false;const deadline=Date.now()+60*60_000;
@@ -293,6 +298,7 @@ export class ReaderJobs {
     if(log)this.problem(error);
     if(error.platform==='tumblr'){
       this.store.setSetting('accessPause:tumblr',{reason:error.message,notBefore:error.notBefore});
+      if(this.manual&&this.manualPlatform==='tumblr')this.pause(error.message);
       for(const name of this.store.followedSources().filter(name=>feedIdentity(name).platform==='tumblr'&&(this.feedStatus(name)!=='idle'||this.feedRuns.has(name)||this.retryRuns.has(name))))void this.stopSource(name,error.message).catch(error=>this.problem(error,{operation:'browser-close'}));
       return;
     }
@@ -318,15 +324,20 @@ export class ReaderJobs {
       this.stoppedWork.add(this.active.id);this.controller?.abort();await this.closeBrowser();
     }
   }
-  async signIn() {
+  async signIn(platform:Platform='reddit') {
+    if(platform!=='reddit'&&platform!=='tumblr')throw new Error('Choose Reddit or Tumblr sign-in');
     if (this.pumping) throw new Error('Stop collection and wait for the browser to close first');
-    this.allowed(true); this.manual = true; this.browserOpen = true;
-    this.message = 'Sign in in the dedicated Chrome window, then Finish sign-in. Requests have random 4–6 second gaps after response readiness.';
-    try { this.signingIn=this.browser.manualSignIn();await this.signingIn; }
+    if(this.manual)throw new Error('Finish the manual sign-in before opening another');
+    if(platform==='tumblr')this.tumblrAllowed(true,true);
+    this.allowed(true);if(platform==='tumblr')this.tumblrAllowed(true);
+    this.stopping=false;this.manual = true;this.manualPlatform=platform;this.browserPlatform=platform;this.browserOpen = true;
+    this.pageUrl=platform==='tumblr'?'https://www.tumblr.com/login':'https://www.reddit.com/login/';
+    this.message = `Sign in to ${platform==='tumblr'?'Tumblr':'Reddit'} in the dedicated Chrome window, then Finish sign-in. Requests have random 4–6 second gaps after response readiness.`;
+    try { this.signingIn=this.browser.manualSignIn(platform);await this.signingIn; }
     catch (error) { if(this.manual)this.problem(error,{operation:'sign-in'});this.pause(error instanceof Error ? error.message : 'Sign-in failed'); throw error; }
     finally{this.signingIn=null;}
   }
-  async finishSignIn() { this.pause('Sign-in browser closed. Resume collection to verify the saved account.'); await this.closeBrowser(); }
+  async finishSignIn() {if(!this.manual)throw new Error('No sign-in browser is open');this.pause('Sign-in browser closed. Resume collection to verify the saved session.'); await this.closeBrowser(); }
   async close(reason='Application stopped; explicit Resume required') { this.pause(reason); await this.closeBrowser();await this.pumpDone;await this.signingIn?.catch(()=>{});await this.closeBrowser(); }
   private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();const done=this.pump();this.pumpDone=done;void done.catch(error=>this.problem(error,{operation:'collection'})).finally(()=>{if(this.pumpDone===done)this.pumpDone=null;}); } }
   private async pump() {

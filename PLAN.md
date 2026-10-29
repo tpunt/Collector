@@ -1,5 +1,46 @@
 # Collector — implementation plan
 
+## Deeper Tumblr history investigation and manual sign-in — 29 October 2026
+
+Verified public website search beyond the initial 17-post blog listing. Staff's
+2025 query returned 15 rendered posts; a January 2025 interval returned three
+posts with absolute `<time datetime>` fields. The captured Latest link still
+returned 15 posts without an older-page anchor. Collector's existing individual
+post extractor read the January 28, 2025 post in full (2,990 characters and 20
+attachment references). These were isolated browser checks, not normal-library
+imports; the 20 files were not downloaded for this investigation.
+
+Search is useful supplemental discovery, but cannot establish all-time coverage:
+tag search excludes reblogs, and date search has pre-2017 indexing limitations.
+Complete reblog coverage through global search was not verified. A 2010 query and a
+recent empty interval both returned zero articles without explicit empty-result
+text or structured result-count metadata. A layout failure cannot safely be
+distinguished from an empty interval using that evidence alone. The documented
+Staff archive path returned the same HTTP403 JavaScript challenge; one bounded
+Wayback public-index request timed out. Do not turn either into successful
+history-completion evidence or blindly walk guessed page URLs.
+
+Implemented the user-approved prerequisite: source-specific manual sign-in for
+Tumblr, using its existing separate profile, normal interactive website loading,
+the unchanged paced request gate and existing sign-in budget. Settings/header
+controls identify the active source. Offline pause/resume retains that source;
+a denied Tumblr login closes its manual window and keeps the Tumblr service
+pause. A stale Finish request cannot stop unrelated collection. Sign-in closes
+without claiming that authentication or deep-history access was verified.
+
+Pending user action: complete Tumblr sign-in. Then inspect the authenticated
+archive/month controls and older-post traversal before choosing a collector.
+Prefer rendered archive/listing navigation. Persist each discovery checkpoint
+with the associated saved posts; download all attachments through the shared
+queue. Where date-search supplementation is useful, use bounded overlapping
+windows, subdivide capped windows, deduplicate by namespaced ID and preserve
+ambiguous/capped intervals for retry. Never treat ranking, a logged-out cap or
+an ambiguous empty page as proof that all historical posts were collected.
+External archives remain a separate potential source with their own provenance
+and availability evidence. No search backfill or authenticated-history traversal
+is claimed implemented by this change.
+
+
 ## Public Tumblr access repair — 29 October 2026
 
 The Staff custom-theme hostname returned a JavaScript browser challenge with
