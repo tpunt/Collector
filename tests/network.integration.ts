@@ -6,9 +6,44 @@ import { performance } from 'node:perf_hooks';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ChromiumRequestGate, chromiumControlUrl } from '../src/request-gate.ts';
+import { ChromiumRequestGate, chromiumControlUrl,RequestQueue } from '../src/request-gate.ts';
 import { chromium } from 'playwright';
 import { browserLaunchOptions } from '../src/browser-options.ts';
+
+test('manual sign-in resources load concurrently, preserve scripted form submission and still block requests in Offline mode',async()=>{
+ const hits:{path:string;time:number;method:string}[]=[],failures:string[]=[];let submitted='';
+ const server=createServer(async(req,res)=>{
+  const path=req.url!;hits.push({path,time:performance.now(),method:req.method!});
+  if(path==='/login'&&req.method==='GET'){res.setHeader('Content-Type','text/html');res.end('<link rel="stylesheet" href="/one.css"><link rel="stylesheet" href="/two.css"><form method="post" action="/login"><input name="username" aria-label="Username"><button>Log in</button></form><script src="/client.js"></script>');}
+  else if(path==='/client.js'){res.setHeader('Content-Type','text/javascript');res.end("const form=document.querySelector('form');form.addEventListener('submit',async event=>{event.preventDefault();await fetch('/session',{method:'POST',body:new URLSearchParams(new FormData(form))});document.body.append(Object.assign(document.createElement('p'),{textContent:'Session confirmed'}));});form.dataset.ready='true';");}
+  else if(path==='/one.css'||path==='/two.css'){await new Promise(resolve=>setTimeout(resolve,150));res.setHeader('Content-Type','text/css');res.end('body{color:black}');}
+  else if(path==='/session'){for await(const chunk of req)submitted+=chunk;res.end('ok');}
+  else if(path==='/redirect-offline'){queue.setOffline(true);res.writeHead(302,{location:'/must-not-follow'}).end();}
+  else res.end('ok');
+ });
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+ const directory=await mkdtemp(join(tmpdir(),'collector-normal-sign-in-')),context=await chromium.launchPersistentContext(directory,{...browserLaunchOptions,channel:'chrome',headless:true}),queue=new RequestQueue({intervalMs:5000});let gate:ChromiumRequestGate|undefined;
+ try{
+  gate=await ChromiumRequestGate.install(await chromiumControlUrl(directory),{queue,paceRequests:false,maxRequests:1000,onFailure:(_reason,code)=>failures.push(code)});
+  const page=context.pages()[0]!;await page.goto(`http://127.0.0.1:${(server.address()as any).port}/login`);await page.locator('form[data-ready="true"]').waitFor();
+  await page.getByLabel('Username').fill('fixture_user');await page.getByRole('button',{name:'Log in',exact:true}).click();await page.getByText('Session confirmed',{exact:true}).waitFor();
+  assert.equal(submitted,'username=fixture_user');assert(!hits.some(hit=>hit.path==='/login'&&hit.method==='POST'));assert.equal(gate.counts.intervalMs,0);assert.equal(queue.intervalMs,5000);assert.equal(queue.released,0);
+  const resources=hits.filter(hit=>['/one.css','/two.css','/client.js'].includes(hit.path));assert.equal(resources.length,3);assert(Math.max(...resources.map(hit=>hit.time))-Math.min(...resources.map(hit=>hit.time))<1000,'Manual resources were serialized behind the collection delay');
+  await page.evaluate(async()=>{await fetch('/redirect-offline').catch(()=>{});});assert(!hits.some(hit=>hit.path==='/must-not-follow'));
+  queue.setOffline(true);await page.evaluate(async()=>{await fetch('/must-not-send').catch(()=>{});});assert(!hits.some(hit=>hit.path==='/must-not-send'));assert.deepEqual(failures,[]);
+ }finally{gate?.stop();await context.close();gate?.disposeAfterBrowserClose();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(directory,{recursive:true,force:true});}
+});
+
+test('concurrent manual resources cannot exceed the sign-in request safety budget',async()=>{
+ const hits:string[]=[];let budget=0;
+ const server=createServer((req,res)=>{hits.push(req.url!);res.setHeader('Content-Type','text/html');res.end(req.url==='/page'?Array.from({length:12},(_,i)=>`<img src="/image-${i}">`).join(''):'ok');});
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const directory=await mkdtemp(join(tmpdir(),'collector-manual-budget-')),context=await chromium.launchPersistentContext(directory,{...browserLaunchOptions,channel:'chrome',headless:true});let gate:ChromiumRequestGate|undefined;
+ try{
+  gate=await ChromiumRequestGate.install(await chromiumControlUrl(directory),{paceRequests:false,maxRequests:3,onBudget:()=>{budget++;}});
+  await context.pages()[0]!.goto(`http://127.0.0.1:${(server.address()as any).port}/page`,{waitUntil:'commit'});const end=Date.now()+3000;while(!budget&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(budget,1);assert(hits.length<=3,`Request budget overrun: ${hits.length}`);
+ }finally{gate?.stop();await context.close();gate?.disposeAfterBrowserClose();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(directory,{recursive:true,force:true});}
+});
 
 test('a website-cancelled fetch waiting for its paced turn does not close the browser or release the cancelled request',async()=>{
  const hits:{path:string;time:number}[]=[],failures:string[]=[];

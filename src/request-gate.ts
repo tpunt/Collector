@@ -101,6 +101,8 @@ interface Pending {
 }
 export interface RequestGateOptions {
   queue?: RequestQueue;
+  /** User-operated sign-in may load normally; collection always stays paced. */
+  paceRequests?:boolean;
   onMediaRequest?: (url: string) => void;
   intervalMs?: RequestInterval;
   isPaused?: () => boolean;
@@ -116,6 +118,7 @@ export class ChromiumRequestGate {
   private socket: WebSocket;
   private queue: RequestQueue;
   private ownsQueue: boolean;
+  private paceRequests:boolean;
   private controller = new AbortController();
   private pending = new Map<number, Pending>();
   private responses = new Map<string, {resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
@@ -127,6 +130,7 @@ export class ChromiumRequestGate {
   private fault: Error | null = null;
   private intercepted = 0;
   private released = 0;
+  private dispatched=0;
   private aborted = 0;
   private suppressed = 0;
   private blockedTypes: Set<string>;
@@ -140,6 +144,7 @@ export class ChromiumRequestGate {
   private constructor(socket: WebSocket, options: RequestGateOptions) {
     this.socket = socket;
     this.ownsQueue = !options.queue;
+    this.paceRequests=options.paceRequests??true;
     this.queue = options.queue ?? new RequestQueue({ intervalMs: options.intervalMs, fromCompletion: true });
     this.isPaused = options.isPaused ?? (() => false);
     this.onFailure = options.onFailure ?? (() => {});
@@ -176,7 +181,7 @@ export class ChromiumRequestGate {
   }
 
   get counts() {
-    return { intercepted: this.intercepted, released: this.released, aborted: this.aborted, suppressed: this.suppressed, intervalMs: this.queue.intervalMs };
+    return { intercepted: this.intercepted, released: this.released, aborted: this.aborted, suppressed: this.suppressed, intervalMs: this.paceRequests?this.queue.intervalMs:0 };
   }
   stop(): void {
     this.stopped = true;
@@ -198,7 +203,7 @@ export class ChromiumRequestGate {
       await this.send('Network.enable', {}, session);
       await this.send('Fetch.enable', { patterns: [
         { urlPattern: 'http*', requestStage: 'Request' },
-        { urlPattern: 'http*', requestStage: 'Response' },
+        ...(this.paceRequests?[{ urlPattern: 'http*', requestStage: 'Response' }]:[]),
       ] }, session);
       // Owning frames intercept worker requests. Workers themselves have no Fetch domain.
       await this.send('Target.setAutoAttach', {
@@ -265,14 +270,23 @@ export class ChromiumRequestGate {
       const key=`${session}:${networkId}`;
       // Redirect hops can share a Network ID while their queue callbacks unwind.
       this.queuedRequests.set(key,(this.queuedRequests.get(key)??0)+1);
-      void this.queue.run(async () => {
+      const release=async()=>{
         if (this.stopped || this.isPaused()) throw new Error('Browsing paused');
+        this.queue.assertOnline();
         // A page can abort a fetch while it waits behind paced resources. Its
         // interception ID is then invalid. Explicit cancellation evidence lets
         // us discard that waiter without treating Chrome control as broken.
         if(this.cancelledRequests.has(key))throw new Error('Website cancelled the queued request');
-        if (this.released >= this.maxRequests) { this.onBudget(); this.stop(); throw new Error('Request budget reached'); }
+        // Reserve synchronously: concurrent manual resources cannot overrun the
+        // safety budget while their dispatch acknowledgements are still pending.
+        if (this.dispatched >= this.maxRequests) { this.onBudget(); this.stop(); throw new Error('Request budget reached'); }
+        this.dispatched++;
         if (!networkId) throw new Error('Request has no network lifecycle identity');
+        if(!this.paceRequests){
+          try{await this.send('Fetch.continueRequest',{requestId},session);this.released++;}
+          catch(error){if(!this.stopped&&!this.cancelledRequests.has(key)){this.onFailure('Website request continuation failed; browsing stopped','ERR_REQUEST_CONTINUE');this.stop();}throw error;}
+          return;
+        }
         const received = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => {
             this.responses.delete(key);
@@ -289,7 +303,8 @@ export class ChromiumRequestGate {
           const entry = this.responses.get(key);
           if (entry) { clearTimeout(entry.timer); this.responses.delete(key); entry.resolve(); }
         }
-      }, this.controller.signal).catch(async () => {
+      };
+      void (this.paceRequests?this.queue.run(release,this.controller.signal):Promise.resolve().then(release)).catch(async () => {
         this.aborted++;
         await this.send('Fetch.failRequest', { requestId, errorReason: 'Aborted' }, session).catch(() => undefined);
       }).finally(()=>{

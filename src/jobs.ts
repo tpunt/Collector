@@ -341,7 +341,7 @@ export class ReaderJobs {
     this.allowed(true);if(platform==='tumblr')this.tumblrAllowed(true);
     this.stopping=false;this.manual = true;this.manualPlatform=platform;this.browserPlatform=platform;this.browserOpen = true;
     const revision=++this.signInRevision;
-    this.signInStatus[platform]={...this.signInStatus[platform],state:'checking'};
+    this.signInStatus[platform]={...this.signInStatus[platform],state:'checking',detail:undefined};
     this.pageUrl=platform==='tumblr'?'https://www.tumblr.com/login':'https://www.reddit.com/login/';
     this.message = `Checking ${platform==='tumblr'?'Tumblr':'Reddit'} sign-in. Complete sign-in in Chrome if requested; Collector closes the window after confirmation.`;
     const opening=this.browser.manualSignIn(platform,observation=>this.observeSignIn(platform,revision,observation));
@@ -366,6 +366,11 @@ export class ReaderJobs {
       this.signInStatus[platform]={state:'signed-in',account:observation.account,verifiedAt:Date.now()};
       this.pause(`${platform==='tumblr'?'Tumblr':'Reddit'} signed in${observation.account?' as '+observation.account:''}. Session saved; ready to sync.`);
     }else if(observation.state==='signed-out')this.signInStatus[platform]={state:'waiting',account:null,verifiedAt:null};
+    else if(observation.state==='form-error'){
+      const detail='The website rejected the login form (Cannot POST /login). Reopen the sign-in browser and let the page finish loading.';
+      this.signInStatus[platform]={...this.signInStatus[platform],state:'error',detail};
+      const error=new AccessError(detail,null,platform);error.code='ERR_SIGN_IN_FORM_POST';this.accessFailure(error);
+    }
     else if(observation.state==='closed')void this.finishSignIn().catch(error=>this.problem(error,{operation:'browser-close'}));
   }
   async finishSignIn() {if(!this.manual)throw new Error('No sign-in browser is open');this.pause('Sign-in browser closed without confirmation. Recheck the saved session before relying on it.'); await this.closeBrowser(); }

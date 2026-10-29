@@ -11,6 +11,8 @@ export function SignInSettings({platform,status,active,disabled,open,close}:{pla
     <div className="sign-in-heading"><strong>{label}</strong><span className={'session-status '+(state==='signed-in'?'confirmed':'')} role="status">{message}</span></div>
     {status?.verifiedAt&&state==='signed-in'&&<small>Verified <time dateTime={new Date(status.verifiedAt).toISOString()}>{new Date(status.verifiedAt).toLocaleString()}</time></small>}
     <button className="button" disabled={disabled} onClick={active?close:open}>{active?`Close ${label} sign-in browser`:state==='unknown'?`Open ${label} sign-in browser`:`Recheck ${label} sign-in`}</button>
+    {state==='error'&&status?.detail&&<p>{status.detail}</p>}
     {active&&<p className="muted">Sign in in Chrome. Collector confirms sign-in and closes the window automatically. Closing it early leaves the session unverified.</p>}
+    <p className="muted">Manual sign-in loads normally. Automated collection keeps 4–6 second request spacing.</p>
   </section>;
 }

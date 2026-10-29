@@ -62,5 +62,6 @@ test('confirmed sign-in updates the UI, closes automatically, stays platform sco
   await app.jobs.signIn('tumblr');await app.networkMode.change(true);observers[2]!({state:'signed-in',account:null});assert.equal(app.jobs.state.signIn.tumblr.state,'unverified');assert.equal(app.jobs.state.manual,false);
   await app.networkMode.change(false);await until(()=>observers.length===4);observers[2]!({state:'signed-in',account:null});assert.equal(app.jobs.state.manual,true);observers[3]!({state:'closed',account:null});await until(()=>!app.jobs.state.manual);assert.equal(app.jobs.state.signIn.tumblr.state,'unverified');
   assert.equal(app.store.stats().posts,0);
+  await app.jobs.signIn('tumblr');observers[4]!({state:'form-error',account:null});await until(()=>!app.jobs.state.manual);assert.equal(app.jobs.state.signIn.tumblr.state,'error');assert.match(app.jobs.state.signIn.tumblr.detail!,/Cannot POST \/login/);assert.equal(app.jobs.state.signIn.reddit.state,'signed-in');
  }finally{await browser.close();await app.close();}
 });

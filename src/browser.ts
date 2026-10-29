@@ -11,7 +11,7 @@ import { redditUrl } from './domain.ts';
 import {tumblrResourceAllowed,tumblrContentUrl,tumblrBlog} from './sources.ts';
 import type {Platform} from './sources.ts';
 import {join} from 'node:path';
-import {watchSignIn} from './sign-in.ts';
+import {watchSignIn,MANUAL_SIGN_IN_REQUEST_LIMIT} from './sign-in.ts';
 import type {SignInObservation} from './sign-in.ts';
 
 export class AccessError extends Error {
@@ -49,6 +49,7 @@ export class ReaderBrowser {
   async open(maxRequests = 100, interactive: boolean | 'media' | 'tumblr' | 'tumblr-sign-in' = false): Promise<void> {
     this.queue.assertOnline();
     const platform=interactive==='tumblr'||interactive==='tumblr-sign-in'?'tumblr':'reddit';
+    const manual=interactive===true||interactive==='tumblr-sign-in';
     if (this.context) { if(!this.failure&&this.platform===platform)return;await this.close(); }
     this.platform=platform;
     const lifecycle=this.lifecycle;
@@ -92,6 +93,7 @@ export class ReaderBrowser {
     const current=()=>lifecycle===this.lifecycle&&this.context===context&&!this.queue.offline;
     const gate = await ChromiumRequestGate.install(control, {
       queue: this.queue,
+      paceRequests:!manual,
       onMediaRequest: interactive==='media' ? url=>this.observedMedia.add(url) : undefined,
       // Interactive sign-in uses normal website resources (including identity
       // providers). Extraction returns to the stricter source policy on reopen.
@@ -109,7 +111,7 @@ export class ReaderBrowser {
   async manualSignIn(platform:Platform='reddit',onChange?:(state:SignInObservation)=>void) {
     this.queue.assertOnline();
     await this.close();
-    await this.open(150, platform==='tumblr'?'tumblr-sign-in':true);
+    await this.open(MANUAL_SIGN_IN_REQUEST_LIMIT, platform==='tumblr'?'tumblr-sign-in':true);
     const context=this.context!;
     await this.page!.goto(platform==='tumblr'?'https://www.tumblr.com/login':'https://www.reddit.com/login/', { waitUntil: 'commit', timeout: 180_000 });
     if(this.context===context&&!this.queue.offline&&onChange)this.stopSignIn=watchSignIn(context,platform,onChange);

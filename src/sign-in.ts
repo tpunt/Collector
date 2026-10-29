@@ -1,14 +1,17 @@
 import type {BrowserContext} from 'playwright';
 import type {Platform} from './sources.ts';
 
+export const MANUAL_SIGN_IN_REQUEST_LIMIT=1000;
+
 export interface SignInObservation {
-  state:'signed-in'|'signed-out'|'unknown'|'closed';
+  state:'signed-in'|'signed-out'|'unknown'|'closed'|'form-error';
   account:string|null;
 }
 export interface SignInStatus {
   state:'unknown'|'checking'|'waiting'|'signed-in'|'unverified'|'error';
   account:string|null;
   verifiedAt:number|null;
+  detail?:string;
 }
 export const emptySignInStatus=():SignInStatus=>({state:'unknown',account:null,verifiedAt:null});
 
@@ -30,6 +33,8 @@ export function collectSignInDom(platform:Platform):SignInObservation {
   const path=(link:HTMLAnchorElement)=>{
     try{const url=new URL(link.href);return url.origin===location.origin?url.pathname.replace(/\/$/,''):'';}catch{return '';}
   };
+  const loginRoute=platform==='tumblr'?/^\/login(?:\/|$)/:/^\/(?:login|account\/login)(?:\/|$)/;
+  if(loginRoute.test(location.pathname)&&[...document.querySelectorAll('body > pre')].some(element=>visible(element)&&/^Cannot POST \/login\/?$/.test((element.textContent??'').trim())))return{state:'form-error',account:null};
   if(platform==='reddit'){
     for(const link of links(document.querySelector('#header .user')??document.createDocumentFragment())){
       const match=/^\/user\/([a-z0-9_-]{3,24})$/i.exec(path(link));
@@ -45,8 +50,7 @@ export function collectSignInDom(platform:Platform):SignInObservation {
       if(paths.has('/dashboard')&&paths.has('/inbox')&&[...paths].some(value=>/^\/settings(?:\/account)?$/.test(value)))return{state:'signed-in',account:null};
     }
   }
-  const loginRoute=platform==='tumblr'?/^\/login(?:\/|$)/:/^\/(?:login|account\/login)(?:\/|$)/;
-  if(loginRoute.test(location.pathname)&&[...document.querySelectorAll('input[type="email"],input[type="password"],input[autocomplete="username"]')].some(visible))return{state:'signed-out',account:null};
+  if(document.readyState==='complete'&&loginRoute.test(location.pathname)&&[...document.querySelectorAll('input[type="email"],input[type="password"],input[autocomplete="username"]')].some(visible))return{state:'signed-out',account:null};
   return unknown;
 }
 
@@ -64,7 +68,7 @@ export function watchSignIn(context:BrowserContext,platform:Platform,onChange:(s
         if(stopped)return;
         const observation=await page.evaluate(collectSignInDom,platform);
         if(stopped)return;
-        if(observation.state==='signed-in'){stop();onChange(observation);return;}
+        if(observation.state==='signed-in'||observation.state==='form-error'){stop();onChange(observation);return;}
         if(observation.state==='signed-out')onChange(observation);
         const url=new URL(page.url());
         if(platform==='reddit'&&!classicCheck&&url.protocol==='https:'&&!url.port&&['www.reddit.com','reddit.com'].includes(url.hostname)&&!/^\/(?:login|account\/login|register|password)(?:\/|$)/.test(url.pathname)){

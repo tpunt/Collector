@@ -21,6 +21,7 @@ test('sign-in extraction requires rendered first-party identity evidence, withou
   await page.setContent('<div style="opacity:0">'+tumblrNav+'</div>');assert.equal((await page.evaluate(collectSignInDom,'tumblr' as const)).state,'unknown');
   await page.setContent(tumblrNav.replace('href="/inbox"','href="https://example.com/inbox"'));assert.equal((await page.evaluate(collectSignInDom,'tumblr' as const)).state,'unknown');
   await page.goto('https://www.tumblr.com/login');await page.setContent('<input type="email"><input type="password">');assert.deepEqual(await page.evaluate(collectSignInDom,'tumblr' as const),{state:'signed-out',account:null});
+  await page.setContent('<pre>Cannot POST /login</pre>');assert.equal((await page.evaluate(collectSignInDom,'tumblr' as const)).state,'form-error');
   await page.goto('https://staff.tumblr.com/');await page.setContent(tumblrNav);assert.equal((await page.evaluate(collectSignInDom,'tumblr' as const)).state,'unknown');
   await page.goto('https://old.reddit.com/');await page.setContent('<div id="header"><span class="user"><a href="/user/fixture_user/">fixture_user</a></span></div>');assert.deepEqual(await page.evaluate(collectSignInDom,'reddit' as const),{state:'signed-in',account:'fixture_user'});
   await page.setContent('<div id="header"><span class="user"><a href="/user/different_user">fixture_user</a></span></div>');assert.equal((await page.evaluate(collectSignInDom,'reddit' as const)).state,'unknown');

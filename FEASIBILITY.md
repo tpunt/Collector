@@ -889,3 +889,35 @@ polling, automatic confirmation/close, button and status transitions, manual
 close, Offline cancellation/resume, stale callbacks, source isolation and paced
 network cancellation. Signed-in Tumblr history remains a separate outstanding
 investigation.
+
+### Normal manual sign-in loading and live authentication (2026-10-29)
+
+The user reported minutes-long page loads and `Cannot POST /login`. The shared
+4–6 second gate was also delaying every interactive script/style/image, so a
+59-request login page could spend approximately five minutes waiting for its
+resources. The user explicitly approved normal loading for manually operated
+sign-in windows, while retaining 4–6 second spacing for all automated collection.
+
+Manual Reddit/Tumblr sign-in now uses concurrent browser loading without the
+artificial queue or per-resource response-header wait. The same request-stage
+gate still handles Offline mode, redirects, cancellation, access blocks and a
+1,000-request safety ceiling, reserving the budget before concurrent dispatch.
+Collection modes retain the original paced queue and response-stage readiness.
+The visible-form waiting state requires the document to finish loading; a
+rendered `Cannot POST /login` response is reported as a failed sign-in with a
+specific explanation, never as success. The likely earlier native-form error
+was incomplete client JavaScript initialization, but its precise cause was not
+independently established.
+
+Live check: the production Tumblr profile reached its fully loaded login form
+with 59 released requests, without artificial spacing. The user then confirmed
+that the page opened well and completed sign-in themselves. Collector positively
+recognised Tumblr's signed-in navigation, automatically closed the window and
+reported `Tumblr signed in. Session saved; ready to sync.` The session total was
+108 released requests. No credentials or cookies were read or logged; the agent
+received only Collector's sign-in status and request counters. This verifies manual login and detection;
+authenticated deep-history traversal remains a separate outstanding task.
+
+Local browser checks cover concurrent scripts/styles, client-handled form POST
+preservation, atomic request budgets, Offline request/redirect blocking and the
+unchanged automated spacing, redirects, frame/worker interception and budgets.
