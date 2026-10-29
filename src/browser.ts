@@ -8,7 +8,7 @@ import { BrowserLimiter, retryAfter } from './limiter.ts';
 import { ChromiumRequestGate, chromiumControlUrl, RequestQueue, DEFAULT_REQUEST_INTERVAL } from './request-gate.ts';
 import type { RequestInterval } from './request-gate.ts';
 import { redditUrl } from './domain.ts';
-import {tumblrUrl,tumblrResourceAllowed,tumblrContentUrl} from './sources.ts';
+import {tumblrResourceAllowed,tumblrContentUrl,tumblrBlog} from './sources.ts';
 import {join} from 'node:path';
 
 export class AccessError extends Error {
@@ -109,7 +109,8 @@ export class ReaderBrowser {
   async navigate(urlInput: string, signal?: AbortSignal): Promise<Page> {
     this.queue.assertOnline();
     const tumblr=this.platform==='tumblr';
-    const blog=tumblr?(new URL(urlInput).hostname==='www.tumblr.com'?this.tumblrBlog:new URL(urlInput).hostname.split('.')[0]!):null;
+    const input=new URL(urlInput);
+    const blog=tumblr?(input.hostname==='www.tumblr.com'?(input.pathname.startsWith('/video/')?this.tumblrBlog:tumblrBlog(input.pathname.split('/')[1]??'')):input.hostname.split('.')[0]!):null;
     const url = tumblr?tumblrContentUrl(urlInput,blog!):redditUrl(urlInput);
     if(tumblr){this.tumblrBlog=blog;this.tumblrNavigation=url.href;}
     if (!tumblr&&(url.hostname !== 'old.reddit.com' || url.pathname.endsWith('.json'))) throw new Error('Collector requires a Classic Reddit page');

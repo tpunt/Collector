@@ -20,7 +20,7 @@ export function mediaReference(input: string): MediaReference | null {
     if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash || input.length > 4000) return null;
     const tumblr=/^(?:[a-z0-9-]+\.)?media\.tumblr\.com$/.test(url.hostname);
     const image = (tumblr|| ['i.redd.it', 'preview.redd.it', 'external-preview.redd.it', 'i.imgur.com'].includes(url.hostname))
-      && /\.(png|jpe?g|gif|webp|avif)$/i.test(url.pathname);
+      && (/\.(png|jpe?g|gif|webp|avif)$/i.test(url.pathname)||(tumblr&&/\.(pnj|gifv)$/i.test(url.pathname)));
     const video = (tumblr||['v.redd.it', 'i.imgur.com', 'preview.redd.it'].includes(url.hostname))
       && (/\.(mp4|webm)$/i.test(url.pathname) || (url.hostname==='v.redd.it'&&/\.mpd$/i.test(url.pathname)));
     return image || video ? {kind: video ? 'video' : 'image', url: url.href} : null;

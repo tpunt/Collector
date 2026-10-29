@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {ReaderStore} from '../src/store.ts';
 import {cleanupCriteria} from '../src/library-storage.ts';
 import {tagName,postTags} from '../src/tags.ts';
-import {feedName,feedIdentity,tumblrBlog,tumblrUrl,validateListingUrl,tumblrResourceAllowed} from '../src/sources.ts';
+import {feedName,feedIdentity,tumblrBlog,tumblrUrl,validateListingUrl,tumblrResourceAllowed,listingUrl,tumblrPostUrl} from '../src/sources.ts';
 import {postId,validateObservation} from '../src/domain.ts';
 const record=(id:string,feed='aww')=>({id,subreddit:feed,title:'Photo '+id,body:'A complete caption',author:{platform:'reddit',id:'alice',name:'Alice'},permalink:`/r/${feed}/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'tags',observedAt:1800000000000,media:['Image' as const],attachments:[{kind:'image' as const,url:'https://i.redd.it/photo.jpg'}]});
 
@@ -51,13 +51,22 @@ test('Tumblr feed and item keys are disjoint from Reddit, scoped to the blog, an
  assert.equal(feedName('tumblr:staff'),'tumblr:staff');assert.equal(feedIdentity('staff').key,'reddit:staff');assert.equal(feedIdentity('tumblr:staff').key,'tumblr:staff');
  assert.equal(tumblrBlog('https://www.tumblr.com/staff'),'staff');assert.equal(tumblrBlog('@staff'),'staff');
  assert.equal(postId('tumblr:staff:12345678901234567890'),'tumblr:staff:12345678901234567890');
- for(const url of ['https://evil.test/','https://staff.tumblr.com/api/read/json','https://www.tumblr.com/staff','https://staff.tumblr.com/page/2?before=1','https://staff.tumblr.com:444/page/2','https://staff.tumblr.com@evil.test/'])assert.throws(()=>tumblrUrl(url,'staff',true));
+ for(const url of ['https://evil.test/','https://staff.tumblr.com/api/read/json','https://www.tumblr.com/other','https://staff.tumblr.com/page/2?before=1','https://staff.tumblr.com:444/page/2','https://staff.tumblr.com@evil.test/'])assert.throws(()=>tumblrUrl(url,'staff',true));
  assert.equal(validateListingUrl('https://staff.tumblr.com/page/2','tumblr:staff').pathname,'/page/2');
+ assert.equal(listingUrl('tumblr:staff'),'https://www.tumblr.com/staff');
+ assert.equal(tumblrPostUrl('tumblr:staff:12345'),'https://www.tumblr.com/staff/12345');
+ assert.equal(validateListingUrl('https://www.tumblr.com/staff','tumblr:staff').pathname,'/staff');
+ assert.equal(tumblrUrl('https://www.tumblr.com/staff/12345/title','staff').pathname,'/staff/12345/title');
+ for(const url of ['https://www.tumblr.com/staff/12345?x=1','https://www.tumblr.com/other/12345','https://www.tumblr.com/staff/api','https://www.tumblr.com/staff/12345/extra/path'])assert.throws(()=>tumblrUrl(url,'staff'));
+
  const post={...record('12345'),id:'tumblr:staff:12345',subreddit:'tumblr:staff',permalink:'https://staff.tumblr.com/post/12345/example'};
- assert.equal(validateObservation(post).permalink,'https://staff.tumblr.com/post/12345/');assert.throws(()=>validateObservation({...post,subreddit:'tumblr:other'}));assert.throws(()=>validateObservation({...post,id:'t3_abc'}));
+ assert.equal(validateObservation(post).permalink,'https://staff.tumblr.com/post/12345/');assert.equal(validateObservation({...post,permalink:'https://www.tumblr.com/staff/12345/title'}).permalink,'https://www.tumblr.com/staff/12345');assert.throws(()=>validateObservation({...post,subreddit:'tumblr:other'}));assert.throws(()=>validateObservation({...post,id:'t3_abc'}));
 });
 test('Tumblr browser resources cannot dispatch legacy API frames, unrelated blogs, scripts or external trackers',()=>{
  assert(tumblrResourceAllowed('https://staff.tumblr.com/page/2','Document','staff'));
+ assert(tumblrResourceAllowed('https://www.tumblr.com/staff','Document','staff'));
+ assert(tumblrResourceAllowed('https://www.tumblr.com/staff/12345/title','Document','staff'));
+ assert.equal(tumblrResourceAllowed('https://www.tumblr.com/other/12345','Document','staff'),false);
  assert(tumblrResourceAllowed('https://staff.tumblr.com/post/12345/example','Document','staff'));
  assert(tumblrResourceAllowed('https://assets.tumblr.com/theme.css?v=1','Stylesheet','staff'));
  for(const [url,type] of [['https://staff.tumblr.com/api/read/json','Document'],['https://api.tumblr.com/v2/blog/staff/posts','Document'],['https://other.tumblr.com/','Document'],['https://staff.tumblr.com/','Script'],['https://staff.tumblr.com/','XHR'],['https://staff.tumblr.com/api/read/json','Stylesheet'],['https://evil.test/track.css','Stylesheet'],['http://staff.tumblr.com/','Document']])assert.equal(tumblrResourceAllowed(url!,type!,'staff'),false);

@@ -26,12 +26,19 @@ export function tumblrItem(input:string):{blog:string;id:string}|null {
   const match=/^tumblr:([a-z0-9-]+):([1-9][0-9]{0,19})$/.exec(input);
   return match?{blog:tumblrBlog(match[1]!),id:match[2]!}:null;
 }
+/** Both supported website layouts retain the same blog/item namespace. */
 export function tumblrUrl(input:string,feed:string,listing=false):URL {
   const blog=tumblrBlog(feed),url=new URL(input,`https://${blog}.tumblr.com/`);
-  if(url.protocol!=='https:'||url.username||url.password||url.port||url.hash||url.hostname!==blog+'.tumblr.com')throw new Error('Expected a public page on the selected Tumblr blog');
-  const valid=listing?(/^\/(?:page\/[1-9][0-9]{0,8}\/?)?$/.test(url.pathname)&&!url.search):/^\/post\/[1-9][0-9]{0,19}(?:\/[^/]*)?\/?$/.test(url.pathname)&&!url.search;
-  if(!valid)throw new Error('Invalid Tumblr '+(listing?'listing':'post')+' URL');
+  if(url.protocol!=='https:'||url.username||url.password||url.port||url.hash||url.search)throw new Error('Expected a public page on the selected Tumblr blog');
+  const theme=url.hostname===blog+'.tumblr.com',web=url.hostname==='www.tumblr.com';
+  const valid=theme?(listing?/^\/(?:page\/[1-9][0-9]{0,8}\/?)?$/.test(url.pathname):/^\/post\/[1-9][0-9]{0,19}(?:\/[^/]*)?\/?$/.test(url.pathname)):
+    web?(listing?url.pathname.replace(/\/$/,'')==='/'+blog:new RegExp(`^/${blog}/[1-9][0-9]{0,19}(?:/[^/]*)?/?$`).test(url.pathname)):false;
+  if(!valid)throw new Error('Expected a public '+(listing?'listing':'post')+' page on the selected Tumblr blog');
   return url;
+}
+export function tumblrPostUrl(input:string):string {
+  const item=tumblrItem(input);if(!item)throw new Error('Invalid Tumblr post ID');
+  return `https://www.tumblr.com/${item.blog}/${item.id}`;
 }
 /** Only a captured, post-bound native media frame may be visited. No APIs,
  * arbitrary embeds or cross-blog redirects are permitted. */
@@ -43,9 +50,10 @@ export function tumblrEmbedUrl(input:string,feed:string,expectedId?:string):URL 
   return url;
 }
 export function tumblrContentUrl(input:string,feed:string):URL {
-  try{return tumblrUrl(input,feed,!new URL(input).pathname.startsWith('/post/'));}catch{return tumblrEmbedUrl(input,feed);}
+  try{return tumblrUrl(input,feed,true);}catch{/* Try the post layout next. */}
+  try{return tumblrUrl(input,feed);}catch{return tumblrEmbedUrl(input,feed);}
 }
-export function listingUrl(feed:string){const identity=feedIdentity(feed);return identity.platform==='tumblr'?`https://${identity.name}.tumblr.com/`:`https://old.reddit.com/r/${identity.name}/new/`;}
+export function listingUrl(feed:string){const identity=feedIdentity(feed);return identity.platform==='tumblr'?`https://www.tumblr.com/${identity.name}`:`https://old.reddit.com/r/${identity.name}/new/`;}
 export function validateListingUrl(input:string,feed:string){
   if(feedIdentity(feed).platform==='tumblr')return tumblrUrl(input,feed,true);
   const url=redditUrl(input);if(url.hash||url.hostname!=='old.reddit.com'||!new RegExp(`^/r/${subredditName(feed)}/new/?$`,'i').test(url.pathname))throw new Error('Invalid committed listing URL');return url;
@@ -58,9 +66,10 @@ export function tumblrResourceAllowed(input:string,type:string,blog:string|null,
     if(url.protocol!=='https:'||url.port||url.username||url.password||!blog)return false;
     if(type==='Document'){
       const feed='tumblr:'+tumblrBlog(blog);
-      try{tumblrUrl(input,feed,!url.pathname.startsWith('/post/'));return true;}catch{tumblrEmbedUrl(input,feed);return input===navigation;}
+      tumblrContentUrl(input,feed);
+      try{tumblrEmbedUrl(input,feed);return input===navigation;}catch{return true;}
     }
-    return type==='Stylesheet'&&[blog+'.tumblr.com','static.tumblr.com','assets.tumblr.com'].includes(url.hostname)&&/\.css$/.test(url.pathname);
+    return type==='Stylesheet'&&[blog+'.tumblr.com','www.tumblr.com','static.tumblr.com','assets.tumblr.com'].includes(url.hostname)&&/\.css$/.test(url.pathname);
   }catch{return false;}
 }
 /** Tumblr's collector uses outbound for a separate embedded player. A cached
@@ -83,6 +92,7 @@ export function diagnosticPage(input:unknown):string|undefined {
     if(/^[a-z0-9-]+\.tumblr\.com$/.test(url.hostname)&&!['api','assets','static'].includes(url.hostname.split('.')[0]!)){
       const match=/^\/(post\/[0-9]{1,20}|page\/[0-9]{1,9})(?:\/|$)/.exec(url.pathname);return url.origin+(match?'/'+match[1]+'/':'/');
     }
+    if(url.hostname==='www.tumblr.com'){const match=/^\/([a-z0-9-]{1,32})(?:\/([1-9][0-9]{0,19}))?(?:\/|$)/.exec(url.pathname);if(match&&match[1]!=='video')return url.origin+'/'+match[1]+(match[2]?'/'+match[2]:'')+'/';}
     if(url.hostname==='arctic-shift.photon-reddit.com')return url.origin+'/api/posts/search';
     if(['i.redd.it','v.redd.it','i.imgur.com','preview.redd.it','external-preview.redd.it'].includes(url.hostname)||/^(?:[a-z0-9-]+\.)?media\.tumblr\.com$/.test(url.hostname))return url.origin+'/[media]';
   }catch{/* URLs are optional diagnostic context. */}

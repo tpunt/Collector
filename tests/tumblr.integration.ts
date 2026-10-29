@@ -14,10 +14,64 @@ const article=(id:string,full=false)=>`<article data-post-id="${id}" data-timest
 const html=(body:string)=>`<!doctype html><html><head><title>Staff</title></head><body><main>${body}</main></body></html>`;
 async function settle(app:Awaited<ReturnType<typeof createOnlineReaderServer>>){const until=Date.now()+15000;while(app.jobs.state.running){if(Date.now()>until)throw new Error('Tumblr sync did not settle');await delay(5);}}
 
+// The default public website has no time element or post ID on its article.
+// The listing's parsely date describes the blog, not any of its posts.
+const publicArticle=(id:string,detail=false)=>`<article><header><a rel="author" href="/staff">staff</a><a data-login-wall-type="blogView"><img alt="Avatar" src="https://64.media.tumblr.com/avatar.png"></a></header>${detail?'':`<a rel="bookmark" aria-label="Permalink" href="/staff/${id}/example">Post</a>`}<h1>Public post ${id}</h1><p>Complete public text with <a href="https://example.org/story">a useful link</a>.</p><button aria-label="Image"><img srcset="https://64.media.tumblr.com/preview.pnj 100w, https://64.media.tumblr.com/full.pnj 1280w"></button><button aria-label="Image"><img srcset="https://64.media.tumblr.com/animated.gifv 1280w"></button><footer><button data-login-wall-type="like" data-login-wall-blog-name="staff" data-login-wall-id="${id}">Like</button><a data-testid="tag-link">#example</a></footer></article>`;
+const publicHtml=(id?:string)=>`<!doctype html><html><head><meta name="parsely-pub-date" content="${id?'2026-09-17T13:16:22.000Z':'2008-01-01T00:00:00.000Z'}"><meta property="og:type" content="${id?'article':'profile'}">${id?`<meta property="og:url" content="https://www.tumblr.com/staff/${id}/example">`:''}</head><body><main>${publicArticle(id??'12345',Boolean(id))}${id?'':'<article><header><a rel="author" href="/other">other</a></header><a rel="bookmark" href="/other/99999/recommended">Recommendation</a></article>'}</main></body></html>`;
+
+test('default public Tumblr view resolves post-specific dates and every image without treating blog metadata, avatars or recommendations as posts',async()=>{
+ const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
+ try{
+  const page=await browser.newPage({javaScriptEnabled:false});const visits:string[]=[],resolved:string[]=[];
+  await page.route('**/*',route=>{const id=new URL(route.request().url()).pathname.match(/^\/staff\/([0-9]+)/)?.[1];return route.fulfill({contentType:'text/html',body:publicHtml(id)});});
+  await page.goto('https://www.tumblr.com/staff');
+  await assert.rejects(readTumblrListing(page,'tumblr:staff'),/checkpoint kept for retry/);
+  const result=await readTumblrListing(page,'tumblr:staff',{navigate:async url=>{visits.push(url);await page.goto(url);return page;},resolved:post=>resolved.push(post.id)});
+  assert.deepEqual(visits,['https://www.tumblr.com/staff/12345/example']);assert.deepEqual(resolved,['tumblr:staff:12345']);
+  assert.equal(result.next,null);assert.equal(result.posts.length,1);const post=result.posts[0]!;
+  assert.equal(post.created.epochMs,Date.parse('2026-09-17T13:16:22.000Z'));assert.equal(post.bodyNeedsFetch,false);assert.equal(post.permalink,'https://www.tumblr.com/staff/12345');
+  assert.match(post.body!,/Complete public text/);assert.match(post.body!,/https:\/\/example.org\/story/);assert.doesNotMatch(post.body!,/Like|#example/);
+  assert.deepEqual(post.attachments!.map(file=>file.url),['https://64.media.tumblr.com/full.pnj','https://64.media.tumblr.com/animated.gifv']);
+  await page.goto('https://www.tumblr.com/staff');
+  const known=await readTumblrListing(page,'tumblr:staff',{knownDate:()=>post.created,navigate:async()=>{assert.fail('Known absolute dates need no extra metadata request');}});
+  assert.equal(known.posts[0]!.created.epochMs,post.created.epochMs);assert.equal(known.posts[0]!.bodyNeedsFetch,true);
+  await page.locator('article').first().evaluate(node=>node.setAttribute('data-post-id','99999'));
+  await assert.rejects(readTumblrListing(page,'tumblr:staff',{navigate:async()=>{assert.fail('Conflicting card identity must be rejected before navigation');}}),/requested post/);
+  await page.goto('https://www.tumblr.com/staff/12345');await page.locator('meta[property="og:url"]').evaluate(node=>node.setAttribute('content','https://www.tumblr.com/staff/99999'));
+  await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/requested post/);
+  await page.locator('meta[property="og:url"]').evaluate(node=>node.setAttribute('content','https://www.tumblr.com/engineering/99999/original'));
+  await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/selected Tumblr blog/);
+  await page.locator('article').evaluate(node=>node.insertAdjacentHTML('beforeend','<a rel="bookmark" href="/engineering/99999">Original post</a>'));
+  const reblog=await readTumblrPost(page,'tumblr:staff:12345');assert.equal(reblog.id,'tumblr:staff:12345');assert.equal(reblog.permalink,'https://www.tumblr.com/staff/12345');assert.match(reblog.body!,/Reblog of https:\/\/www.tumblr.com\/engineering\/99999\/original/);assert.match(reblog.body!,/Original publication date: 2026-09-17/);
+  await page.locator('meta[property="og:url"]').evaluate(node=>node.setAttribute('content','https://www.tumblr.com/staff/99999/original'));
+  await page.locator('a[rel="bookmark"]').evaluate(node=>node.setAttribute('href','/staff/99999'));
+  const selfReblog=await readTumblrPost(page,'tumblr:staff:12345');assert.equal(selfReblog.id,reblog.id);assert.equal(selfReblog.permalink,reblog.permalink);assert.match(selfReblog.body!,/Reblog of https:\/\/www.tumblr.com\/staff\/99999\/original/);
+  // Even a captured original publication date is not evidence of reblog order.
+  await page.goto('https://www.tumblr.com/staff');assert.deepEqual((await readTumblrListing(page,'tumblr:staff',{knownDate:()=>reblog.created})).ordinary,[]);
+ }finally{await browser.close();}
+});
+
+test('interrupted public post metadata collection saves resolved posts while retaining the listing checkpoint for a retry',async()=>{
+ const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),page=await browser.newPage();let pause=true,waiting=false,downloads=0;
+ await page.route('**/*',route=>{const id=new URL(route.request().url()).pathname.match(/^\/staff\/([0-9]+)/)?.[1];return route.fulfill({contentType:'text/html',body:id?publicHtml(id):publicHtml().replace('</main>',publicArticle('12344')+'</main>')});});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0},async open(){},async close(){},async manualSignIn(){},async navigate(url,signal){
+  if(pause&&url.includes('/12344/')){waiting=true;await new Promise<void>((_resolve,reject)=>signal!.addEventListener('abort',()=>reject(new Error('Paused fixture')),{once:true}));}
+  signal?.throwIfAborted();await page.goto(url);return page;
+ }}},media:{fetch:async()=>{downloads++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
+ try{
+  await app.listen();const target=app.store.addSource({name:'tumblr:staff',historyMonths:0});app.jobs.syncFeeds(['tumblr:staff'],{heads:[target],history:[]});
+  const deadline=Date.now()+15000;while(!waiting){if(Date.now()>deadline)throw new Error('Second post was not reached');await delay(5);}
+  await app.networkMode.change(true);assert.equal(app.store.getTarget(target)!.continuation,null);assert.equal(app.store.getTarget(target)!.completion,null);assert.equal(app.store.getTarget(target)!.status,'paused');
+  assert.equal(app.store.stats().posts,1);assert.equal(app.store.bodySync('tumblr:staff:12345')!.status,'ready');assert.equal(app.store.getPost('tumblr:staff:12345')!.attachments.length,2);assert.equal(downloads,0);
+  pause=false;await app.networkMode.change(false);await settle(app);
+  assert.equal(app.store.stats().posts,2);assert.equal(app.store.getTarget(target)!.observedCount,2);assert.equal(app.store.offlineText('tumblr:staff').ready,2);assert.equal(app.store.offlineMedia('tumblr:staff').ready,2);assert.equal(downloads,2);assert.equal(app.store.getTarget(target)!.completion,'listing-end');assert.equal(app.store.feedSync('tumblr:staff').state,'gaps');
+ }finally{await app.close();await browser.close();}
+});
+
 test('public Tumblr extraction reads ordered full attachments, binds identities and refuses unknown dates, hidden galleries and access gates',async()=>{
  const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{
-  const page=await browser.newPage();await page.route('**/*',route=>route.fulfill({contentType:'text/html',body:html(article('12345')+'<a rel="next" href="/page/2">Older</a>')}));await page.goto('https://staff.tumblr.com/');
+  const page=await browser.newPage();await page.route('**/*',route=>route.fulfill({contentType:'text/html',body:html(article('12345')+'<a rel="next" href="https://staff.tumblr.com/page/2">Older</a>')}));await page.goto('https://staff.tumblr.com/');
   const listing=await readTumblrListing(page,'tumblr:staff');assert.equal(listing.next,'https://staff.tumblr.com/page/2');assert.equal(listing.posts[0]!.id,'tumblr:staff:12345');assert.equal(listing.posts[0]!.bodyNeedsFetch,true);assert.deepEqual(listing.posts[0]!.attachments,[]);
   await page.goto('https://staff.tumblr.com/post/12345/');await page.setContent(html(article('12345',true)));const post=await readTumblrPost(page,'tumblr:staff:12345');assert.match(post.body!,/rest of the text/);assert.equal(post.attachments!.length,2);assert.deepEqual(post.attachments!.map(file=>file.collection?.index),[0,1]);assert.equal(post.author!.platform,'tumblr');
   await assert.rejects(readTumblrPost(page,'tumblr:staff:99999'),/requested post/);
@@ -51,8 +105,8 @@ test('Tumblr sync pages history, saves full text and every attachment before suc
  const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),collector=await browser.newPage();let navigations=0,downloads=0;
  const counts={released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0};
  await collector.route('**/*',route=>{
-  const url=new URL(route.request().url());if(url.hostname!=='staff.tumblr.com')return route.abort();
-  const id=url.pathname.match(/\/post\/([0-9]+)/)?.[1];return route.fulfill({contentType:'text/html',body:html(id?article(id,true):url.pathname==='/page/2'?article('12344'):article('12345')+'<a href="/page/2">Older</a>')});
+  const url=new URL(route.request().url());if(!['staff.tumblr.com','www.tumblr.com'].includes(url.hostname))return route.abort();
+  const id=url.pathname.match(/\/(?:post|staff)\/([0-9]+)/)?.[1];return route.fulfill({contentType:'text/html',body:html(id?article(id,true):url.pathname==='/page/2'?article('12344'):article('12345')+'<a href="https://staff.tumblr.com/page/2">Older</a>')});
  });
  const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts,async open(_limit,mode){assert.equal(mode,'tumblr');},async close(){},async manualSignIn(){assert.fail('Public Tumblr does not sign into Reddit');},async navigate(url,signal){signal?.throwIfAborted();navigations++;counts.released++;await collector.goto(url);return collector;}}},media:{fetch:async()=>{downloads++;return new Response(png,{headers:{'Content-Type':'image/png'}});}}});
  const origin=await app.listen();
@@ -74,7 +128,7 @@ test('Tumblr sync pages history, saves full text and every attachment before suc
 
 test('Offline mode pauses a Tumblr page without advancing its checkpoint and automatically resumes it with saved media retained',async()=>{
  const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),page=await browser.newPage();let blocked=true,atSecondPage=false,downloads=0;
- await page.route('**/*',route=>{const url=new URL(route.request().url()),id=url.pathname.match(/\/post\/([0-9]+)/)?.[1];return route.fulfill({contentType:'text/html',body:html(id?article(id,true):url.pathname==='/page/2'?article('12344'):article('12345')+'<a href="/page/2">Older</a>')});});
+ await page.route('**/*',route=>{const url=new URL(route.request().url()),id=url.pathname.match(/\/(?:post|staff)\/([0-9]+)/)?.[1];return route.fulfill({contentType:'text/html',body:html(id?article(id,true):url.pathname==='/page/2'?article('12344'):article('12345')+'<a href="https://staff.tumblr.com/page/2">Older</a>')});});
  const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0}),browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0},async open(){},async close(){},async manualSignIn(){},async navigate(url,signal){
   if(blocked&&url.endsWith('/page/2')){atSecondPage=true;await new Promise<void>((_resolve,reject)=>signal!.addEventListener('abort',()=>reject(new Error('Paused fixture navigation')),{once:true}));}
   signal?.throwIfAborted();await page.goto(url);return page;
@@ -123,14 +177,14 @@ test('picture/video source variants are single attachments and disabled next pla
 test('a Tumblr access block pauses only Tumblr; bulk sync still collects Reddit and explicit Tumblr retry respects its cooldown',async()=>{
  const {AccessError}=await import('../src/browser.ts');const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),page=await browser.newPage();let denied=true,tumblrVisits=0,globalPauses=0;
  await page.route('**/*',route=>route.fulfill({contentType:'text/html',body:html('<article data-post-id="12345" data-timestamp="1700000000"><a href="/post/12345/">Post</a><p>Complete Tumblr text.</p></article>')}));
- const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,network:new RequestQueue({intervalMs:0}),onPause:()=>globalPauses++,browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0},async open(){},async close(){},async manualSignIn(){},async navigate(url){if(url.includes('staff.tumblr.com')){tumblrVisits++;if(denied)throw new AccessError('Tumblr denied access (403)',Date.now()+60000,'tumblr');}await page.goto(url);return page;}},readListing:async()=>({account:'fixture_user',posts:[{id:'abc',subreddit:'zztest',permalink:'/r/zztest/comments/abc/',title:'Reddit keeps collecting',body:'Complete',created:{epochMs:1700000000000,precisionMs:1000},source:'live',observedAt:Date.now(),media:['Text']}],ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:'abc'})}});
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,network:new RequestQueue({intervalMs:0}),onPause:()=>globalPauses++,browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0},async open(){},async close(){},async manualSignIn(){},async navigate(url){if(/staff\.tumblr\.com|www\.tumblr\.com\/staff/.test(url)){tumblrVisits++;if(denied)throw new AccessError('Tumblr denied access (403)',Date.now()+60000,'tumblr');}await page.goto(url);return page;}},readListing:async()=>({account:'fixture_user',posts:[{id:'abc',subreddit:'zztest',permalink:'/r/zztest/comments/abc/',title:'Reddit keeps collecting',body:'Complete',created:{epochMs:1700000000000,precisionMs:1000},source:'live',observedAt:Date.now(),media:['Text']}],ordinary:[],unknownTime:false,omissions:0,next:null,empty:false,signature:'abc'})}});
  try{await app.listen();app.store.addSource({name:'tumblr:staff',historyMonths:1});app.store.addSource({name:'zztest',historyMonths:1});app.jobs.syncFeeds(['tumblr:staff','zztest']);await settle(app);assert.equal(globalPauses,0);assert.equal(app.jobs.state.accessPause,null);assert(app.jobs.state.sourcePause);assert.equal(app.store.getPost('abc')!.title,'Reddit keeps collecting');assert.equal(app.store.feedSync('tumblr:staff').state,'incomplete');const before=tumblrVisits;app.jobs.syncFeeds(['tumblr:staff','zztest']);await settle(app);assert.equal(tumblrVisits,before);assert.throws(()=>app.jobs.syncFeeds(['tumblr:staff']),/Cooldown until/);denied=false;app.store.setSetting('accessPause:tumblr',{reason:'Retry allowed',notBefore:null});app.jobs.syncFeeds(['tumblr:staff']);await settle(app);assert.equal(app.jobs.state.sourcePause,null);assert.equal(app.store.offlineText('tumblr:staff').ready,1);assert.equal(globalPauses,0);}
  finally{await app.close();await browser.close();}
 });
 
 test('one unrecognised Tumblr theme stops only that feed, without marking idle blogs paused or logging the error twice',async()=>{
  const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),page=await browser.newPage();let globalPauses=0;
- await page.route('**/*',route=>route.fulfill({contentType:'text/html',body:route.request().url().includes('broken.tumblr.com')?'<main>Unknown theme</main>':html('<article data-post-id="12345" data-timestamp="1700000000"><a href="/post/12345/">Post</a><p>Full content</p></article>')}));
+ await page.route('**/*',route=>route.fulfill({contentType:'text/html',body:/broken\.tumblr\.com|www\.tumblr\.com\/broken/.test(route.request().url())?'<main>Unknown theme</main>':html('<article data-post-id="12345" data-timestamp="1700000000"><a href="/post/12345/">Post</a><p>Full content</p></article>')}));
  const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{mediaSync:null,network:new RequestQueue({intervalMs:0}),onPause:()=>globalPauses++,browser:{counts:{released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0},async open(){},async close(){},async manualSignIn(){},async navigate(url){await page.goto(url);return page;}}}});
  try{const origin=await app.listen();for(const name of ['tumblr:broken','tumblr:staff','tumblr:idle'])app.store.addSource({name,historyMonths:1});const idle=app.store.getHistoryPreference('tumblr:idle');app.jobs.syncFeeds(['tumblr:broken','tumblr:staff']);await settle(app);assert.equal(app.store.feedSync('tumblr:broken').state,'incomplete');assert.equal(app.store.offlineText('tumblr:staff').ready,1);assert.equal(app.store.feedSync('tumblr:idle').state,'never');assert.equal(app.store.getTarget(idle.targetId!)!.status,'queued');assert.equal(app.jobs.state.sourcePause,null);assert.equal(globalPauses,0);const state=await(await fetch(origin+'/api/state')).json();assert.equal(state.problems.unseen,1);}
  finally{await app.close();await browser.close();}

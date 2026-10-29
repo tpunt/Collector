@@ -4,7 +4,7 @@ import { readListing, readThread, collectClassicListingDom } from './extract.ts'
 import { advanceBoundary } from './history.ts';
 import type { ReaderStore } from './store.ts';
 import {postId} from './domain.ts';
-import {feedName,feedIdentity,listingUrl} from './sources.ts';
+import {feedName,feedIdentity,listingUrl,tumblrPostUrl} from './sources.ts';
 import type { Page } from 'playwright';
 import type { RequestQueue } from './request-gate.ts';
 import { discoverMedia } from './media-discovery.ts';
@@ -376,7 +376,7 @@ export class ReaderJobs {
               if(this.browserOpen&&this.mediaMode)await this.closeBrowser();
               await this.openBrowser(120-(this.totalRequests()-requestBaseline),'tumblr');
               this.attemptedBodies.add(post.id);
-              const page=await this.browser.navigate(this.pageUrl=post.permalink,this.controller.signal),saved=await readTumblrPost(page,post.id,url=>this.browser.navigate(this.pageUrl=url,this.controller!.signal));this.controller.signal.throwIfAborted();
+              const page=await this.browser.navigate(this.pageUrl=tumblrPostUrl(post.id),this.controller.signal),saved=await readTumblrPost(page,post.id,url=>this.browser.navigate(this.pageUrl=url,this.controller!.signal));this.controller.signal.throwIfAborted();
               this.store.savePostBody(work.generation,post.id,saved.body??'',saved.observedAt,saved.author);
               if(!saved.attachments?.length)throw new UnsupportedMediaError('This Tumblr media is hosted by an unsupported external provider');
               this.store.saveMediaReferences(work.generation,post.id,saved.attachments);
@@ -419,7 +419,22 @@ export class ReaderJobs {
             this.message = `Syncing ${feedIdentity(target.subreddit).label} · ${target.observedCount} posts encountered`;
             const head = target.continuation === null || target.continuation===listingUrl(target.subreddit);
             const url = target.continuation ?? listingUrl(target.subreddit);
-            const listing = await (tumblr?readTumblrListing:this.listing)(await this.browser.navigate(this.pageUrl=url, this.controller.signal), target.subreddit);
+            const listingPage=await this.browser.navigate(this.pageUrl=url,this.controller.signal);
+            const listing=tumblr?await readTumblrListing(listingPage,target.subreddit,{
+              navigate:next=>this.browser.navigate(this.pageUrl=next,this.controller!.signal),
+              knownDate:id=>{const post=this.store.getPost(id);return post?{epochMs:post.createdMs,precisionMs:post.precisionMs}:null;},
+              resolved:post=>{
+                this.controller!.signal.throwIfAborted();
+                const before=this.store.getPost(post.id);
+                // Save each resolved post, but retain the listing checkpoint
+                // until every card has been validated. Stop/budget errors can
+                // then resume without skipping the remainder of this page.
+                this.store.commitBatch({generation:work.generation,targetId:target.id,observations:[post],continuation:target.continuation});
+                this.reports?.observe(target.subreddit,[before],[post.id]);
+                this.attemptedBodies.add(post.id);
+                this.message=`${feedIdentity(target.subreddit).label}: saved public post text; media queued`;
+              }
+            }):await this.listing(listingPage,target.subreddit);
             this.controller.signal.throwIfAborted();
             if (this.store.getTarget(target.id)?.status === 'cancelled') continue;
             if(!tumblr)this.store.bindAccount(listing.account);
@@ -444,7 +459,7 @@ export class ReaderJobs {
               this.attemptedBodies.add(post.id);this.store.setBodySync(work.generation,post.id,'fetching');
             }
             this.message = work.kind==='body'?`Saving post text: ${post.title}`:`Reading discussion: ${post.title}`;
-            const page = await this.browser.navigate(this.pageUrl=post.permalink.replace('https://www.reddit.com', 'https://old.reddit.com'), this.controller.signal);
+            const page = await this.browser.navigate(this.pageUrl=(tumblr?tumblrPostUrl(post.id):post.permalink.replace('https://www.reddit.com', 'https://old.reddit.com')), this.controller.signal);
             if(tumblr&&work.kind==='body'){
               const saved=await readTumblrPost(page,post.id,url=>this.browser.navigate(this.pageUrl=url,this.controller!.signal));this.controller.signal.throwIfAborted();
               this.store.savePostBody(work.generation,post.id,saved.body??'',saved.observedAt,saved.author);

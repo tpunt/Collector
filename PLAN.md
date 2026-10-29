@@ -1,5 +1,32 @@
 # Collector — implementation plan
 
+## Public Tumblr access repair — 29 October 2026
+
+The Staff custom-theme hostname returned a JavaScript browser challenge with
+HTTP 403, including with normal JavaScript loading. The official default public
+view at `www.tumblr.com/staff` returned server-rendered posts without JavaScript.
+Collection now starts at that view and accepts captured public post permalinks,
+while retaining supported theme pagination and native media frames. Request
+spacing remains random 4–6 seconds through the existing shared queue.
+
+Post-specific metadata supplies missing listing dates; blog creation dates are
+never used. Each resolved post is saved without advancing the page checkpoint,
+so interruption preserves progress. Reblog identity is bound to the selected
+blog's visible controls and permalink; separately confirmed original-post SEO
+metadata is labelled as provenance and excluded from chronological boundary
+proof. Tumblr CDN `.pnj` and image `.gifv` attachments use existing MIME checks.
+The public view exposes no captured older-page link in the live Staff check, so
+all-time history remains unverified and is reported as a gap.
+
+Live testing in a separate library stored all 17 exposed posts, downloaded 11
+files, and verified both complete four-image galleries offline, including
+animated images, fullscreen navigation and Escape. The remaining large galleries
+were deliberately paused to bound live requests; pending work remains resumable.
+The normal library was not used for collection. Type checking, production build,
+208 unit tests and 119 browser/integration tests passed; focused Tumblr tests
+were rerun after the reblog adjustments.
+
+
 ## Collection reports, media browsing and public Tumblr — 28 October 2026
 
 Implemented compact media grids with the existing shared filters; fullscreen

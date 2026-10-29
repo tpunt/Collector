@@ -29,15 +29,23 @@ and try again.
 ### Tumblr (experimental)
 
 Choose **Tumblr** when adding a feed and enter a blog name, `@name`, or its
-Tumblr blog URL. This collector visits public `name.tumblr.com` theme pages in
-its own Chrome profile, with JavaScript disabled. It reads attached DOM and NPF
-media attributes, follows captured `/page/N` links, and fetches individual public
-post pages to verify full text and attachment URLs. It uses no Tumblr API.
+Tumblr blog URL. Collection starts at the default public website view,
+`https://www.tumblr.com/name`, in its own Chrome profile with JavaScript disabled.
+It reads attached DOM and explicit page/media metadata, and fetches captured
+individual post links to verify full text, publication dates and attachments.
+Supported custom-theme pages and captured `/page/N` links remain readable.
+It uses no Tumblr API or hidden application state.
 The existing random 4–6 second shared request spacing, session budgets, storage
 cap, Stop/Resume and Offline mode apply. Nothing collects on startup.
 
-Supported themes must expose post identities, absolute dates, complete post
-content and direct Tumblr CDN image/video files. Captured legacy photoset and native video iframe URLs are validated against the
+Supported layouts must expose post identities, absolute dates, complete post
+content and direct Tumblr CDN image/video files. Feed-level blog creation dates
+are never substituted for missing post dates. Reblogs retain a labelled original
+publication date and source link; that date does not establish reblog order or
+advance a chronological history boundary. Each newly resolved post is saved
+before the next is requested, while the listing checkpoint stays unchanged until
+the full page is validated. Tumblr's `.pnj` and image `.gifv` URLs are supported
+with the same response MIME checks as other images. Captured legacy photoset and native video iframe URLs are validated against the
 post/blog and visited explicitly through the same paced browser queue. They are
 read from their rendered HTML with scripts disabled; iframe/API URLs are never
 guessed. Inline `<video><source>` files, linked full-size photos and rendered NPF
@@ -47,7 +55,7 @@ dates, unfamiliar layouts and unsupported or inaccessible media frames pause or
 leave work incomplete, rather than silently advancing its checkpoint. External
 players retain the existing online-only treatment. In mixed posts, hosted media
 is saved while a separate external player keeps an orange offline warning; a
-cached image never counts as a downloaded external video. Private/dashboard-only blogs,
+cached image never counts as a downloaded external video. Blogs requiring sign-in,
 custom-domain blogs, Tumblr sign-in, replies/notes and third-party Tumblr archives
 are not supported. Tumblr service access failures pause Tumblr collection separately;
 layout/post errors stop only the affected feed.
@@ -55,11 +63,15 @@ Reddit and its archives can continue. Bulk Sync skips paused Tumblr until an
 explicit **Resume Tumblr** (respecting any cooldown). An end-of-listing result discloses that older history could
 not be verified. Reddit's archive tools remain Reddit-specific.
 
-The collector has local end-to-end coverage for paginated history, full text,
-multiple attachments, local serving and Offline pause/resume. Live public Staff
-and Changes probes returned HTTP 403 during development. The new Staff probe on
-28 October 2026 was also denied on its first request and stopped immediately;
-live Tumblr access is therefore unverified and this source is explicitly experimental.
+The custom-theme Staff hostname returned a JavaScript browser challenge with
+HTTP 403 during development. Its default `www.tumblr.com/staff` public view
+returned HTTP 200 without JavaScript on 29 October 2026. This view exposes a
+finite set of posts without a captured next-page link; Collector reports that
+older history could not be verified. It does not guess private pagination APIs
+or claim all-time coverage. Local end-to-end tests cover both layouts, reblogs,
+paginated themes, full text, multiple attachments, local serving and interrupted
+collection. The integration remains experimental because public visibility and
+website layouts vary by blog.
 
 Star a post to save it in **Favourite posts**, or star the author beside their
 username to add them to **Favourite users**. Both views work offline with the

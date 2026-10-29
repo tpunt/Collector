@@ -757,3 +757,44 @@ endpoints or authentication bypass. Live compatibility is still unverified.
 Local browser fixtures verify complete ordered NPF/inline media, captured
 post-bound legacy photosets/native video frames, mixed-source request accounting,
 pagination, offline serving and pause/resume. Tumblr sign-in remains deferred.
+
+
+## 29 October 2026 — default public Tumblr website works
+
+The custom-theme `staff.tumblr.com` hostname returned HTTP403 with the rendered
+message “Javascript required” and a browser-check title. A bounded comparison
+with ordinary JavaScript loading also returned 403 and stopped. No challenge
+solving, fingerprint changes or login was used. Tumblr's own theme documentation
+identifies `tumblr.com/blogname` as the default blog view:
+https://help.tumblr.com/knowledge-base/customizing-your-theme/ .
+
+The captured default public Staff listing and individual permalinks returned
+HTTP200 with JavaScript disabled. Visible articles, bookmark links, blog-bound
+Like-control identifiers, srcset media and explicit publication metadata suffice
+for extraction. Blog-level parsely metadata is the blog creation date and cannot
+supply post dates. On reblogs, canonical/Open Graph metadata names the original
+post and its publication date; acceptance requires a confirming visible bookmark,
+while the requested blog's controls still bind the saved reblog ID. Original
+publication dates are labelled and excluded from chronological history evidence.
+No hydration-state traversal or API requests were used. Scripts, automatic media,
+fonts, fetch/XHR and unrelated frames remain suppressed; CSS and explicit page
+navigation use the existing 4–6 second paced request gate.
+
+An isolated live sync stored the 17 exposed posts. We deliberately paused after
+11 media files to avoid downloading hundreds of gallery attachments merely for
+QA. All four files in each of two galleries decoded from local `/media/` URLs
+while Offline mode was on, including `.pnj` PNG and `.gifv` animated images.
+Fullscreen next-image navigation and Escape worked in the in-app browser. Saved
+progress survived a server restart, which began offline; re-enabling collection
+and explicitly resuming continued the listing. The earlier reblog validation
+failure was recorded in the local problem log and fixed. The Staff public view
+exposed no next-page link, so this is finite public coverage, not full-history
+verification. Sign-in remains deferred. Across the bounded diagnostics and live
+checks, 48 requests were released; no HTTP429 occurred. No normal-library feeds
+or content were changed.
+
+Checks: TypeScript and production build, all 208 unit tests, all 119 browser/
+integration tests, and a subsequent focused run of the 11 Tumblr browser tests
+covering reblogs/self-reblogs, identity rejection, date provenance, ordered media,
+partial-page pause/resume and retained checkpoints. Screenshot and diagnostics
+are in the ignored `.local-data/qa/2026-10-29/tumblr/` directory.

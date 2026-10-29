@@ -46,7 +46,7 @@ export function postId(input: string): string {
 
 export function canonicalPostUrl(input: string, id: string, subreddit: string): string {
   const tumblr=tumblrItem(id);
-  if(tumblr){if(feedName(subreddit)!=='tumblr:'+tumblr.blog)throw new Error('Post URL does not match its identity');const url=tumblrUrl(input,subreddit);if(url.pathname.split('/')[2]!==tumblr.id)throw new Error('Post URL does not match its identity');return `https://${tumblr.blog}.tumblr.com/post/${tumblr.id}/`;}
+  if(tumblr){if(feedName(subreddit)!=='tumblr:'+tumblr.blog)throw new Error('Post URL does not match its identity');const url=tumblrUrl(input,subreddit);if(url.pathname.split('/')[2]!==tumblr.id)throw new Error('Post URL does not match its identity');return url.hostname==='www.tumblr.com'?`https://www.tumblr.com/${tumblr.blog}/${tumblr.id}`:`https://${tumblr.blog}.tumblr.com/post/${tumblr.id}/`;}
   const url = redditUrl(input);
   const match = /^\/r\/([^/]+)\/comments\/([a-z0-9]+)(?:\/[^/]*)?\/?$/i.exec(url.pathname);
   if (!match || subredditName(match[1]!) !== subredditName(subreddit) ||
