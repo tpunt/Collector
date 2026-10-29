@@ -240,6 +240,11 @@ occurrences without deleting diagnostics or resuming collection. Newer repeats
 remain unseen. **Download diagnostics** exports the bounded, sanitised snapshot;
 its absolute local path is omitted from the export.
 
+Known unsupported attachments retain their media warning without creating a new
+download problem. Missing hosted files and unexpected download failures are still
+logged. Browser request-control failures are internal errors; actual website
+access refusals retain the separate access classification.
+
 The local file is `.local-data/logs/problems.json` (or `logs/` beside the configured
 library database). It contains problems only: no successful-request trace,
 post/comment text, raw HTML, screenshots, error-message payloads, headers,

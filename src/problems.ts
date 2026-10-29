@@ -1,7 +1,7 @@
 import {mkdirSync,readFileSync,renameSync,statSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {feedIdentity,feedName,EXTERNAL_ATTACHMENT_NOTE,diagnosticPage} from './sources.ts';
+import {feedIdentity,feedName,EXTERNAL_ATTACHMENT_NOTE,UNSUPPORTED_ATTACHMENT_NOTE,diagnosticPage} from './sources.ts';
 import {postId} from './domain.ts';
 import {ExtractionError,PostIdentityError} from './sync-errors.ts';
 
@@ -42,9 +42,10 @@ function facts(input:ExtractionFacts|undefined):ExtractionFacts|undefined {
 
 function classify(error:unknown,context:ProblemContext):ProblemCode|null {
   const item=error as Error,message=typeof item?.message==='string'?item.message.slice(0,2000):'',name=item?.constructor?.name;
-  if(name==='StorageLimitError'||item?.name==='AbortError'||message.startsWith('Offline mode is on')||message===EXTERNAL_ATTACHMENT_NOTE||message.startsWith('Offline download is not supported'))return null;
+  if(name==='StorageLimitError'||item?.name==='AbortError'||message.startsWith('Offline mode is on')||message===EXTERNAL_ATTACHMENT_NOTE||message===UNSUPPORTED_ATTACHMENT_NOTE||message.startsWith('Offline download is not supported'))return null;
   if(['SyncLimitError','AccessError'].includes(name??'')&&/budget|storage (limit|cap)/i.test(message))return null;
   if(context.code)return context.code;
+  if(name==='AccessError'&&/^Browser request control failed;/.test(message))return 'runtime';
   if(error instanceof ExtractionError)return error.code;
   if(error instanceof PostIdentityError)return 'post-identity';
   if(name==='AccessError'&&context.operation==='download'&&/network request failed/i.test(message))return 'download';

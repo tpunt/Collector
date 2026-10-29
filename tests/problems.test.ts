@@ -4,10 +4,11 @@ import {mkdtemp,readFile,rm,stat,writeFile,mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {ProblemLog} from '../src/problems.ts';
-import {ExtractionError,SyncLimitError} from '../src/sync-errors.ts';
-import {EXTERNAL_ATTACHMENT_NOTE} from '../src/sources.ts';
+import {ExtractionError,SyncLimitError,UnsupportedMediaError} from '../src/sync-errors.ts';
+import {EXTERNAL_ATTACHMENT_NOTE,UNSUPPORTED_ATTACHMENT_NOTE} from '../src/sources.ts';
 import fs from 'node:fs';
 import {syncBuiltinESMExports} from 'node:module';
+import {AccessError} from '../src/browser.ts';
 const problem=()=>new ExtractionError('listing-records','Raw error message never belongs in diagnostics',{rows:10,accepted:9,rejected:1,missingFields:['datetime']});
 
 test('repeat counters update without per-occurrence writes, flush on close and survive restart with bounded acknowledgement',async()=>{
@@ -48,7 +49,17 @@ test('expected operating pauses and online-only media do not create problem acti
  const root=await mkdtemp(join(tmpdir(),'collector-problems-expected-')),log=new ProblemLog(root);
  try{
   log.report({operation:'collection'},new SyncLimitError('Sync request budget reached; Resume to fetch remaining posts and media.'));log.report({operation:'download'},new Error(EXTERNAL_ATTACHMENT_NOTE));
+  log.report({operation:'download',feed:'tumblr:staff'},new UnsupportedMediaError(UNSUPPORTED_ATTACHMENT_NOTE));
   assert.equal(log.status.groups,0);await assert.rejects(stat(log.path),{code:'ENOENT'});log.close();log.report({operation:'listing'},problem());assert.equal(log.status.groups,0);
+ }finally{log.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('browser-control failures are internal problems while actual website access refusals retain their access classification',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'collector-problems-control-')),log=new ProblemLog(root);
+ try{
+  const error=new AccessError('Browser request control failed; collection stopped',null,'tumblr');error.code='ERR_REQUEST_CONTINUE';log.report({operation:'sign-in'},error);
+  const control=log.list().records[0]!;assert.equal(control.code,'runtime');assert.equal(control.samples[0]!.error.code,'ERR_REQUEST_CONTINUE');assert.equal(control.samples[0]!.error.httpStatus,undefined);
+  log.report({operation:'sign-in'},new AccessError('Tumblr denied access (403)',null,'tumblr'));assert.equal(log.status.groups,2);const access=log.list().records.find(row=>row.code==='access')!;assert(access);assert.equal(access.samples[0]!.error.httpStatus,403);
  }finally{log.close();await rm(root,{recursive:true,force:true});}
 });
 test('unwritable, corrupt and oversized logs surface health errors without interrupting collection or loading arbitrary content',async()=>{

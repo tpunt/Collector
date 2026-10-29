@@ -176,6 +176,18 @@ test('mixed Tumblr posts save hosted images and video while disclosing a separat
  }finally{await browser.close();await app.close();}
 });
 
+test('known unsupported attachments keep their media warning without logging a download problem, while a missing hosted file is still logged',async()=>{
+ const app=await createOnlineReaderServer({database:':memory:',port:0,jobs:{network:new RequestQueue({intervalMs:0})},media:{fetch:async input=>String(input).includes('missing')?new Response('Missing',{status:404}):new Response(png,{headers:{'Content-Type':'image/png'}})}});
+ try{
+  await app.listen();app.store.addSubreddit('tumblr:staff');
+  const record=(id:string,unsupported:boolean)=>({id:'tumblr:staff:'+id,subreddit:'tumblr:staff',permalink:'https://www.tumblr.com/staff/'+id,title:'Attachments fixture',body:'Complete saved text',created:{epochMs:1700000000000,precisionMs:1000},observedAt:Date.now(),source:'archive' as const,exportId:'problem-fixture',media:unsupported?['Text' as const,'Image' as const,'Unknown' as const]:['Text' as const,'Image' as const],attachments:[{kind:'image' as const,url:'https://64.media.tumblr.com/'+(unsupported?'supported':'missing')+'.png'}]});
+  app.store.importArchiveBatch(app.store.generation,[record('88881',true)]);app.jobs.syncMedia(['tumblr:staff'],{resume:true});await settle(app);
+  assert.equal(app.store.mediaSync('tumblr:staff:88881')!.status,'unavailable');assert.equal((await app.media.items('tumblr:staff:88881'))[0]!.state,'ready');assert.equal(app.problems.status.groups,0);
+  app.store.importArchiveBatch(app.store.generation,[record('88882',false)]);app.jobs.syncMedia(['tumblr:staff'],{resume:true});await settle(app);
+  assert.equal(app.problems.status.groups,1);const problem=app.problems.list().records[0]!;assert.equal(problem.code,'download');assert.equal(problem.count,1);assert.equal(problem.samples[0]!.post,'tumblr:staff:88882');assert.equal(problem.samples[0]!.error.httpStatus,404);
+ }finally{await app.close();}
+});
+
 test('Tumblr sync pages history, saves full text and every attachment before success, composes shared filters and serves offline media',async()=>{
  const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),collector=await browser.newPage();let navigations=0,downloads=0;
  const counts={released:0,intercepted:0,aborted:0,suppressed:0,intervalMs:0};
