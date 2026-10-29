@@ -7,10 +7,9 @@ import type { Clock } from './limiter.ts';
 export type RequestInterval = number | readonly [number, number];
 export const DEFAULT_REQUEST_INTERVAL = [4_000, 6_000] as const;
 
-/** Spaces network starts, including redirects; not merely UI actions. */
+/** Each source has its own serialized request lane; Offline mode and Stop are global. */
 export class RequestQueue {
-  private tail: Promise<unknown> = Promise.resolve();
-  private nextAllowedAt: number | null = null;
+  private lanes=new Map<string,{tail:Promise<unknown>;nextAllowedAt:number|null}>();
   private controller = new AbortController();
   private access = new AbortController();
   private offlineMode = false;
@@ -56,22 +55,24 @@ export class RequestQueue {
   async waitInterval(signal?:AbortSignal):Promise<void> {
     await this.waitUntil(this.clock.now()+this.sampleInterval(),signal);
   }
-  run<T>(release: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  run<T>(release: () => Promise<T>, signal?: AbortSignal, source='default'): Promise<T> {
     if(this.offlineMode)return Promise.reject(new Error('Offline mode is on; external requests are paused'));
+    let lane=this.lanes.get(source);
+    if(!lane){lane={tail:Promise.resolve(),nextAllowedAt:null};this.lanes.set(source,lane);}
     const access=this.access.signal;
-    const task = this.tail.then(async () => {
+    const task = lane.tail.then(async () => {
       access.throwIfAborted();this.assertOnline();
       signal?.throwIfAborted();
       this.controller.signal.throwIfAborted();
-      if (this.nextAllowedAt !== null) await this.waitUntil(this.nextAllowedAt,signal);
+      if (lane.nextAllowedAt !== null) await this.waitUntil(lane.nextAllowedAt,signal);
       access.throwIfAborted();this.assertOnline();
       const startedAt = this.clock.now();
       this.released++;
       try { return await release(); }
       // Sample once per completed release, so cancelled waiters cannot shorten it.
-      finally { this.nextAllowedAt = (this.fromCompletion ? this.clock.now() : startedAt) + this.sampleInterval(); }
+      finally { lane.nextAllowedAt = (this.fromCompletion ? this.clock.now() : startedAt) + this.sampleInterval(); }
     });
-    this.tail = task.catch(() => undefined);
+    lane.tail = task.catch(() => undefined);
     return task;
   }
 }
@@ -101,6 +102,7 @@ interface Pending {
 }
 export interface RequestGateOptions {
   queue?: RequestQueue;
+  source?:string;
   /** User-operated sign-in may load normally; collection always stays paced. */
   paceRequests?:boolean;
   onMediaRequest?: (url: string) => void;
@@ -117,6 +119,7 @@ export interface RequestGateOptions {
 export class ChromiumRequestGate {
   private socket: WebSocket;
   private queue: RequestQueue;
+  private source:string;
   private ownsQueue: boolean;
   private paceRequests:boolean;
   private controller = new AbortController();
@@ -146,6 +149,7 @@ export class ChromiumRequestGate {
     this.ownsQueue = !options.queue;
     this.paceRequests=options.paceRequests??true;
     this.queue = options.queue ?? new RequestQueue({ intervalMs: options.intervalMs, fromCompletion: true });
+    this.source=options.source??'default';
     this.isPaused = options.isPaused ?? (() => false);
     this.onFailure = options.onFailure ?? (() => {});
     this.onMediaRequest = options.onMediaRequest;
@@ -304,7 +308,7 @@ export class ChromiumRequestGate {
           if (entry) { clearTimeout(entry.timer); this.responses.delete(key); entry.resolve(); }
         }
       };
-      void (this.paceRequests?this.queue.run(release,this.controller.signal):Promise.resolve().then(release)).catch(async () => {
+      void (this.paceRequests?this.queue.run(release,this.controller.signal,this.source):Promise.resolve().then(release)).catch(async () => {
         this.aborted++;
         await this.send('Fetch.failRequest', { requestId, errorReason: 'Aborted' }, session).catch(() => undefined);
       }).finally(()=>{

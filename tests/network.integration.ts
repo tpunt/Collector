@@ -10,6 +10,22 @@ import { ChromiumRequestGate, chromiumControlUrl,RequestQueue } from '../src/req
 import { chromium } from 'playwright';
 import { browserLaunchOptions } from '../src/browser-options.ts';
 
+test('independent source lanes reach local HTTP concurrently while documents and CSS stay paced within each source', {timeout:30000},async()=>{
+ const hits:{path:string;at:number}[]=[],failures:string[]=[];let began!:()=>void,redditEnded=0;
+ const redditBegan=new Promise<void>(resolve=>{began=resolve;}),server=createServer(async(req,res)=>{
+  const path=req.url!;hits.push({path,at:performance.now()});res.setHeader('Content-Type',path.endsWith('.css')?'text/css':'text/html');
+  if(path==='/reddit/post'){began();await new Promise(resolve=>setTimeout(resolve,500));redditEnded=performance.now();}
+  res.end(path.endsWith('.css')?'body{color:black}':`<link rel="stylesheet" href="${path.replace('/post','/style.css')}"><main>Local source fixture</main>`);
+ });
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const origin=`http://127.0.0.1:${(server.address()as any).port}`,directory=await mkdtemp(join(tmpdir(),'collector-source-pacing-')),queue=new RequestQueue({intervalMs:100,fromCompletion:true});
+ const contexts:Awaited<ReturnType<typeof chromium.launchPersistentContext>>[]=[],gates:ChromiumRequestGate[]=[];
+ try{
+  for(const source of ['reddit','tumblr']){const profile=join(directory,source),context=await chromium.launchPersistentContext(profile,{...browserLaunchOptions,channel:'chrome',headless:true});contexts.push(context);gates.push(await ChromiumRequestGate.install(await chromiumControlUrl(profile),{queue,source,allowResource:url=>url.startsWith(origin+'/'),blockedResourceTypes:['Image','Media','Font','Script','XHR','Fetch','Ping','Other'],onFailure:(_reason,code)=>failures.push(code)}));}
+  const reddit=contexts[0]!.pages()[0]!.goto(origin+'/reddit/post');await redditBegan;await contexts[1]!.pages()[0]!.goto(origin+'/tumblr/post');await reddit;
+  const at=(path:string)=>hits.find(hit=>hit.path===path)!.at;assert(at('/tumblr/post')<redditEnded,'Tumblr waited for an unrelated Reddit response');assert(at('/reddit/style.css')-redditEnded>=80);assert(at('/tumblr/style.css')-at('/tumblr/post')>=80);assert.deepEqual(failures,[]);assert.equal(queue.released,4);
+ }finally{gates.forEach(gate=>gate.stop());await Promise.all(contexts.map(context=>context.close()));gates.forEach(gate=>gate.disposeAfterBrowserClose());await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(directory,{recursive:true,force:true});}
+});
+
 test('manual sign-in resources load concurrently, preserve scripted form submission and still block requests in Offline mode',async()=>{
  const hits:{path:string;time:number;method:string}[]=[],failures:string[]=[];let submitted='';
  const server=createServer(async(req,res)=>{

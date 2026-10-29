@@ -116,7 +116,7 @@ export class ArchiveFetcher {
       if (result?.error || !Array.isArray(result?.data)) throw new Error('Archive query failed or its response format changed; checkpoint kept');
       if (result.data.length > 1000) throw new Error('Archive service exceeded the supported page size; checkpoint kept');
       return result.data;
-    }, signal);
+    }, signal,'reddit');
   }
   private async run(id: string, signal: AbortSignal,reportId?:string) {
     const generation = this.store.generation, initial = this.store.archiveFetch(id)!;

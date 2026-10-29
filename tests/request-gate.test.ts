@@ -58,3 +58,30 @@ test('invalid interval ranges cannot disable pacing',()=>{
   for(const intervalMs of [-1,NaN,Infinity,[-1,1],[6000,4000],[4000,Infinity]] as const)
     assert.throws(()=>new RequestQueue({intervalMs}),/Invalid request interval/);
 });
+
+test('each source retains its own sampled completion deadline when switching between sources',async()=>{
+ let now=0;const samples=[0,1,0.25,0.75],starts:{source:string;at:number}[]=[];
+ const queue=new RequestQueue({fromCompletion:true,random:()=>samples.shift()!,clock:{now:()=>now,sleep:async ms=>{now+=ms;}}});
+ const run=(source:string,duration=0)=>queue.run(async()=>{starts.push({source,at:now});now+=duration;},undefined,source);
+ await run('reddit',100);await run('tumblr',200);await run('reddit');await run('tumblr');
+ assert.deepEqual(starts,[{source:'reddit',at:0},{source:'tumblr',at:100},{source:'reddit',at:4100},{source:'tumblr',at:6300}]);assert.equal(queue.released,4);
+});
+
+test('a slow response holds its own source but does not block another source from dispatching',async()=>{
+ let now=0,release!:()=>void;const calls:string[]=[],hold=new Promise<void>(resolve=>{release=resolve;});
+ const queue=new RequestQueue({fromCompletion:true,random:()=>0.5,clock:{now:()=>now,sleep:async ms=>{now+=ms;}}});
+ const reddit=queue.run(async()=>{calls.push('reddit first');await hold;},undefined,'reddit');
+ const next=queue.run(async()=>{assert.equal(now,5000);calls.push('reddit second');},undefined,'reddit');
+ try{await queue.run(async()=>{assert.equal(now,0);calls.push('tumblr');},undefined,'tumblr');assert.deepEqual(calls,['reddit first','tumblr']);}
+ finally{release();await Promise.all([reddit,next]);}
+ assert.deepEqual(calls,['reddit first','tumblr','reddit second']);
+});
+
+test('Offline mode aborts queued work across every source and going online never revives that old work',async()=>{
+ let release!:()=>void;const calls:string[]=[],hold=new Promise<void>(resolve=>{release=resolve;}),queue=new RequestQueue({intervalMs:0});
+ const active=['reddit','tumblr'].map(source=>queue.run(async()=>{calls.push(source);await hold;},undefined,source));
+ const pending=['reddit','tumblr'].map(source=>assert.rejects(queue.run(async()=>{assert.fail('Old queued work must stay aborted');},undefined,source),{name:'AbortError'}));
+ await Promise.resolve();queue.setOffline(true);assert(queue.signal.aborted);await assert.rejects(queue.run(async()=>assert.fail('New source must stay offline'),undefined,'future-source'),/Offline mode/);
+ queue.setOffline(false);release();await Promise.all([...active,...pending]);assert.deepEqual(calls,['reddit','tumblr']);assert.equal(queue.released,2);
+ await queue.run(async()=>calls.push('new tumblr'),undefined,'tumblr');assert.equal(queue.released,3);
+});

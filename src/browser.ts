@@ -93,7 +93,7 @@ export class ReaderBrowser {
     assertOpening();const control=await chromiumControlUrl(profile);assertOpening();
     const current=()=>lifecycle===this.lifecycle&&this.context===context&&!this.queue.offline;
     const gate = await ChromiumRequestGate.install(control, {
-      queue: this.queue,
+      queue: this.queue,source:platform,
       paceRequests:!manual,
       onMediaRequest: interactive==='media' ? url=>this.observedMedia.add(url) : undefined,
       // Interactive sign-in uses normal website resources (including identity

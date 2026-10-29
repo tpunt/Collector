@@ -283,7 +283,7 @@ export class ReaderJobs {
     // Count the previous profile's requests before ReaderBrowser opens another
     // platform or mode; its underlying counter resets when the context changes.
     if(this.browserOpen&&(this.browserPlatform!==platform||this.mediaMode!==media))await this.closeBrowser();
-    // Long Tumblr history runs keep going at the shared rate, rotating bounded
+    // Long Tumblr history runs keep going at the Tumblr source rate, rotating bounded
     // browser contexts between tasks. Access failures never auto-retry.
     if(mode==='tumblr'&&this.browserOpen&&this.browser.counts.released>=200)await this.closeBrowser();
     await this.browser.open(mode==='tumblr'?1000:remaining,mode);this.browserOpen=true;this.browserPlatform=platform;this.mediaMode=media;

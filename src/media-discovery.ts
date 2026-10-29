@@ -8,7 +8,7 @@ import {collectClassicThreadDom} from './extract.ts';
 import {discoverGallery} from './gallery.ts';
 
 /** Use the real expand control. Blob playback needs the player's observed CDN file requests;
- * those are suppressed by the gate and later downloaded through the shared paced queue.
+ * those are suppressed by the gate and later downloaded through the Reddit source’s paced queue.
  * Post text still comes exclusively from rendered DOM, never network bodies or hidden state. */
 export async function discoverMedia(page: Page, expectedId: string, candidates:()=>string[], signal:AbortSignal):Promise<MediaReference[]> {
   const id=postId(expectedId),identity=await page.evaluate(collectClassicThreadDom,id);

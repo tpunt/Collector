@@ -23,7 +23,7 @@ export interface MediaItem { key: string; kind: 'image' | 'video'; state: 'idle'
 export interface MediaInventory {key:string;kind:'image'|'video'|'other';bytes:number;owners:{postId:string;feed:string}[]}
 export interface MediaDependencies { directory: string; queue: RequestQueue; fetch?: typeof fetch; onAccess: (error: AccessError) => void; maxRequests?: number; maxBytes?: number; onSaved?:(feed:string,bytes:number)=>void }
 
-/** Downloads public, observed media URLs. Browser navigation and CDN requests share one queue. */
+/** Public observed media shares the owning platform's browser request lane. */
 export class MediaCache {
   private store: ReaderStore;
   private options: MediaDependencies;
@@ -216,7 +216,7 @@ export class MediaCache {
         if (this.requests+(/\.mpd(?:\?|$)/i.test(reference.url)?3:reference.audioUrl?2:1)>this.budget) throw new Error('Sync request budget reached; Resume to save remaining media.');
         this.states.set(taskKey,{subreddit:post.subreddit,state:'loading'});
         await this.download(task,key);
-      },task.controller.signal).catch(error => {
+      },task.controller.signal,feedIdentity(post.subreddit).platform).catch(error => {
         if(this.tasks.get(taskKey)===task&&this.store.generation===task.generation&&this.store.sourceRevision(task.subreddit)===task.revision&&this.store.hasMediaOwner(key,task.postId))
           this.states.set(taskKey,{subreddit:post.subreddit,state:'error',permanent:!task.controller.signal.aborted&&error instanceof UnsupportedMediaError,pause:error instanceof SyncLimitError,message:task.controller.signal.aborted?'Media loading stopped.':error instanceof Error?error.message:'Media download failed.'});
       }).finally(()=>{signal?.removeEventListener('abort',abort);if(this.tasks.get(taskKey)===task)this.tasks.delete(taskKey);this.pending.delete(pending);});
@@ -290,7 +290,7 @@ export class MediaCache {
       if(/\.mpd(?:\?|$)/i.test(reference.url)){reference=await this.manifest(task);await this.options.queue.waitInterval(task.controller.signal);}
       let saved=await this.downloadFile(task,reference.url,temporary,reference.kind),result=temporary;
       if(reference.audioUrl){
-        // Hold the shared queue while downloading both tracks. Space the second
+        // Hold this source's lane while downloading both tracks. Space the second
         // actual HTTP request from completion too, including in this composite task.
         await this.options.queue.waitInterval(task.controller.signal);
         await this.downloadFile(task,reference.audioUrl,audio,'audio');

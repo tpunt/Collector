@@ -1090,3 +1090,28 @@ catch-up/history targets. The existing embedded-player reason remains stable;
 known unsupported attachments use a separate reason, both reconciled on restart.
 The conditional legacy-frame concern was checked against the strict public URL
 validators; frame classification now also precedes post classification explicitly.
+
+### Independent source request spacing (2026-10-29)
+
+Automated requests now use an independent queue and sampled completion deadline
+per platform. Reddit browser pages, CSS, redirects, CDN files, manifests/audio
+tracks and Arctic Shift archive queries share the Reddit lane. Tumblr browser
+requests and its saved media use the Tumblr lane. Adding subreddits/blogs does
+not multiply a platform's allowed rate; switching platforms does not reset its
+prior deadline. Offline permission, cancellation and total request accounting
+remain global. Manual sign-in retains the previously approved normal loading
+exception. The single collection worker still schedules its jobs sequentially;
+this change separates rate limits without adding parallel browser workers.
+
+Local fake-clock checks verify independent random 4–6 second deadlines, a slow
+response blocking only its own source and global Offline cancellation without
+reviving old queued work. A real-Chrome local HTTP fixture verifies that Tumblr
+can dispatch while a Reddit response is in flight while each source's CSS still
+waits its own configured fixture gap. A media test verifies that Tumblr downloads
+are independent of a held Reddit request while Reddit downloads remain queued.
+No live website requests are needed for these checks.
+
+Validation passed: TypeScript, production build, 224 unit tests and all 149
+browser/API/network checks. The main offline app retained its existing ten
+historical sign-in occurrences and recorded zero collection requests during
+this verification.
