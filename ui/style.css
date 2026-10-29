@@ -109,3 +109,5 @@
 .report-counts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;border-block:1px solid var(--line);padding:12px 0}.report-counts dt{font-size:10px;color:var(--muted)}.report-counts dd{margin:5px 0 0;font-size:15px}.collection-report>p{font-size:12px;line-height:1.7}.collection-report h3{font-size:13px}.media-issues{list-style:none;padding:0;font-size:11px}.media-issues li{border-top:1px solid var(--line);padding:10px 0}.media-issues button{padding:0;text-align:left;color:#bddac6;margin-right:8px}.media-issues p{font-size:10px;color:var(--muted);margin:5px 0 0;overflow-wrap:anywhere}@media(max-width:620px){.feed.media-grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}.report-counts{grid-template-columns:1fr 1fr}.feed-header-actions{flex-wrap:wrap}}
 
 .media-grid .post-actions{display:flex;flex-direction:row;gap:8px;padding:0}
+
+.sign-in-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.session-status{color:var(--muted)}.session-status.confirmed{color:var(--green)}.settings-account small{display:block;margin-top:3px}.settings-account .muted{margin:5px 0}

@@ -11,8 +11,11 @@ import { redditUrl } from './domain.ts';
 import {tumblrResourceAllowed,tumblrContentUrl,tumblrBlog} from './sources.ts';
 import type {Platform} from './sources.ts';
 import {join} from 'node:path';
+import {watchSignIn} from './sign-in.ts';
+import type {SignInObservation} from './sign-in.ts';
 
 export class AccessError extends Error {
+  code?:string;
   readonly notBefore: number | null;
   readonly platform:'reddit'|'tumblr'|undefined;
   constructor(reason: string, notBefore: number | null = null,platform?:'reddit'|'tumblr') { super(reason); this.notBefore = notBefore;this.platform=platform; }
@@ -34,6 +37,7 @@ export class ReaderBrowser {
   private platform:'reddit'|'tumblr'='reddit';
   private tumblrBlog:string|null=null;
   private tumblrNavigation:string|null=null;
+  private stopSignIn:(()=>void)|null=null;
   get mediaCandidates() { return [...this.observedMedia]; }
 
   constructor(onAccess: (error: AccessError) => void = () => {}, queue?: RequestQueue) {
@@ -72,6 +76,7 @@ export class ReaderBrowser {
     this.page.setDefaultNavigationTimeout(30_000);
     this.page.setDefaultTimeout(10_000);
     context.on('response', response => {
+      if(this.context!==context||this.queue.offline)return;
       const status = response.status();
       if (status === 429 || (status === 403 && response.request().isNavigationRequest())) {
         const error = new AccessError(status === 429 ? `${platform==='tumblr'?'Tumblr':'Reddit'} returned 429; collection stopped` : `${platform==='tumblr'?'Tumblr':'Reddit'} denied access (403)`, retryAfter(response.headers()['retry-after']),platform);
@@ -93,19 +98,21 @@ export class ReaderBrowser {
       allowResource:interactive==='tumblr'?(input,type)=>tumblrResourceAllowed(input,type,this.tumblrBlog,this.tumblrNavigation??undefined):interactive==='media'?url=>{try{const host=new URL(url).hostname;return ['reddit.com','old.reddit.com','www.reddit.com'].includes(host)||host==='redditstatic.com'||host.endsWith('.redditstatic.com')||host==='redditmedia.com'||host.endsWith('.redditmedia.com');}catch{return false;}}:undefined,
       blockedResourceTypes: interactive === 'media' ? ['Image', 'Media', 'Font', 'Ping', 'Other'] : interactive&&interactive!=='tumblr' ? [] : ['Image', 'Media', 'Font', 'Script', 'XHR', 'Fetch', 'Ping', 'Other'], maxRequests,
       isPaused: () => this.failure !== null||this.queue.offline,
-      onBudget: () => { if(!current())return;const error = new AccessError('Website request budget reached; Continue explicitly to fetch more'); this.failure = error; this.onAccess(error); void this.close().catch(()=>{}); },
-      onFailure: () => { if(!current())return;const error = new AccessError('Browser request control failed; collection stopped'); this.failure = error; this.onAccess(error); void this.close().catch(()=>{}); },
+      onBudget: () => { if(!current())return;const error = new AccessError('Website request budget reached; Continue explicitly to fetch more',null,platform); this.failure = error; this.onAccess(error); void this.close().catch(()=>{}); },
+      onFailure: (_reason,code) => { if(!current())return;const error = new AccessError('Browser request control failed; collection stopped',null,platform);error.code=code; this.failure = error; this.onAccess(error); void this.close().catch(()=>{}); },
     });
     if(!current()){gate.stop();await context.close();gate.disposeAfterBrowserClose();assertOpening();}
     this.gate=gate;
     }catch(error){if(this.context===context)await this.close();throw error;}
   }
 
-  async manualSignIn(platform:Platform='reddit') {
+  async manualSignIn(platform:Platform='reddit',onChange?:(state:SignInObservation)=>void) {
     this.queue.assertOnline();
     await this.close();
     await this.open(150, platform==='tumblr'?'tumblr-sign-in':true);
+    const context=this.context!;
     await this.page!.goto(platform==='tumblr'?'https://www.tumblr.com/login':'https://www.reddit.com/login/', { waitUntil: 'commit', timeout: 180_000 });
+    if(this.context===context&&!this.queue.offline&&onChange)this.stopSignIn=watchSignIn(context,platform,onChange);
   }
 
   async navigate(urlInput: string, signal?: AbortSignal): Promise<Page> {
@@ -142,6 +149,7 @@ export class ReaderBrowser {
   }
 
   async close(): Promise<void> {
+    this.stopSignIn?.();this.stopSignIn=null;
     this.lifecycle++;
     if (this.closing) return this.closing;
     const context = this.context;

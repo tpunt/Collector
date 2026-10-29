@@ -15,6 +15,8 @@ import type {CollectionReports} from './collection-report.ts';
 import type {ProblemContext,ProblemReporter} from './problems.ts';
 import {StorageLimitError} from './storage-limit.ts';
 import { setTimeout as delay } from 'node:timers/promises';
+import {emptySignInStatus} from './sign-in.ts';
+import type {SignInObservation,SignInStatus} from './sign-in.ts';
 
 export interface MediaSyncDriver {
   readonly status:{requests:number};
@@ -57,6 +59,8 @@ export class ReaderJobs {
   private stopping = false;
   private manual = false;
   private manualPlatform:Platform='reddit';
+  private signInRevision=0;
+  private signInStatus:Record<Platform,SignInStatus>={reddit:emptySignInStatus(),tumblr:emptySignInStatus()};
   private stoppedWork = new Set<string>();
   private browserOpen = false;
   private mediaMode = false;
@@ -106,13 +110,13 @@ export class ReaderJobs {
   }
   hasTarget(id:string):boolean{return (this.active?.kind==='target'&&this.active.targetId===id)||this.queue.some(work=>work.kind==='target'&&work.targetId===id);}
   get state() { return { running: this.pumping || this.manual, manual: this.manual, manualPlatform:this.manual?this.manualPlatform:null, queued: this.queue.length, active: this.manual ? 'sign-in' : this.active?.kind ?? null,
-    subreddit: this.active ? this.sourceOf(this.active) : null,
+    subreddit: this.active ? this.sourceOf(this.active) : null, signIn:structuredClone(this.signInStatus),
     message: this.message, requests: { ...this.browser.counts, sessionTotal: this.completedRequests + (this.browserOpen ? this.browser.counts.released : 0) },
     sourcePause:this.store.getSetting<{reason:string;notBefore:number|null}>('accessPause:tumblr'),
     accessPause: this.store.getSetting<{reason: string; notBefore: number | null}>('accessPause') }; }
   private allowed(explicitResume: boolean) {
     this.network?.assertOnline();
-    if (this.manual) throw new Error('Finish the manual sign-in before collecting');
+    if (this.manual) throw new Error('Close the sign-in browser before collecting');
     if (this.stopping && this.pumping) throw new Error('The previous operation is stopping. Try again when it has closed.');
     const pause = this.store.getSetting<{reason: string; notBefore: number | null}>('accessPause');
     if (pause) {
@@ -285,6 +289,8 @@ export class ReaderJobs {
     try { await this.closing; } finally { this.closing = null; }
   }
   pause(reason = 'Stopped by user') {
+    if(this.manual){const status=this.signInStatus[this.manualPlatform];if(status.state==='checking'||status.state==='waiting')this.signInStatus[this.manualPlatform]={...status,state:'unverified'};}
+    this.signInRevision++;
     this.onPause();this.mediaSync?.stop();
     this.stopping = true;
     this.controller?.abort();
@@ -296,6 +302,8 @@ export class ReaderJobs {
   }
   accessFailure(error: AccessError,log=true) {
     if(log)this.problem(error);
+    const platform=error.platform??(this.manual?this.manualPlatform:'reddit');
+    if(this.manual||/sign.in|account/i.test(error.message))this.signInStatus[platform]={...this.signInStatus[platform],state:'error'};
     if(error.platform==='tumblr'){
       this.store.setSetting('accessPause:tumblr',{reason:error.message,notBefore:error.notBefore});
       if(this.manual&&this.manualPlatform==='tumblr')this.pause(error.message);
@@ -326,18 +334,41 @@ export class ReaderJobs {
   }
   async signIn(platform:Platform='reddit') {
     if(platform!=='reddit'&&platform!=='tumblr')throw new Error('Choose Reddit or Tumblr sign-in');
+    if(this.closing)await this.closing;
     if (this.pumping) throw new Error('Stop collection and wait for the browser to close first');
-    if(this.manual)throw new Error('Finish the manual sign-in before opening another');
+    if(this.manual)throw new Error('Close the sign-in browser before opening another');
     if(platform==='tumblr')this.tumblrAllowed(true,true);
     this.allowed(true);if(platform==='tumblr')this.tumblrAllowed(true);
     this.stopping=false;this.manual = true;this.manualPlatform=platform;this.browserPlatform=platform;this.browserOpen = true;
+    const revision=++this.signInRevision;
+    this.signInStatus[platform]={...this.signInStatus[platform],state:'checking'};
     this.pageUrl=platform==='tumblr'?'https://www.tumblr.com/login':'https://www.reddit.com/login/';
-    this.message = `Sign in to ${platform==='tumblr'?'Tumblr':'Reddit'} in the dedicated Chrome window, then Finish sign-in. Requests have random 4–6 second gaps after response readiness.`;
-    try { this.signingIn=this.browser.manualSignIn(platform);await this.signingIn; }
-    catch (error) { if(this.manual)this.problem(error,{operation:'sign-in'});this.pause(error instanceof Error ? error.message : 'Sign-in failed'); throw error; }
-    finally{this.signingIn=null;}
+    this.message = `Checking ${platform==='tumblr'?'Tumblr':'Reddit'} sign-in. Complete sign-in in Chrome if requested; Collector closes the window after confirmation.`;
+    const opening=this.browser.manualSignIn(platform,observation=>this.observeSignIn(platform,revision,observation));
+    this.signingIn=opening;
+    try { await opening; }
+    catch (error) {
+      if(this.manual&&revision===this.signInRevision){
+        this.signInStatus[platform]={...this.signInStatus[platform],state:'error'};
+        this.problem(error,{operation:'sign-in'});this.pause(error instanceof Error ? error.message : 'Sign-in failed');throw error;
+      }
+      if(this.signInStatus[platform].state==='error')throw error;
+    }
+    finally{if(this.signingIn===opening)this.signingIn=null;}
   }
-  async finishSignIn() {if(!this.manual)throw new Error('No sign-in browser is open');this.pause('Sign-in browser closed. Resume collection to verify the saved session.'); await this.closeBrowser(); }
+  private verifyRedditAccount(account:string){
+    this.store.bindAccount(account);
+    this.signInStatus.reddit={state:'signed-in',account,verifiedAt:Date.now()};
+  }
+  private observeSignIn(platform:Platform,revision:number,observation:SignInObservation){
+    if(!this.manual||this.manualPlatform!==platform||revision!==this.signInRevision)return;
+    if(observation.state==='signed-in'){
+      this.signInStatus[platform]={state:'signed-in',account:observation.account,verifiedAt:Date.now()};
+      this.pause(`${platform==='tumblr'?'Tumblr':'Reddit'} signed in${observation.account?' as '+observation.account:''}. Session saved; ready to sync.`);
+    }else if(observation.state==='signed-out')this.signInStatus[platform]={state:'waiting',account:null,verifiedAt:null};
+    else if(observation.state==='closed')void this.finishSignIn().catch(error=>this.problem(error,{operation:'browser-close'}));
+  }
+  async finishSignIn() {if(!this.manual)throw new Error('No sign-in browser is open');this.pause('Sign-in browser closed without confirmation. Recheck the saved session before relying on it.'); await this.closeBrowser(); }
   async close(reason='Application stopped; explicit Resume required') { this.pause(reason); await this.closeBrowser();await this.pumpDone;await this.signingIn?.catch(()=>{});await this.closeBrowser(); }
   private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();const done=this.pump();this.pumpDone=done;void done.catch(error=>this.problem(error,{operation:'collection'})).finally(()=>{if(this.pumpDone===done)this.pumpDone=null;}); } }
   private async pump() {
@@ -395,7 +426,7 @@ export class ReaderJobs {
               if(this.browserOpen&&!this.mediaMode)await this.closeBrowser();
               await this.openBrowser(120-(this.totalRequests()-requestBaseline),'media');
               const page=await this.browser.navigate(this.pageUrl=post.permalink.replace('https://www.reddit.com','https://old.reddit.com'),this.controller.signal);
-              const account=await this.account(page);this.controller.signal.throwIfAborted();if(!account)throw new AccessError('Saved sign-in is unavailable');this.store.bindAccount(account);
+              const account=await this.account(page);this.controller.signal.throwIfAborted();if(!account)throw new AccessError('Saved sign-in is unavailable');this.verifyRedditAccount(account);
               let attachments;
               try{attachments=await this.discover(page,post.id,()=>this.browser.mediaCandidates??[],this.controller.signal);}
               catch(error){
@@ -448,7 +479,7 @@ export class ReaderJobs {
             }):await this.listing(listingPage,target.subreddit);
             this.controller.signal.throwIfAborted();
             if (this.store.getTarget(target.id)?.status === 'cancelled') continue;
-            if(!tumblr)this.store.bindAccount(listing.account);
+            if(!tumblr)this.verifyRedditAccount(listing.account);
             const result = advanceBoundary(target, listing, this.store.hasBatch(target.id, listing.signature));
             const previous=listing.posts.map(post=>this.store.getPost(post.id));
             this.store.commitBatch({ generation: work.generation, targetId: target.id, observations: listing.posts.map(post=>post.bodyNeedsFetch&&this.attemptedBodies.has(post.id)?{...post,body:undefined,bodyNeedsFetch:false}:post),
@@ -482,7 +513,7 @@ export class ReaderJobs {
             const account = await this.account(page);
             this.controller.signal.throwIfAborted();
             if (!account) throw new AccessError('Saved sign-in is unavailable');
-            this.store.bindAccount(account);
+            this.verifyRedditAccount(account);
             const { snapshot, attachments } = await this.discussion(page, post.id);
             this.controller.signal.throwIfAborted();
             if(work.kind==='body'){
@@ -512,6 +543,7 @@ export class ReaderJobs {
               const source=this.sourceOf(work),tumblr=source&&feedIdentity(source).platform==='tumblr';
               const global=error instanceof StorageLimitError||/request control|browser.*(?:launch|closed|failed)|context.*closed|executable|spawn|ENOSPC|Protocol error/i.test(reason);
               const access=error instanceof AccessError||error instanceof ExtractionError&&error.code==='access'||/sign.in|denied access|block|verification/i.test(reason);
+              if(!tumblr&&/sign.in|account/i.test(reason))this.signInStatus.reddit={...this.signInStatus.reddit,state:'error'};
               if(tumblr&&!global){if(access)this.accessFailure(new AccessError(reason,error instanceof AccessError?error.notBefore:null,'tumblr'),false);else await this.stopSource(source!,reason);}
               else this.pause(reason);
               if (this.sourceOf(work)&&feedIdentity(this.sourceOf(work)!).platform!=='tumblr'&&(error instanceof AccessError || /sign.in|account|block|verification/i.test(reason))) this.store.setSetting('accessPause', { reason, notBefore: error instanceof AccessError ? error.notBefore : null });

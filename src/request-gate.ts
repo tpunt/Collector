@@ -104,7 +104,7 @@ export interface RequestGateOptions {
   onMediaRequest?: (url: string) => void;
   intervalMs?: RequestInterval;
   isPaused?: () => boolean;
-  onFailure?: (reason: string) => void;
+  onFailure?: (reason: string,code:string) => void;
   blockedResourceTypes?: string[];
   allowResource?: (url:string,type:string)=>boolean;
   maxRequests?: number;
@@ -119,6 +119,8 @@ export class ChromiumRequestGate {
   private controller = new AbortController();
   private pending = new Map<number, Pending>();
   private responses = new Map<string, {resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>}>();
+  private queuedRequests=new Map<string,number>();
+  private cancelledRequests=new Set<string>();
   private setups = new Set<Promise<void>>();
   private nextId = 0;
   private stopped = false;
@@ -131,7 +133,7 @@ export class ChromiumRequestGate {
   private maxRequests: number;
   private onBudget: () => void;
   private isPaused: () => boolean;
-  private onFailure: (reason: string) => void;
+  private onFailure: NonNullable<RequestGateOptions['onFailure']>;
   private onMediaRequest: RequestGateOptions['onMediaRequest'];
   private allowResource:RequestGateOptions['allowResource'];
 
@@ -148,7 +150,7 @@ export class ChromiumRequestGate {
     this.onBudget = options.onBudget ?? (() => {});
     socket.addEventListener('message', event => this.receive(JSON.parse(String(event.data)) as Message));
     socket.addEventListener('close', () => {
-      if (!this.stopped) this.onFailure('Browser request interception disconnected; browsing stopped');
+      if (!this.stopped) this.onFailure('Browser request interception disconnected; browsing stopped','ERR_REQUEST_CONTROL_DISCONNECTED');
       this.stop();
     });
   }
@@ -209,7 +211,7 @@ export class ChromiumRequestGate {
     void setup.catch(error => {
       if (!this.stopped) {
         this.fault = error instanceof Error ? error : new Error('Request interception failed');
-        this.onFailure(`Request interception failed; browsing stopped: ${this.fault.message}`);
+        this.onFailure('Request interception failed; browsing stopped','ERR_REQUEST_INTERCEPTION_SETUP');
         this.stop();
       }
     }).finally(() => this.setups.delete(setup));
@@ -228,6 +230,7 @@ export class ChromiumRequestGate {
     } else if (message.method === 'Network.responseReceived' || message.method === 'Network.loadingFailed' ||
         (message.method === 'Network.requestWillBeSent' && message.params?.redirectResponse)) {
       const key = `${message.sessionId}:${message.params!.requestId}`;
+      if(message.method==='Network.loadingFailed'&&this.queuedRequests.has(key))this.cancelledRequests.add(key);
       const entry = this.responses.get(key);
       if (entry) { clearTimeout(entry.timer); this.responses.delete(key); entry.resolve(); }
     } else if (message.method === 'Fetch.requestPaused') {
@@ -238,7 +241,7 @@ export class ChromiumRequestGate {
         const entry = this.responses.get(key);
         if (entry) { clearTimeout(entry.timer); this.responses.delete(key); entry.resolve(); }
         void this.send('Fetch.continueResponse', { requestId: String(message.params!.requestId) }, message.sessionId).catch(() => {
-          if (!this.stopped) { this.onFailure('Response control failed; collection stopped'); this.stop(); }
+          if (!this.stopped) { this.onFailure('Response control failed; collection stopped','ERR_REQUEST_RESPONSE_CONTROL'); this.stop(); }
         });
         return;
       }
@@ -258,12 +261,18 @@ export class ChromiumRequestGate {
         void this.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, session).catch(() => undefined);
         return;
       }
+      const networkId=message.params!.networkId;
+      const key=`${session}:${networkId}`;
+      // Redirect hops can share a Network ID while their queue callbacks unwind.
+      this.queuedRequests.set(key,(this.queuedRequests.get(key)??0)+1);
       void this.queue.run(async () => {
         if (this.stopped || this.isPaused()) throw new Error('Browsing paused');
+        // A page can abort a fetch while it waits behind paced resources. Its
+        // interception ID is then invalid. Explicit cancellation evidence lets
+        // us discard that waiter without treating Chrome control as broken.
+        if(this.cancelledRequests.has(key))throw new Error('Website cancelled the queued request');
         if (this.released >= this.maxRequests) { this.onBudget(); this.stop(); throw new Error('Request budget reached'); }
-        const networkId = message.params!.networkId;
         if (!networkId) throw new Error('Request has no network lifecycle identity');
-        const key = `${session}:${networkId}`;
         const received = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => {
             this.responses.delete(key);
@@ -274,7 +283,7 @@ export class ChromiumRequestGate {
         try {
           await Promise.all([this.send('Fetch.continueRequest', { requestId }, session).then(() => { this.released++; }), received]);
         } catch (error) {
-          if (!this.stopped) { this.onFailure('Website request lifecycle failed; collection stopped'); this.stop(); }
+          if (!this.stopped&&!this.cancelledRequests.has(key)) { this.onFailure('Website request lifecycle failed; collection stopped',error instanceof Error&&error.message==='Website response headers timed out'?'ERR_REQUEST_HEADERS_TIMEOUT':'ERR_REQUEST_CONTINUE'); this.stop(); }
           throw error;
         } finally {
           const entry = this.responses.get(key);
@@ -283,6 +292,10 @@ export class ChromiumRequestGate {
       }, this.controller.signal).catch(async () => {
         this.aborted++;
         await this.send('Fetch.failRequest', { requestId, errorReason: 'Aborted' }, session).catch(() => undefined);
+      }).finally(()=>{
+        const remaining=(this.queuedRequests.get(key)??1)-1;
+        if(remaining)this.queuedRequests.set(key,remaining);
+        else{this.queuedRequests.delete(key);this.cancelledRequests.delete(key);}
       });
     }
   }

@@ -74,13 +74,21 @@ collection. The integration remains experimental because public visibility and
 website layouts vary by blog.
 
 **Tumblr sign-in:** turn Offline mode off, open **Settings → Open Tumblr sign-in
-browser**, complete sign-in in Chrome, then click **Finish Tumblr sign-in**.
+browser**, then complete sign-in in Chrome. Collector detects the rendered
+signed-in navigation, confirms the session and closes the window automatically.
 This uses a separate local browser profile from Reddit. Credentials are entered
 only on Tumblr's website; profiles are excluded from Git and library backups.
 The manual browser loads normal website resources, with the same random 4–6
 second request spacing and sign-in request budget as Reddit. Offline mode closes
-it and preserves which source to reopen. Finishing closes the browser and keeps
-its saved session; it does not certify that authentication succeeded.
+it and preserves which source to reopen. Settings shows separate checking,
+waiting, verified, unverified and failed states for each platform. **Close sign-in
+browser** cancels the check without claiming success; **Recheck sign-in** explicitly
+opens the saved profile again. Closing Chrome directly also leaves an unconfirmed
+session unverified. Verification reads only the already rendered page; it does
+not poll a remote endpoint or inspect cookies/passwords. Reddit verifies the
+Classic account header after a successful sign-in redirect. After restarting the
+server, statuses are unverified until an explicit sign-in check or collection;
+startup remains offline and makes no authentication requests.
 
 **Deep Tumblr history is not yet implemented beyond captured theme pages.**
 Live investigation found that documented public date searches can discover older
@@ -238,7 +246,7 @@ On **Feeds**, each subreddit has **Clear data** with a confirmation dialog. Conf
 
 Use the trash button on a post, or **Delete post** in its discussion, to delete it locally after confirmation. Its saved discussion is removed; media is deleted unless another stored post uses the file. A minimal exclusion record (post ID, subreddit and deletion time) prevents refresh, history fetching, reconciliation and archive imports from restoring it. Exclusions survive restart and both Clear actions. This does not report or delete anything on Reddit.
 
-Use Settings → Open sign-in browser if the saved session expires. Sign in in the dedicated Chrome window, including any manual challenge, then Finish sign-in. Sync or Resume revalidates the visible account identity. The app supports one account per data directory and refuses to merge a different account. Settings → Clear collected content resets that binding while retaining the browser session and feed subscriptions, so the next sync can verify a different signed-in account. Clearing just one feed does not reset it. Credentials are not stored in application settings or source; the browser owns its normal saved session.
+Use Settings → Open sign-in browser if the saved session expires. Sign in in the dedicated Chrome window, including any manual challenge. Collector confirms the rendered signed-in page and closes the window automatically; Settings shows the verified status. Closing early leaves the session unverified. Sync or Resume revalidates the visible account identity. The app supports one account per data directory and refuses to merge a different account. Settings → Clear collected content resets that binding while retaining the browser session and feed subscriptions, so the next sync can verify a different signed-in account. Clearing just one feed does not reset it. Credentials are not stored in application settings or source; the browser owns its normal saved session.
 
 App data defaults to `.local-data/` inside this checkout, anchored to the source location even when launched from another working directory. This Git-ignored folder holds the database, saved media and browser sign-in profile, so separate clones are isolated by default. Set `REDDIT_READER_DATA_DIR` to override the folder or reuse another clone's data:
 

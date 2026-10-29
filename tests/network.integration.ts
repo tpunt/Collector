@@ -10,6 +10,23 @@ import { ChromiumRequestGate, chromiumControlUrl } from '../src/request-gate.ts'
 import { chromium } from 'playwright';
 import { browserLaunchOptions } from '../src/browser-options.ts';
 
+test('a website-cancelled fetch waiting for its paced turn does not close the browser or release the cancelled request',async()=>{
+ const hits:{path:string;time:number}[]=[],failures:string[]=[];
+ const server=createServer((req,res)=>{
+  hits.push({path:req.url!,time:performance.now()});res.setHeader('Content-Type',req.url==='/script.js'?'text/javascript':'text/html');
+  res.end(req.url==='/page'?'<script src="/script.js"></script><img src="/image">':req.url==='/script.js'?"const abort=new AbortController();fetch('/cancelled',{signal:abort.signal}).catch(()=>{});setTimeout(()=>abort.abort(),10);setTimeout(()=>fetch('/after'),800);":'ok');
+ });
+ await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+ const directory=await mkdtemp(join(tmpdir(),'collector-cancelled-request-')),context=await chromium.launchPersistentContext(directory,{...browserLaunchOptions,channel:'chrome',headless:true});let gate:ChromiumRequestGate|undefined;
+ try{
+  gate=await ChromiumRequestGate.install(await chromiumControlUrl(directory),{intervalMs:100,onFailure:(_reason,code)=>failures.push(code)});
+  await context.pages()[0]!.goto(`http://127.0.0.1:${(server.address()as any).port}/page`);
+  const end=Date.now()+5000;while(!hits.some(hit=>hit.path==='/after')&&!failures.length&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.deepEqual(failures,[]);assert(hits.some(hit=>hit.path==='/after'));assert(!hits.some(hit=>hit.path==='/cancelled'));assert(gate.counts.aborted>=1);
+  const gaps=hits.slice(1).map((hit,index)=>hit.time-hits[index]!.time);assert(gaps.every(gap=>gap>=80),`Pacing changed after cancellation: ${gaps}`);
+ }finally{gate?.stop();await context.close();gate?.disposeAfterBrowserClose();await new Promise<void>(resolve=>server.close(()=>resolve()));await rm(directory,{recursive:true,force:true});}
+});
+
 test('a collection resource policy blocks unrelated scripts before dispatch while native controls still run',async()=>{
  const hits:string[]=[];
  const server=createServer((req,res)=>{hits.push(req.url!);res.setHeader('Content-Type',req.url==='/native.js'?'text/javascript':'text/html');if(req.url==='/native.js')res.end("document.body.append(Object.assign(document.createElement('p'),{textContent:'Native controls ready'}))");else{const port=(server.address()as any).port;res.end(`<html><body><script src="/native.js"></script><script src="http://localhost:${port}/unrelated.js"></script></body></html>`);}});

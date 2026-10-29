@@ -857,3 +857,35 @@ UI checks exercised the controls with a fake driver to avoid extra external
 requests; browser fixtures cover both sources, invalid source rejection,
 source cooldowns, source-preserving Offline resume and stale Finish rejection.
 Normal-library collection was never enabled.
+
+### Sign-in feedback and request cancellation (2026-10-29)
+
+Sign-in now watches only the open browser's rendered first-party DOM. Separate
+runtime states distinguish checking, a visible login form, positive signed-in
+evidence, an unconfirmed close and a failed check. Confirmation closes the
+browser automatically; a cancelled/failed check cannot report success. Reddit
+uses its Classic account header after the login redirect; Tumblr requires its
+personal navigation destinations together. Status starts unchecked after a
+server restart, without making any automatic authentication requests.
+
+The bounded live saved-session check showed the Tumblr login form, then stopped
+with the existing browser-control failure after 46 released requests. No
+credentials were entered by the agent. The user subsequently reported that the
+previous login window closed as soon as they submitted the form, so successful
+authentication remains unconfirmed.
+
+A local HTTP fixture reproduced a concrete request-gate bug: a page-cancelled
+fetch waiting in the paced queue caused an invalid continuation command and
+closed the browser. The gate now discards requests with explicit Chromium
+cancellation evidence and preserves pacing, budgets and failure-on-control-loss.
+The same fixture now reaches its subsequent fetch, never dispatches the
+cancelled URL and reports no control failure. This is a plausible cause of the
+live failure; successful Tumblr submission still needs verification. Static
+failure codes now distinguish header timeouts, continuation failures, response
+control, setup and disconnection without recording request data or credentials.
+
+Local browser fixtures verify source-specific authentication evidence, no HTTP
+polling, automatic confirmation/close, button and status transitions, manual
+close, Offline cancellation/resume, stale callbacks, source isolation and paced
+network cancellation. Signed-in Tumblr history remains a separate outstanding
+investigation.
