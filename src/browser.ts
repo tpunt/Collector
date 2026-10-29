@@ -8,7 +8,8 @@ import { BrowserLimiter, retryAfter } from './limiter.ts';
 import { ChromiumRequestGate, chromiumControlUrl, RequestQueue, DEFAULT_REQUEST_INTERVAL } from './request-gate.ts';
 import type { RequestInterval } from './request-gate.ts';
 import { redditUrl } from './domain.ts';
-import {tumblrResourceAllowed,tumblrContentUrl,tumblrBlog,parseTumblrSearchUrl} from './sources.ts';
+import {tumblrResourceAllowed,tumblrContentUrl,tumblrBlog,tumblrUrl,tumblrEmbedUrl,parseTumblrSearchUrl} from './sources.ts';
+import {PostUnavailableError,UnsupportedMediaError} from './sync-errors.ts';
 import type {Platform} from './sources.ts';
 import {join} from 'node:path';
 import {watchSignIn,MANUAL_SIGN_IN_REQUEST_LIMIT} from './sign-in.ts';
@@ -133,7 +134,14 @@ export class ReaderBrowser {
         // CSS determines rendered visibility. Drain paced resources before Next;
         // otherwise requests from the previous page can starve the next navigation.
         // A paced 120-request session can legitimately take ten minutes.
-        await page.goto(url.href, { waitUntil: 'load', timeout: 600_000 });
+        const response=await page.goto(url.href, { waitUntil: 'load', timeout: 600_000 });
+        if(tumblr&&response&&[404,410].includes(response.status())){
+          let missingFrame=false;try{missingFrame=tumblrEmbedUrl(url.href,'tumblr:'+blog).href===tumblrEmbedUrl(response.url(),'tumblr:'+blog).href;}catch{/* Not a matching native media frame. */}
+          if(missingFrame)throw new UnsupportedMediaError('Tumblr native media frame is unavailable');
+          let missing:string|null=null;
+          try{const requested=tumblrUrl(url.href,'tumblr:'+blog),received=tumblrUrl(response.url(),'tumblr:'+blog);if(requested.pathname.split('/')[2]===received.pathname.split('/')[2])missing=`tumblr:${blog}:${requested.pathname.split('/')[2]}`;}catch{/* A missing listing/frame or a cross-post redirect is not removal evidence. */}
+          if(missing)throw new PostUnavailableError('deleted',missing);
+        }
         await page.locator('#header, main, h1, form, article, [data-post-id], .post, .no-posts, video, .photoset, .photoset_row').first().waitFor({ state: 'attached', timeout: 15_000 });
       }, signal);
       if (this.failure) throw this.failure;

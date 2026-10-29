@@ -55,9 +55,12 @@ read from their rendered HTML with scripts disabled; iframe/API URLs are never
 guessed. Inline `<video><source>` files, linked full-size photos and rendered NPF
 media variants are handled without saving preview duplicates. Full supported attachments are
 saved locally and work with the common reader controls. Access gates, missing
-dates, unfamiliar layouts and unsupported or inaccessible media frames pause or
-leave work incomplete, rather than silently advancing its checkpoint. External
-players retain the existing online-only treatment. In mixed posts, hosted media
+dates, unfamiliar layouts and inconclusive media extraction pause or leave work
+incomplete, rather than silently advancing its checkpoint. A confirmed native
+frame HTTP 404/410 leaves the post text intact with a missing-attachment warning.
+Known unsupported audio and external image attachments retain their captured
+links and an orange **Not downloaded** warning; they do not block older history.
+External players retain the existing online-only treatment. In mixed posts, hosted media
 is saved while a separate external player keeps an orange offline warning; a
 cached image never counts as a downloaded external video. Blogs requiring sign-in,
 custom-domain blogs, replies/notes and third-party Tumblr archives
@@ -118,18 +121,31 @@ discovery over the selected limit without deleting posts or downloading valid
 cached files again. Interrupted windows are unfinished work, separate from
 completed searches whose coverage remains uncertain.
 
+An unrecognised post without a usable publication date can pause discovery before
+a post record exists. Its feed card offers **Exclude blocked post**, with a
+confirmation showing the source link and ID. This stores a durable local exclusion
+without inventing a timestamp or post record. Then **Resume** continues the held
+checkpoint. Matching post HTTP 404/410 responses are recorded as unavailable gaps,
+not permanent retry loops; each missing ID is checked at most once per run and
+counted once per target. A later explicit run can revalidate restored posts.
+
 Tumblr search is an index, so this is **as far back as the website exposes**,
 not a guarantee of every post. Indexing restrictions especially affect content
-before 2017. Empty loading-only pages are recorded as unverified; crowded single
+before 2017. Reblogs without added content do not appear in global search, even
+when their post pages remain public; they can still be saved when encountered in
+a blog listing. Tumblr documents this [reblog search limitation](https://help.tumblr.com/knowledge-base/reblogs/). Empty loading-only pages are recorded as unverified; crowded single
 days retain an explicit result-limit gap while older windows continue. Access
 gates and unrecognised layouts pause at the exact saved query rather than
 silently skipping it. The Staff `/archive` page remained HTTP 403-blocked after
 sign-in; it is not retried or bypassed. See Tumblr's [search operator and indexing
 documentation](https://help.tumblr.com/knowledge-base/search-and-filtering-basics/).
 
-Live verification on 29 October 2026 resumed an interrupted January 2025 search
-using the saved session, found the older post and retained its complete body and
-all 30 cached images without new media requests. Local browser tests additionally
+Live verification on 29 October 2026 used the saved session with four public blogs
+in an isolated library. It saved full posts and 33 new files: 32 images, including
+a 30-image January 2025 gallery, and a native video with audio. Stopping after the
+first gallery image and restarting retained the exact saving checkpoint; Resume
+saved the remaining files without downloading that image again. Manual offline
+checks included local images, video/audio playback, fullscreen and Escape. Local browser tests additionally
 cover dense splitting, multi-year traversal, more than 120 requests, interrupted
 gallery downloads, failed layouts, rescanning and offline recovery. This does
 not verify private-blog access.

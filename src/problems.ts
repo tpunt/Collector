@@ -25,7 +25,7 @@ export interface ProblemContext {operation:string;feed?:string|null;post?:string
 export type ProblemReporter=(context:ProblemContext,error:unknown)=>void;
 export interface ProblemSample {post?:string;url?:string;checkpoint?:string;facts?:ExtractionFacts;error:{type:string;code?:string;httpStatus?:number;stack:string[]}}
 export interface ProblemRecord {id:string;code:ProblemCode;operation:string;platform?:string;feed?:string;firstAt:number;lastAt:number;count:number;seen:number;samples:ProblemSample[]}
-const FIELDS=new Set(['id','title','datetime','permalink','subreddit','body','next','account','sort','posts','attachments']);
+const FIELDS=new Set(['id','title','datetime','permalink','subreddit','body','next','account','sort','posts','attachments','post-cards']);
 const bounded=(value:unknown,max=Number.MAX_SAFE_INTEGER)=>Number.isSafeInteger(value)&&Number(value)>=0?Math.min(Number(value),max):undefined;
 const identity=(value:unknown)=>{try{return typeof value==='string'?postId(value):undefined;}catch{return undefined;}};
 function facts(input:ExtractionFacts|undefined):ExtractionFacts|undefined {

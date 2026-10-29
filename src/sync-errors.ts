@@ -9,9 +9,10 @@ export class ExtractionError extends Error {
 
 export class PostUnavailableError extends Error {
   readonly availability:'removed'|'deleted';
-  constructor(availability:'removed'|'deleted') {
-    super(`Reddit marks this post ${availability}; media skipped`);
-    this.name='PostUnavailableError';this.availability=availability;
+  readonly postId?:string;
+  constructor(availability:'removed'|'deleted',postId?:string) {
+    super(`Source marks this post ${availability}; content unavailable`);
+    this.name='PostUnavailableError';this.availability=availability;this.postId=postId;
   }
 }
 

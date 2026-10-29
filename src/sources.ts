@@ -107,9 +107,11 @@ export function tumblrResourceAllowed(input:string,type:string,blog:string|null,
 /** Tumblr's collector uses outbound for a separate embedded player. A cached
  * hosted picture/video does not also establish a saved copy of that player. */
 export function hasExternalAttachment(post:{subreddit:string;outbound:string|null;media:readonly string[]}):boolean {
-  return feedIdentity(post.subreddit).platform==='tumblr'&&Boolean(post.outbound)&&post.media.includes('Video');
+  return feedIdentity(post.subreddit).platform==='tumblr'&&(post.media.includes('Unknown')||Boolean(post.outbound)&&post.media.includes('Video'));
 }
 export const EXTERNAL_ATTACHMENT_NOTE='An embedded player requires internet; hosted attachments are saved locally';
+export const UNSUPPORTED_ATTACHMENT_NOTE='Some attachments are not downloaded; supported hosted files are saved locally';
+export function externalAttachmentNote(post:{media:readonly string[]}){return post.media.includes('Unknown')?UNSUPPORTED_ATTACHMENT_NOTE:EXTERNAL_ATTACHMENT_NOTE;}
 
 /** Only known public origins and structural identifiers. Never query parameters,
  * fragments, URL credentials, post-title slugs or signed CDN paths. */

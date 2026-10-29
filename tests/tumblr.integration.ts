@@ -6,7 +6,7 @@ import {chromium} from 'playwright';
 import {browserLaunchOptions} from '../src/browser-options.ts';
 import {createOnlineReaderServer} from './online-fixture.ts';
 import {RequestQueue} from '../src/request-gate.ts';
-import {readTumblrListing,readTumblrPost} from '../src/tumblr.ts';
+import {readTumblrListing,readTumblrPost,readTumblrSearch} from '../src/tumblr.ts';
 import {ReaderStore} from '../src/store.ts';
 import {readFile,rm} from 'node:fs/promises';
 const emptyDatedSearch=(input:string)=>{const url=new URL(input);if(!url.pathname.startsWith('/search/'))return null;const query=decodeURIComponent(url.pathname.split('/')[2]!);return `<input aria-label="Search" value="${query}"><main><div data-timeline-id="searchTimeline-post-${query}-recent"></div></main>`;};
@@ -26,10 +26,71 @@ test('signed-in Tumblr post pages without logged-out action IDs use matching can
  try{
   await page.route('**/*',route=>route.fulfill({contentType:'text/html',body}));await page.goto('https://www.tumblr.com/staff/12345/example');
   const post=await readTumblrPost(page,'tumblr:staff:12345');assert.equal(post.id,'tumblr:staff:12345');assert.equal(post.attachments?.length,4);assert.match(post.body!,/Complete body/);assert.equal(post.bodyNeedsFetch,false);
+  await page.locator('article').evaluate(node=>node.insertAdjacentHTML('beforeend','<a href="https://example.org/article">Read more about this topic</a><a href="/staff/99999">Keep reading part 2</a><a hidden href="/staff/12345/">Keep reading</a>'));assert.match((await readTumblrPost(page,post.id)).body!,/Read more about this topic/);
+  await page.locator('article').evaluate(node=>node.insertAdjacentHTML('beforeend','<a class="truncated" href="/staff/12345/">Keep reading</a>'));await assert.rejects(readTumblrPost(page,post.id),/hides some content/);await page.locator('.truncated').evaluate(node=>node.remove());
   await page.locator('a[rel="author"]').evaluate(node=>node.setAttribute('href','/other'));await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/requested post/);
   await page.locator('a[rel="author"]').evaluate(node=>node.setAttribute('href','https://example.org/staff'));await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/requested post/);
   await page.setContent(body.replace('staff/12345/example','staff/99999/example'));await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/requested post/);
   await page.setContent(body.replace('</main>','<article><header><a rel="author" href="/staff">staff</a></header><h1>Ambiguous second article</h1></article></main>'));await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/requested post/);
+ }finally{await browser.close();}
+});
+
+test('signed-in reblog trails cannot replace an outer post bound by its rendered timeline, canonical URL and author',async()=>{
+ const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),page=await browser.newPage({javaScriptEnabled:false});
+ const body='<link rel="canonical" href="https://www.tumblr.com/engineering/826737485940916224/thanks"><main><div data-timeline-id="peepr-posts-engineering-826737485940916224-undefined"><article><header><a rel="author" href="/engineering">engineering</a><time datetime="2026-09-03T12:25:06.000Z"></time></header><p>New outer commentary</p><blockquote><a rel="bookmark" href="/engineering/825845466763837440">Original post</a><time datetime="2026-08-24T16:06:50.000Z"></time><p>Earlier reblog text</p><img src="https://64.media.tumblr.com/reblog-full.png"></blockquote></article></div></main>';
+ try{
+  await page.route('**/*',route=>route.fulfill({contentType:'text/html',body}));await page.goto('https://www.tumblr.com/engineering/826737485940916224/thanks');
+  const saved=await readTumblrPost(page,'tumblr:engineering:826737485940916224');assert.equal(saved.id,'tumblr:engineering:826737485940916224');assert.equal(saved.created.epochMs,Date.parse('2026-09-03T12:25:06.000Z'));assert.match(saved.body!,/New outer commentary/);assert.match(saved.body!,/Earlier reblog text/);assert.equal(saved.attachments?.length,1);
+  await page.locator('article').evaluate(node=>{const header=node.querySelector('header')!;node.append(header);});assert.equal((await readTumblrPost(page,saved.id)).created.epochMs,saved.created.epochMs);
+  await page.locator('[data-timeline-id]').evaluate(node=>node.setAttribute('data-timeline-id','peepr-posts-engineering-999999-undefined'));await assert.rejects(readTumblrPost(page,saved.id),/requested post/);
+  await page.setContent(body.replace('href="/engineering"','href="/other"'));await assert.rejects(readTumblrPost(page,saved.id),/requested post/);
+  await page.setContent(body.replace('<article>','<article data-post-id="999999">'));await assert.rejects(readTumblrPost(page,saved.id),/requested post/);
+  await page.setContent(body.replace('engineering/826737485940916224/thanks','engineering/999999/thanks'));await assert.rejects(readTumblrPost(page,saved.id),/requested post/);
+  const original=body.replace('engineering/826737485940916224/thanks','engineering/825845466763837440/original').replace('<img src="https://64.media.tumblr.com/reblog-full.png">','<video><source src="https://va.media.tumblr.com/native-reblog.mp4" type="video/mp4"></video>');
+  await page.setContent(original);const reblog=await readTumblrPost(page,saved.id);assert.equal(reblog.id,saved.id);assert.equal(reblog.permalink,saved.permalink);assert.equal(reblog.created.epochMs,saved.created.epochMs);assert.match(reblog.body!,/Reblog of https:\/\/www.tumblr.com\/engineering\/825845466763837440/);assert.equal(reblog.attachments?.[0]?.kind,'video');
+  await page.locator('[data-timeline-id]').evaluate(node=>node.setAttribute('data-timeline-id','peepr-posts-other-826737485940916224-undefined'));await assert.rejects(readTumblrPost(page,saved.id),/requested post/);
+  await page.setContent(original.replace('/engineering/825845466763837440">Original post','/engineering/999999">Original post'));await assert.rejects(readTumblrPost(page,saved.id),/requested post/);
+ }finally{await browser.close();}
+});
+
+test('listing identities select their own permalink, exclude the declared card and never offer a cross-linked post for exclusion',async()=>{
+ const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),page=await browser.newPage({javaScriptEnabled:false});
+ const {PostIdentityError}=await import('../src/sync-errors.ts');
+ try{
+  await page.route('**/*',route=>route.fulfill({contentType:'text/html',body:html('<article data-post-id="12345" data-timestamp="1700000000"><a href="/staff/99999">Earlier same-blog link</a><p>Own body</p><a href="/staff/12345">Own permalink</a></article>')}));await page.goto('https://www.tumblr.com/staff');
+  assert.equal((await readTumblrListing(page,'tumblr:staff')).posts[0]!.id,'tumblr:staff:12345');
+  await page.locator('article').evaluate(node=>node.setAttribute('data-post-url','https://www.tumblr.com/staff/99999'));
+  await assert.rejects(readTumblrListing(page,'tumblr:staff',{excluded:id=>id==='tumblr:staff:99999'}),(error:unknown)=>error instanceof PostIdentityError&&error.expectedId==='tumblr:staff:12345');
+  assert.equal((await readTumblrListing(page,'tumblr:staff',{excluded:id=>id==='tumblr:staff:12345'})).posts.length,0);
+  await page.goto('https://www.tumblr.com/staff/12345');await page.locator('article').evaluate(node=>node.setAttribute('data-post-url','https://www.tumblr.com/staff/99999'));
+  await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),(error:unknown)=>error instanceof PostIdentityError&&error.expectedId==='tumblr:staff:12345');
+ }finally{await browser.close();}
+});
+
+test('unparseable card dates resolve from detail or stored dates while transport failures stay retryable without exclusion metadata',async()=>{
+ const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),page=await browser.newPage({javaScriptEnabled:false});
+ const body=html('<article data-post-id="12345" data-timestamp="not-a-time"><a href="/staff/12345">Own permalink</a><time datetime="yesterday"></time><p>Complete body</p></article>'),known={epochMs:1700000000000,precisionMs:1000};
+ try{
+  await page.route('**/*',route=>route.fulfill({contentType:'text/html',body}));await page.goto('https://www.tumblr.com/staff');
+  assert.equal((await readTumblrListing(page,'tumblr:staff',{knownDate:()=>known})).posts[0]!.created.epochMs,known.epochMs);
+  const transport=new Error('net::ERR_CONNECTION_RESET');await assert.rejects(readTumblrListing(page,'tumblr:staff',{navigate:async()=>{throw transport;}}),error=>error===transport);
+  const result=await readTumblrListing(page,'tumblr:staff',{navigate:async url=>{await page.goto(url);await page.locator('time').evaluate(node=>node.setAttribute('datetime','2025-01-07T12:00:00Z'));return page;}});assert.equal(result.posts[0]!.created.epochMs,Date.parse('2025-01-07T12:00:00Z'));
+  await page.locator('time').evaluate(node=>node.setAttribute('datetime','yesterday'));assert.equal((await readTumblrPost(page,'tumblr:staff:12345',undefined,known)).created.epochMs,known.epochMs);
+  await page.locator('p').evaluate(node=>node.textContent='x'.repeat(2100000));const {ExtractionError}=await import('../src/sync-errors.ts');await assert.rejects(readTumblrPost(page,'tumblr:staff:12345',undefined,known),(error:unknown)=>error instanceof ExtractionError&&error.code==='post-content'&&error.facts.expectedId==='tumblr:staff:12345');
+ }finally{await browser.close();}
+});
+
+test('a changed search card layout with visible post links pauses instead of becoming an unverified empty history window',async()=>{
+ const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),page=await browser.newPage({javaScriptEnabled:false});
+ const url='https://www.tumblr.com/search/from%3Astaff%20date%3A2025-01-07/recent',query='from:staff date:2025-01-07';
+ const body=`<input aria-label="Search" value="${query}"><main><div data-timeline-id="searchTimeline-post-${query}-recent"><section class="new-post-layout"><a rel="bookmark" href="/staff/12345/example">Visible post</a><time datetime="2025-01-07T17:00:32Z"></time><p>Full card under changed markup</p></section></div></main>`;
+ try{
+  await page.route('**/*',route=>route.fulfill({contentType:'text/html',body}));await page.goto(url);
+  await assert.rejects(readTumblrSearch(page,'tumblr:staff'),/post links.*recognised cards/);
+  await page.locator('[data-timeline-id]').evaluate(node=>node.insertAdjacentHTML('beforeend','<article><a rel="bookmark" href="/staff/12346/valid">Valid card</a><time datetime="2025-01-07T17:01:32Z"></time><p>Valid content</p></article>'));
+  await assert.rejects(readTumblrSearch(page,'tumblr:staff'),/post links.*recognised cards/);
+  await page.locator('.new-post-layout').evaluate(node=>node.remove());assert.equal((await readTumblrSearch(page,'tumblr:staff')).posts.length,1);
+  await page.locator('article').evaluate(node=>node.remove());const empty=await readTumblrSearch(page,'tumblr:staff');assert.equal(empty.posts.length,0);assert.equal(empty.unverifiedEmpty,true);
  }finally{await browser.close();}
 });
 
@@ -56,10 +117,10 @@ test('default public Tumblr view resolves post-specific dates and every image wi
   await page.locator('meta[property="og:url"]').evaluate(node=>node.setAttribute('content','https://www.tumblr.com/engineering/99999/original'));
   await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/selected Tumblr blog/);
   await page.locator('article').evaluate(node=>node.insertAdjacentHTML('beforeend','<a rel="bookmark" href="/engineering/99999">Original post</a>'));
-  const reblog=await readTumblrPost(page,'tumblr:staff:12345');assert.equal(reblog.id,'tumblr:staff:12345');assert.equal(reblog.permalink,'https://www.tumblr.com/staff/12345');assert.match(reblog.body!,/Reblog of https:\/\/www.tumblr.com\/engineering\/99999\/original/);assert.match(reblog.body!,/Original publication date: 2026-09-17/);
+  await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/own publication time/);const ownDate={epochMs:Date.parse('2026-10-01T10:00:00Z'),precisionMs:1000};const reblog=await readTumblrPost(page,'tumblr:staff:12345',undefined,ownDate);assert.equal(reblog.created.epochMs,ownDate.epochMs);assert.equal(reblog.id,'tumblr:staff:12345');assert.equal(reblog.permalink,'https://www.tumblr.com/staff/12345');assert.match(reblog.body!,/Reblog of https:\/\/www.tumblr.com\/engineering\/99999\/original/);assert.match(reblog.body!,/Original publication date: 2026-09-17/);
   await page.locator('meta[property="og:url"]').evaluate(node=>node.setAttribute('content','https://www.tumblr.com/staff/99999/original'));
   await page.locator('a[rel="bookmark"]').evaluate(node=>node.setAttribute('href','/staff/99999'));
-  const selfReblog=await readTumblrPost(page,'tumblr:staff:12345');assert.equal(selfReblog.id,reblog.id);assert.equal(selfReblog.permalink,reblog.permalink);assert.match(selfReblog.body!,/Reblog of https:\/\/www.tumblr.com\/staff\/99999\/original/);
+  const selfReblog=await readTumblrPost(page,'tumblr:staff:12345',undefined,ownDate);assert.equal(selfReblog.id,reblog.id);assert.equal(selfReblog.permalink,reblog.permalink);assert.match(selfReblog.body!,/Reblog of https:\/\/www.tumblr.com\/staff\/99999\/original/);
   // Even a captured original publication date is not evidence of reblog order.
   await page.goto('https://www.tumblr.com/staff');assert.deepEqual((await readTumblrListing(page,'tumblr:staff',{knownDate:()=>reblog.created})).ordinary,[]);
  }finally{await browser.close();}
@@ -168,6 +229,7 @@ test('public Tumblr native photosets and video frames are read as complete order
   await page.goto('https://staff.tumblr.com/post/12345/');const visits:string[]=[];
   const result=await readTumblrPost(page,'tumblr:staff:12345',async url=>{visits.push(url);await page.goto(url);return page;});
   assert.equal(visits.length,2);assert.deepEqual(result.attachments!.map(file=>new URL(file.url).pathname),['/before.png','/photo-full.png','/photo-two.png','/npf-original.png','/direct.mp4','/movie.mp4','/after.png']);assert(result.attachments!.every((file,index)=>file.collection?.index===index&&file.collection?.total===7));assert.equal(result.outbound,undefined);assert.match(result.body!,/Full caption/);
+  await page.goto('https://staff.tumblr.com/post/12345/');const {UnsupportedMediaError}=await import('../src/sync-errors.ts');const missingFrame=await readTumblrPost(page,'tumblr:staff:12345',async()=>{throw new UnsupportedMediaError('Tumblr media frame is no longer available');});assert.match(missingFrame.body!,/Full caption/);assert.match(missingFrame.body!,/attachments not downloaded/);assert(missingFrame.media!.includes('Unknown'));assert.equal(missingFrame.attachments!.length,4);assert.equal(missingFrame.bodyNeedsFetch,false);
   await page.goto('https://staff.tumblr.com/post/12345/');await page.locator('article iframe').first().evaluate(node=>node.setAttribute('src','https://other.tumblr.com/photoset_iframe/12345/'));let fetched=false;
   await assert.rejects(readTumblrPost(page,'tumblr:staff:12345',async()=>{fetched=true;throw new Error('must not fetch a different blog');}),/hides some content/);assert.equal(fetched,false);
  }finally{await browser.close();}

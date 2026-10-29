@@ -251,10 +251,15 @@ export function createReaderServer(options: { database?: string; port?: number; 
             json(res,{queued:jobs.syncFeeds(names)});return;
           }
           case '/api/history/rescan': {
-            const name=feedName(String(data.name));jobs.assertCanQueue(true);
+            const name=feedName(String(data.name));jobs.assertCanQueue(true,name);
             if(!store.followedSources().includes(name))throw new Error('Subscribe to this feed first');
             if(feedStatus(name)!=='idle')throw new Error('Stop this feed before rescanning history');
             const id=store.rescanHistory(name);jobs.syncFeeds([name],{heads:[],history:[id]});json(res,{targetId:id});return;
+          }
+          case '/api/exclude-blocked-post': {
+            const name=feedName(String(data.name));if(data.confirm!==true)throw new Error('Confirm excluding this post first');
+            if(!store.followedSources().includes(name))throw new Error('Subscribe to this feed first');if(feedStatus(name)!=='idle')throw new Error('Stop this feed before excluding the blocked post');
+            store.excludeBlockedPost(name,String(data.id));json(res,{excluded:true});return;
           }
           case '/api/history': {
             const name=feedName(String(data.name)),months=historyMonths(data.months);
@@ -263,7 +268,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             const previous=store.getHistoryPreference(name),changed=previous.months!==months;
             const expanded=historyRank(months)>historyRank(previous.months);
             const shouldFetch=expanded;
-            if(shouldFetch)jobs.assertCanQueue(true);
+            if(shouldFetch)jobs.assertCanQueue(true,name);
             if(changed&&network.offline)networkMode.cancel({source:name});
             if(changed&&jobs.feedStatus(name)!=='idle')await jobs.stopSource(name,expanded?'History limit expanded':'History limit reduced; collected posts retained');
             const result=store.setHistoryLimit(name,months);

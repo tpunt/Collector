@@ -1024,3 +1024,69 @@ expansion, authenticated/online rescan restrictions, busy-feed rejection, clear
 and deletion-exclusion preservation. Fixtures use local responses, not external
 requests. Live all-time completeness is intentionally not asserted: Tumblr's
 search indexing and daily rendered-result limits remain observable constraints.
+
+### Live Tumblr history validation and independent review (2026-10-29)
+
+Used the saved Tumblr session with a fresh isolated library. The user library,
+subscriptions and authentication profile were preserved. Four public blogs
+(Staff, Engineering, NASA and Everythingfox) supplied full post bodies and
+33 freshly downloaded files: 32 images and one native MP4. The January 2025
+Staff gallery contained 30 ordered images. Collection stopped after the first
+ready file, then the library/server reopened offline with the exact saving
+checkpoint. Explicit Resume saved the remaining 29 without repeating the first.
+All 32 images were independently served through local media routes offline.
+The native video was 720×1280 H.264 with AAC audio, 9.359 seconds; manual reader
+checks played it to the end offline, entered fullscreen and exited with Escape.
+Total saved files were 27,419,825 bytes.
+
+Bounded probes, including dated searches, identity inspection and source rechecks,
+released 110 actual external requests, including those downloads. The normal
+shared completion-based random 4–6 second queue was used throughout; measured
+gaps had no violations (lowest measured 4.06 seconds). No 403/429 was encountered.
+A full 2025 Engineering search found no indexed posts and retained three
+unverified windows, rather than claiming the year was empty. A known public
+Everythingfox reblog was absent from global dated search. Tumblr documents that
+reblogs without added content are excluded from global search; listing discovery
+can still collect them. Complete all-time coverage is not established.
+
+Self review and independent Claude Opus 5.5 review at xhigh effort identified
+recovery, identity and reporting bugs. Matching post HTTP 404/410 now records an
+unavailable gap and continues older history; generic 200 error pages and wrong
+post redirects still pause. A matching missing native frame affects that
+attachment rather than deleting the post. Unknown dateless failures expose a
+confirmed local exclusion action without inventing post data or dates, then
+Resume retries the held query. Missing IDs are requested once per run and counted
+once per target, and explicit later runs can restore available content.
+
+Other fixes bind signed-in reblogs to their outer rendered identity and own date,
+exclude trail timestamps, scope Read more to the same visible post, preserve
+full text alongside labelled known unsupported audio/external attachments, and
+retain retryable failures for inconclusive extraction. Full observations update
+media and body atomically, including clearing removed outbound links and the
+last removed attachment. Valid cached files are reused; unsupported-only posts
+stay labelled unavailable after restart without a redundant browser request.
+Completed catch-ups advance freshness anchors without completing unfinished
+history. Cooldown preflight precedes destructive checkpoint changes, exclusions
+apply before metadata visits, and changed card layouts cannot silently become
+unverified empty windows. Malformed active checkpoints are rejected.
+
+Manual checks in an isolated fixture reader verified cancelling and confirming
+the blocked-post exclusion, successful Resume from its checkpoint, no fabricated
+post record, and full local text with an orange Not downloaded pill while offline.
+The fixture made zero external requests. QA libraries, screenshots and results
+remain Git-ignored. Final TypeScript and production build checks passed, as did
+all 219 unit tests and 147 browser/API/network checks after the review fixes.
+Fixtures use locally fulfilled responses and make no external requests. The main
+app was restarted offline with zero collection requests.
+
+The final Claude verification also led to parsed-date fallback (including invalid
+raw date strings), exclusion against the declared card/requested detail identity,
+and a non-blockable pause for conflicting rendered IDs. Untyped transport errors
+remain retryable instead of offering a durable exclusion. Deterministic post
+validation failures retain typed content context and the requested ID. Known
+unavailable posts returned only by date padding cannot expand a target or its
+removed-post count; ID-bound missing gaps are deduplicated across overlapping
+catch-up/history targets. The existing embedded-player reason remains stable;
+known unsupported attachments use a separate reason, both reconciled on restart.
+The conditional legacy-frame concern was checked against the strict public URL
+validators; frame classification now also precedes post classification explicitly.

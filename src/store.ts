@@ -4,7 +4,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { postId, validateObservation } from './domain.ts';
-import {feedName,feedIdentity,validateListingUrl,EXTERNAL_ATTACHMENT_NOTE} from './sources.ts';
+import {feedName,feedIdentity,validateListingUrl,EXTERNAL_ATTACHMENT_NOTE,UNSUPPORTED_ATTACHMENT_NOTE,hasExternalAttachment,tumblrPostUrl} from './sources.ts';
 import type { Availability, MediaKind, MediaFilter, PostObservation } from './domain.ts';
 import { historyMonths, historyLowerBound, historyRank } from './history-window.ts';
 import type { HistoryMonths } from './history-window.ts';
@@ -97,6 +97,7 @@ export interface FeedSyncSummary {
   reason:string|null;
 }
 export interface FeedSource {
+  blockedPost:{id:string;permalink:string}|null;
   historyDiscovery:HistoryDiscovery|null;
   text:{total:number;ready:number;pending:number;failed:number};
   name: string;
@@ -244,6 +245,26 @@ export class ReaderStore {
   }
   hasBatch(targetId: string, signature: string): boolean { return Boolean(this.db.prepare('SELECT 1 FROM target_batches WHERE target_id = ? AND signature = ?').get(targetId, signature)); }
   hasTargetPost(targetId:string,id:string):boolean{return Boolean(this.db.prepare('SELECT 1 FROM target_posts WHERE target_id=? AND post_id=?').get(targetId,postId(id)));}
+  noteBlockedPost(input:string,inputId:string){
+    const name=feedName(input);let id:string;try{id=postId(inputId);}catch{return;}
+    if(feedIdentity(name).platform!=='tumblr'||!id.startsWith(name+':')||this.getPost(id)||this.isPostExcluded(id))return;
+    this.setSetting('blockedPost:'+name,{id,generation:this.generation,revision:this.sourceRevision(name)});
+  }
+  blockedPost(input:string):FeedSource['blockedPost']{
+    const name=feedName(input),value=this.getSetting<{id:string;generation:number;revision:number}>('blockedPost:'+name);
+    try{if(!value||value.generation!==this.generation||value.revision!==this.sourceRevision(name)||!postId(value.id).startsWith(name+':')||this.getPost(value.id)||this.isPostExcluded(value.id))return null;return{id:value.id,permalink:tumblrPostUrl(value.id)};}catch{return null;}
+  }
+  excludeBlockedPost(input:string,inputId:string){
+    const name=feedName(input),id=postId(inputId);
+    this.transaction(()=>{
+      if(this.blockedPost(name)?.id!==id)throw new Error('The blocked post changed; review the current feed before excluding it');
+      this.db.prepare('INSERT OR IGNORE INTO excluded_posts VALUES (?,?,?)').run(id,name,Date.now());this.db.prepare('DELETE FROM settings WHERE key=?').run('blockedPost:'+name);
+      this.db.prepare("UPDATE feed_sync SET reason='Post excluded; Resume to continue saved history' WHERE subreddit=? AND state='incomplete'").run(name);
+      this.db.exec("UPDATE metadata SET value=value+1 WHERE key='content_revision'");
+    });
+  }
+  noteSourceUnavailable(input:string,inputId:string,runId:string){const name=feedName(input),id=postId(inputId);if(!id.startsWith(name+':'))throw new Error('Unavailable post belongs to another feed');this.setSetting('sourceMissing:'+id,{feed:name,runId});}
+  sourceUnavailableThisRun(input:string,inputId:string,runId:string){const value=this.getSetting<{feed:string;runId:string}>('sourceMissing:'+postId(inputId));return value?.feed===feedName(input)&&value.runId===runId;}
 
   /** A page and its checkpoint either both commit or neither does. */
   commitBatch(input: {
@@ -251,6 +272,7 @@ export class ReaderStore {
     targetId: string;
     observations: PostObservation[];
     seenPostIds?:string[];
+    unavailablePostIds?:string[];
     continuation: string | null;
     omissions?: number;
     status?: HistoryTarget['status'];
@@ -274,7 +296,7 @@ export class ReaderStore {
       if (input.status && !['queued', 'paused', 'done', 'cancelled'].includes(input.status)) throw new Error('Invalid target state');
       let newPosts = 0;
       let newTargetPosts = 0;
-      let oldest = target.oldestMs;
+      let oldest = target.oldestMs,missingOmissions=0;
       for (const record of input.observations) {
         const observation = validateObservation(record);
         if (observation.source !== 'live') throw new Error('Archive imports cannot advance live history targets');
@@ -292,13 +314,21 @@ export class ReaderStore {
         newTargetPosts+=Number(this.db.prepare('INSERT OR IGNORE INTO target_posts VALUES (?,?)').run(target.id,id).changes);
         oldest=Math.min(oldest??Infinity,Number(post.created_ms));
       }
+      for(const inputId of new Set(input.unavailablePostIds??[])){
+        const id=postId(inputId);if(!id.startsWith(target.subreddit+':'))throw new Error('Unavailable post belongs to another feed');if(this.isPostExcluded(id))continue;
+        const post=this.getPost(id),key=`targetMissing:${target.id}:${id}`;
+        if(post){if(post.subreddit!==target.subreddit)throw new Error('Unavailable post belongs to another feed');newTargetPosts+=Number(this.db.prepare('INSERT OR IGNORE INTO target_posts VALUES (?,?)').run(target.id,id).changes);oldest=Math.min(oldest??Infinity,post.createdMs);}
+        else if(!this.getSetting(key))missingOmissions++;
+        if(!this.getSetting(key))this.setSetting(key,{feed:target.subreddit});
+      }
       const newBatch = !input.batchKey || Boolean(this.db.prepare('INSERT OR IGNORE INTO target_batches VALUES (?, ?)').run(target.id, input.batchKey).changes);
       this.db.prepare(`UPDATE targets SET continuation = ?, observed_count = observed_count + ?,
         omission_count = omission_count + ?, oldest_ms = ?, status = ?, reason = ?, boundary = ?,
         last_page=coalesce(?,last_page),completion=?,started_at_head=max(started_at_head,?) WHERE id = ?`)
-        .run(input.continuation, newTargetPosts, newBatch ? omissions : 0, oldest, input.status ?? 'queued', input.reason ?? null,
+        .run(input.continuation, newTargetPosts, (newBatch ? omissions : 0)+missingOmissions, oldest, input.status ?? 'queued', input.reason ?? null,
           JSON.stringify(input.boundary ?? target.boundary),input.pageUrl??null,input.completion??null,Number(input.fromHead??false),target.id);
-      if(input.status==='done'&&input.completion==='date-boundary'&&target.lowerMs!==null&&this.db.prepare('SELECT started_at_head FROM targets WHERE id = ?').get(target.id)?.started_at_head){
+      const datedCatchup=input.status==='done'&&input.completion==='listing-end'&&feedIdentity(target.subreddit).platform==='tumblr'&&tumblrHistorySummary(this.getTarget(target.id))?.finished;
+      if(input.status==='done'&&(input.completion==='date-boundary'||datedCatchup)&&target.lowerMs!==null&&this.db.prepare('SELECT started_at_head FROM targets WHERE id = ?').get(target.id)?.started_at_head){
         this.db.prepare(`UPDATE targets SET anchor_ms = ? WHERE id = (SELECT history_target_id FROM feeds WHERE name = ?)
           AND anchor_ms >= ? AND anchor_ms <= ?`).run(target.upperMs,target.subreddit,target.lowerMs,target.upperMs);
       }
@@ -421,7 +451,7 @@ export class ReaderStore {
   get mediaSyncRevision():number {return Number(this.db.prepare("SELECT value FROM metadata WHERE key='media_sync_revision'").get()!.value);}
   get contentRevision():number {return Number(this.db.prepare("SELECT value FROM metadata WHERE key='content_revision'").get()!.value);}
   *readyMediaIds():Generator<string> {
-    for(const row of this.db.prepare("SELECT post_id FROM media_sync WHERE status='ready' OR (status='unavailable' AND reason=?)").iterate(EXTERNAL_ATTACHMENT_NOTE))yield String(row.post_id);
+    for(const row of this.db.prepare("SELECT post_id FROM media_sync WHERE status='ready' OR (status='unavailable' AND reason IN (?,?))").iterate(EXTERNAL_ATTACHMENT_NOTE,UNSUPPORTED_ATTACHMENT_NOTE))yield String(row.post_id);
   }
   implementationLimitedMedia():string[] {
     return this.db.prepare("SELECT post_id FROM media_sync WHERE status='unavailable' AND (reason LIKE 'Complete gallery downloads%' OR reason LIKE '%per-file download limit%' OR reason LIKE '%media manifest%' OR reason LIKE '%single-file video representation%')").all().map(row=>String(row.post_id));
@@ -503,6 +533,8 @@ export class ReaderStore {
     if(!ids.length||ids.some(id=>this.getTarget(id)?.subreddit!==name))throw new Error('Sync targets must belong to this feed');
     const id=randomUUID();
     this.transaction(()=>{
+      this.db.prepare('DELETE FROM settings WHERE key=?').run('blockedPost:'+name);
+      this.db.prepare("DELETE FROM settings WHERE key GLOB 'sourceMissing:*' AND json_extract(value,'$.feed')=?").run(name);
       this.db.prepare(`INSERT INTO feed_sync(subreddit,run_id,targets,state,started_ms) VALUES (?,?,?,'running',?)
         ON CONFLICT(subreddit) DO UPDATE SET run_id=excluded.run_id,targets=excluded.targets,state='running',
         started_ms=excluded.started_ms,reason=NULL,gap_count=0`).run(name,id,JSON.stringify(ids),now);
@@ -525,16 +557,19 @@ export class ReaderStore {
       }else{
         const gaps:string[]=[];
         const searched=targets.map(target=>target?.boundary.source?target:null).filter(Boolean);
-        if(searched.length)gaps.push(searched.map(target=>target!.reason).filter(Boolean).join(' '));
+        if(searched.length)gaps.push([...new Set(searched.map(target=>target!.reason).filter(Boolean))].join(' '));
         if(targets.some(target=>target?.completion==='listing-end'&&!target.boundary.source))gaps.push(`Reached the end ${feedIdentity(name).platform==='tumblr'?'Tumblr':'Reddit'} serves; full historical coverage could not be verified`);
-        const omitted=targets.reduce((sum,target)=>sum+(target?.omissionCount??0),0);
+        const duplicateMissing=Number(this.db.prepare(`SELECT count(*)-count(DISTINCT substr(s.key,length('targetMissing:'||t.id||':')+1)) AS n
+          FROM settings s JOIN targets t ON substr(s.key,1,length('targetMissing:'||t.id||':'))='targetMissing:'||t.id||':'
+          WHERE t.id IN (SELECT value FROM json_each(?))`).get(String(row.targets))!.n);
+        const omitted=targets.reduce((sum,target)=>sum+(target?.omissionCount??0),0)-duplicateMissing;
         if(omitted)gaps.push(`${omitted} post extraction(s) omitted`);
         if(media.unavailable)gaps.push(`${media.unavailable} media post(s) unavailable for offline saving`);
         const removed=Number(this.db.prepare(`SELECT count(DISTINCT p.id) AS n FROM target_posts t JOIN posts p ON p.id=t.post_id
           WHERE t.target_id IN (SELECT value FROM json_each(?)) AND p.live_availability IN ('removed','deleted')`).get(String(row.targets))!.n);
         const unavailablePosts=Math.max(removed,Number(row.gap_count));
         if(unavailablePosts)gaps.push(`${unavailablePosts} removed or deleted post(s)`);
-        if(gaps.length){state='gaps';reason=gaps.join('. ');}else reason=null;
+        if(gaps.length){state='gaps';reason=gaps.map(gap=>gap.replace(/[.\s]+$/,'')).join('. ');}else reason=null;
       }
       this.db.prepare(`UPDATE feed_sync SET state=?,reason=?,last_success_ms=CASE WHEN ?='complete' THEN ? ELSE last_success_ms END,
         last_completed_ms=CASE WHEN ? IN ('complete','gaps') THEN ? ELSE last_completed_ms END WHERE subreddit=? AND run_id=?`)
@@ -560,7 +595,7 @@ export class ReaderStore {
         UPDATE metadata SET value = value + 1 WHERE key = 'generation';
         DELETE FROM comment_states WHERE availability='available';
         DELETE FROM targets; DELETE FROM observations; DELETE FROM media_sync; DELETE FROM media_evidence; DELETE FROM post_media;
-        DELETE FROM settings WHERE key IN ('account','accessPause:tumblr') OR key GLOB 'fileImport:*' OR key GLOB 'collectionReport:*';
+        DELETE FROM settings WHERE key IN ('account','accessPause:tumblr') OR key GLOB 'fileImport:*' OR key GLOB 'collectionReport:*' OR key GLOB 'blockedPost:*' OR key GLOB 'sourceMissing:*' OR key GLOB 'targetMissing:*';
         DELETE FROM posts WHERE live_availability IS NULL OR live_availability = 'available';`);
       // Followed namespaces are retained. Keep only identity/time/deletion state for removed posts,
       // so a subsequent old archive import cannot restore cleared, known-deleted content.
@@ -626,6 +661,8 @@ export class ReaderStore {
     this.transaction(()=>{
       this.setSetting('sourceRevision:'+name,this.sourceRevision(name)+1);
       this.db.prepare("DELETE FROM settings WHERE key GLOB 'fileImport:*' AND json_extract(value,'$.subreddit')=?").run(name);
+      this.db.prepare('DELETE FROM settings WHERE key=?').run('blockedPost:'+name);
+      this.db.prepare("DELETE FROM settings WHERE (key GLOB 'sourceMissing:*' OR key GLOB 'targetMissing:*') AND json_extract(value,'$.feed')=?").run(name);
       this.db.prepare('DELETE FROM archive_fetches WHERE subreddit=?').run(name);
       this.db.prepare('DELETE FROM feed_sync WHERE subreddit=?').run(name);
       this.db.prepare('DELETE FROM settings WHERE key=?').run('collectionReport:'+name);
@@ -691,7 +728,7 @@ export class ReaderStore {
       (SELECT count(*) FROM posts p WHERE p.subreddit = s.name AND EXISTS(SELECT 1 FROM observations WHERE post_id = p.id AND source = 'live')) AS live_count,
       (SELECT count(*) FROM posts p WHERE p.subreddit = s.name AND EXISTS(SELECT 1 FROM observations o WHERE o.post_id = p.id)) AS post_count
       FROM feeds s WHERE s.subscribed=1 ORDER BY s.name`).all()
-      .map(row => ({ historyDiscovery:tumblrHistorySummary(row.history_target_id?this.getTarget(String(row.history_target_id)):null),name: String(row.name),text:this.offlineText(String(row.name)), postCount: Number(row.post_count), historyMonths: historyMonths(Number(row.history_months)),
+      .map(row => ({ blockedPost:this.blockedPost(String(row.name)),historyDiscovery:tumblrHistorySummary(row.history_target_id?this.getTarget(String(row.history_target_id)):null),name: String(row.name),text:this.offlineText(String(row.name)), postCount: Number(row.post_count), historyMonths: historyMonths(Number(row.history_months)),
         historyTarget: row.history_target_id ? this.getTarget(String(row.history_target_id)) : null, oldestMs: row.oldest_ms as number | null, newestMs: row.newest_ms as number | null,
         liveCount: Number(row.live_count), archiveCount: Number(row.post_count)-Number(row.live_count),sync:this.feedSync(String(row.name)) }));
   }
@@ -935,6 +972,19 @@ export class ReaderStore {
         media:post.media,outbound:post.outbound??undefined}));
     });
   }
+  saveCollectedPost(generation:number,input:PostObservation){
+    this.contentTransaction(()=>{
+      if(generation!==this.generation)throw new StaleGenerationError();
+      const record=validateObservation(input),post=this.getPost(record.id);
+      if(!post||this.isPostExcluded(record.id))return;
+      if(record.source!=='live'||record.body===undefined||record.bodyNeedsFetch||record.availability!=='available'||record.subreddit!==post.subreddit)throw new Error('Expected complete validated live post content');
+      const live=this.db.prepare('SELECT live_state_at FROM posts WHERE id=?').get(record.id);if(live?.live_state_at!==null&&live?.live_state_at!==undefined&&record.observedAt<Number(live.live_state_at))return;
+      this.db.prepare('DELETE FROM media_evidence WHERE post_id=?').run(record.id);
+      if(record.outbound===undefined)this.db.prepare("UPDATE observations SET outbound=NULL WHERE post_id=? AND source_key='live'").run(record.id);
+      if(!record.attachments?.length)this.db.prepare("UPDATE observations SET attachments='[]' WHERE post_id=? AND source_key='live'").run(record.id);
+      this.writePost(record);
+    });
+  }
   saveSnapshot(generation: number, snapshot: ThreadSnapshot): void {
     this.contentTransaction(() => {
       if (generation !== this.generation) throw new StaleGenerationError();
@@ -1067,10 +1117,10 @@ export class ReaderStore {
 
   private updateMediaSync(id:string) {
     const preferred=this.getPost(id)!;
-    if(preferred.availability==='available'&&preferred.media.some(kind=>kind==='Image'||kind==='Video')){
+    if(preferred.availability==='available'&&(preferred.media.some(kind=>kind==='Image'||kind==='Video')||hasExternalAttachment(preferred))){
       this.db.prepare(`INSERT INTO media_sync(post_id,signature) VALUES (?,?) ON CONFLICT(post_id) DO UPDATE SET
         status='pending',reason=NULL,session=NULL,signature=excluded.signature WHERE media_sync.signature<>excluded.signature`)
-        .run(preferred.id,createHash('sha256').update(JSON.stringify(preferred.attachments)+'\n'+(preferred.outbound??'')).digest('hex'));
+        .run(preferred.id,createHash('sha256').update(JSON.stringify(preferred.attachments)+'\n'+(preferred.outbound??'')+'\n'+Number(hasExternalAttachment(preferred))).digest('hex'));
     }else this.db.prepare('DELETE FROM media_sync WHERE post_id=?').run(id);
   }
 

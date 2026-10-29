@@ -33,8 +33,8 @@ export function tumblrHistoryCheckpoint(target:HistoryTarget):TumblrHistoryCheck
   const range=(r:any)=>r&&integer(r.lower)&&integer(r.upper)&&r.lower%TUMBLR_DAY===0&&r.upper%TUMBLR_DAY===0&&r.lower>=lower&&r.upper<=upper&&r.lower<r.upper;
   if(!value||value.kind!=='tumblr-dated-search'||value.version!==1||value.scopeLower!==(target.lowerMs??0)||value.scopeUpper!==target.upperMs||!integer(value.cursor)||value.cursor<lower||value.cursor>upper||value.cursor%TUMBLR_DAY||!Array.isArray(value.pending)||value.pending.length>32||!value.pending.every(range)||
     ![value.queries,value.checked,value.unverified,value.capped].every(integer)||value.oldestChecked!==null&&(!integer(value.oldestChecked)||value.oldestChecked<lower||value.oldestChecked>upper))throw new Error('Saved Tumblr history checkpoint is invalid; use Rescan history to restart discovery without deleting posts');
-  if(value.active){
-    const a=value.active;if(!['query','checked','split','unverified','capped','listing'].includes(a.outcome)||a.range!==null&&!range(a.range)||a.range===null&&a.outcome!=='listing'||a.range!==null&&a.outcome==='listing'||!Array.isArray(a.ids)||a.ids.length>2000||!a.ids.every(id=>{try{return postId(id)===id&&id.startsWith('tumblr:'+tumblrBlog(target.subreddit)+':');}catch{return false;}}))throw new Error('Saved Tumblr history page is invalid; use Rescan history');
+  if(value.active!==null){
+    const a=value.active;if(!a||typeof a!=='object'||!['query','checked','split','unverified','capped','listing'].includes(a.outcome)||a.range!==null&&!range(a.range)||a.range===null&&a.outcome!=='listing'||a.range!==null&&a.outcome==='listing'||!Array.isArray(a.ids)||a.ids.length>2000||!a.ids.every(id=>{try{return postId(id)===id&&id.startsWith('tumblr:'+tumblrBlog(target.subreddit)+':');}catch{return false;}}))throw new Error('Saved Tumblr history page is invalid; use Rescan history');
   }
   return value;
 }
@@ -79,4 +79,4 @@ export function tumblrHistorySummary(target:HistoryTarget|null):HistoryDiscovery
   return{method:'dated-search',queries:state.queries,checkedWindows:state.checked,unverifiedWindows:state.unverified,cappedWindows:state.capped,oldestChecked:state.oldestChecked,
     remainingWindows:remaining,currentLower:state.active?.range?.lower??null,currentUpper:state.active?.range?.upper??null,finished:remaining===0};
 }
-export function tumblrHistoryReason(state:TumblrHistoryCheckpoint){return `Dated search finished: ${state.checked} date ${state.checked===1?'window':'windows'} checked${state.unverified?`, ${state.unverified} unverified`:''}${state.capped?`, ${state.capped} daily result limits`:''}. Tumblr search indexing can omit posts, especially before 2017; complete coverage is not verified.`;}
+export function tumblrHistoryReason(state:TumblrHistoryCheckpoint){return `Dated search finished: ${state.checked} date ${state.checked===1?'window':'windows'} checked${state.unverified?`, ${state.unverified} unverified`:''}${state.capped?`, ${state.capped} daily result limits`:''}. Tumblr search indexing can omit posts, including reblogs without added content and many pre-2017 posts; complete coverage is not verified.`;}

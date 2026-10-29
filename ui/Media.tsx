@@ -16,7 +16,7 @@ export function PostMedia({post,syncing,revision,children,filter,scope='feed',ea
   const [copyStatus,setCopyStatus]=useState('Copy local path');
   const signature=post.attachments?.map(item=>item.url).join('|')??'';
   const lookupKey=post.id+'|'+signature;
-  const hasMedia=post.availability==='available'&&post.media.some(kind=>kind==='Image'||kind==='Video');
+  const hasMedia=post.availability==='available'&&(post.media.some(kind=>kind==='Image'||kind==='Video')||hasExternalAttachment(post));
   async function copyPaths(paths:string[]) {
     try{await navigator.clipboard.writeText(paths.join('\n'));setCopyStatus('Copied');}
     catch{setCopyStatus('Copy failed');}
@@ -58,8 +58,9 @@ export function PostMedia({post,syncing,revision,children,filter,scope='feed',ea
   const paths=ready.flatMap(item=>item.localPath?[item.localPath]:[]);
   const embed=filter!=='image'&&notDownloaded&&(readyAll.length===0||hasExternalAttachment(post))&&post.media.includes('Video')?onlineEmbed(post.outbound):null;
   let original:string|null=null;
-  if(notDownloaded&&(embed||!post.attachments.length||hasExternalAttachment(post))&&post.outbound){
-    try{const url=new URL(post.outbound);if(embed&&url.protocol==='http:')url.protocol='https:';if(url.protocol==='https:'&&!url.username&&!url.password)original=url.href;}catch{/* Invalid external links are not rendered. */}
+  const external=post.outbound??(hasExternalAttachment(post)?post.permalink:null);
+  if(notDownloaded&&(embed||!post.attachments.length||hasExternalAttachment(post))&&external){
+    try{const url=new URL(external);if(embed&&url.protocol==='http:')url.protocol='https:';if(url.protocol==='https:'&&!url.username&&!url.password)original=url.href;}catch{/* Invalid external links are not rendered. */}
   }
   const copyLocalPath=paths.length>0?<button type="button" className="copy-local-path" title={paths.join('\n')} aria-live="polite" onClick={()=>void copyPaths(paths)}>{copyStatus}</button>:null;
   const controls=<>{post.bodySync&&post.bodySync.status!=='ready'&&<span className="media-offline-status" title={post.bodySync.reason??'Sync this feed to save the complete post text'}>{post.body!==null?'Text update pending':'Text not downloaded'}</span>}{notDownloaded&&<span className="media-offline-status" role="status" title={note}>{ready.length?'Partially downloaded':'Not downloaded'}</span>}{localError&&hasMedia&&<span className="media-status-unknown" title={localError}>Status unknown</span>}{copyLocalPath}</>;

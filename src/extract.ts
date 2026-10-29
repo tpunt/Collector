@@ -17,6 +17,7 @@ export interface RawPost {
   author?:{name:string;href:string|null};
 }
 export interface Listing {
+  unavailableIds?:string[];
   account: string;
   posts: PostObservation[];
   ordinary: { id: string; createdMs: number; precisionMs: number }[];
