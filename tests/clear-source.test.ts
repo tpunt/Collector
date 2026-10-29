@@ -30,15 +30,25 @@ test('scoped Clear removes all content and provenance, resets progress, and keep
  }finally{store.close();}
 });
 
-test('scoped Clear also removes post and comment deletion state belonging to that subreddit',()=>{
+test('scoped Clear retains minimal removal evidence so older archives cannot restore removed posts or comments',()=>{
  const store=new ReaderStore(':memory:');
  try{
   store.addSubreddit('aww');const target=store.createTarget({subreddit:'aww',upperMs:Date.now()});
   store.commitBatch({generation:store.generation,targetId:target,continuation:null,observations:[{...record('aww','abc'),source:'live',availability:'removed'}]});
   store.saveSnapshot(store.generation,{id:'removed',postId:'t3_abc',source:'live',capturedAt:null,observedAt:1800000000001,sort:'best',body:null,availability:'removed',comments:[{id:'t1_x',postId:'t3_abc',parentId:'t3_abc',ancestry:'known',body:'',availability:'removed',createdMs:1700000000000}],omitted:0,sample:'Removed fixture'});
-  store.clearSubreddit('aww');const db=(store as any).db;
-  for(const table of ['posts','observations','targets','thread_snapshots','comment_states','media_sync','media_evidence','post_media'])assert.equal(db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n,0,table);
+  store.importArchiveBatch(store.generation,[record('aww','def')]);store.saveSnapshot(store.generation,{id:'removed-comment',postId:'t3_def',source:'live',capturedAt:null,observedAt:1800000000001,sort:'best',body:'Available post',availability:'available',comments:[{id:'t1_y',postId:'t3_def',parentId:'t3_def',ancestry:'known',body:'',availability:'removed',createdMs:1700000000000}],omitted:0,sample:'Removed comment'});
+  store.setPostTags('abc',['remove-local-tag']);store.setPostFavourite('abc',true);store.setRead('abc',true);store.clearSubreddit('aww');const db=(store as any).db;
+  assert.equal(db.prepare('SELECT count(*) AS n FROM posts').get().n,1);assert.equal(db.prepare('SELECT count(*) AS n FROM comment_states').get().n,2);
+  for(const table of ['observations','targets','thread_snapshots','media_sync','media_evidence','post_media','body_sync','post_tags','favourite_posts','read_states','search_text'])assert.equal(db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n,0,table);
+  assert.equal(store.stats().posts,0);store.importArchiveBatch(store.generation,[record('aww','abc')]);assert.equal(store.getPost('abc')!.availability,'removed');assert.equal(store.getPost('abc')!.body,null);assert.deepEqual(store.getPost('abc')!.attachments,[]);
+  store.importArchiveBatch(store.generation,[record('aww','def')]);store.saveSnapshot(store.generation,{id:'older-comments',postId:'t3_def',source:'archive',exportId:'older-comments',capturedAt:null,observedAt:1800000000002,sort:'chronological',body:'Old archive text',availability:'available',comments:[{id:'t1_y',postId:'t3_def',parentId:'t3_def',ancestry:'known',body:'Old removed comment text',availability:'available',createdMs:1700000000000}],omitted:0,sample:'Old archive'});assert.equal(store.latestSnapshot('def')!.comments[0]!.availability,'removed');assert.equal(store.latestSnapshot('def')!.comments[0]!.body,'');
  }finally{store.close();}
+});
+
+test('individual deletion and scoped Clear do not run a blocking database compaction; explicit reclaim still does',()=>{
+ const store=new ReaderStore(':memory:');store.addSubreddit('aww');store.importArchiveBatch(store.generation,[record('aww','abc'),record('aww','def')]);const db=(store as any).db,exec=db.exec.bind(db);let compactions=0;
+ db.exec=(sql:string)=>{if(sql.includes('VACUUM'))compactions++;return exec(sql);};
+ try{store.deletePost('abc');store.clearSubreddit('aww');assert.equal(compactions,0);store.compactStorage();assert.equal(compactions,1);}finally{db.exec=exec;store.close();}
 });
 
 test('clearing a source aborts only its own active import and discards its progress',async()=>{

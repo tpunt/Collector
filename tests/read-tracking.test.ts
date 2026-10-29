@@ -49,3 +49,11 @@ test('cards that fit the viewport require one complete view; resize resets tall-
  const resized=new VisibleCoverage();assert.equal(resized.sample(1600,600,0,800,0,800),false);assert.equal(resized.sample(1600,600,0,800,1100,800),false);
  assert.equal(resized.sample(1600,600,800,1600,1200,900),false);assert.equal(resized.sample(1600,600,800,1600,2300,900),false);
 });
+
+test('read changes invalidate reader polling while repeated identical intents do not create refresh loops',()=>{
+ const store=new ReaderStore(':memory:');
+ try{
+  store.addSubreddit('python');store.importArchiveBatch(store.generation,[{id:'abc',subreddit:'python',title:'Read state',body:'Saved text',permalink:'/r/python/comments/abc/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'read-change',observedAt:1,media:['Text']}]);const before=store.contentRevision;
+  store.setRead('abc',true);assert.equal(store.contentRevision,before+1);store.setRead('abc',true);assert.equal(store.contentRevision,before+1);store.setRead('abc',false);assert.equal(store.contentRevision,before+2);store.setRead('abc',false);assert.equal(store.contentRevision,before+2);
+ }finally{store.close();}
+});

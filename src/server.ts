@@ -68,6 +68,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
   const assertCleanupIdle=(path:string)=>{if(cleaningContent&&!stopPaths.has(path))throw new Error('Content cleanup is still in progress. Try again when it finishes.');};
   const quiesce=async(reason:string)=>{await archive.close(reason);await importer.close();await jobs.close(reason);await media.close();};
   const json = (res: ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(value)); };
+  const remainingCapacityWarning=()=>store.storage.full?'Storage is still at the cap. Reclaim freed space in Manage storage, remove more content, or increase the cap.':null;
   const body = async (req: IncomingMessage) => {
     let content = ''; for await (const chunk of req) { content += chunk; if (content.length > 32_000) throw new Error('Request too large'); }
     const value=JSON.parse(content||'{}');if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Expected a JSON object');return value as Record<string,unknown>;
@@ -154,7 +155,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             if(!plan||plan.expires<Date.now())throw new Error('Cleanup preview expired; preview again');
             await quiesce('Paused for storage cleanup; Resume to continue');await media.inventory();
             if(plan.revision!==store.contentRevision||plan.mediaRevision!==media.status.revision||JSON.stringify(plan.ids)!==JSON.stringify(store.cleanupIds(plan.criteria)))throw new Error('The library changed; preview cleanup again');
-            cleanupPlans.delete(id);const keys=store.deletePosts(plan.ids);let warning=store.compactionWarning;
+            cleanupPlans.delete(id);const keys=store.deletePosts(plan.ids);store.compactStorage('Posts deleted');let warning=store.compactionWarning;
             try{await media.clearPosts(plan.ids,keys);}catch{warning=[warning,'Posts deleted, but some files could not be removed. Restart to retry file cleanup.'].filter(Boolean).join(' ');}
             json(res,{deleted:plan.ids.length,warning,storage:store.storage});return;
           }
@@ -301,7 +302,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             await jobs.stopSource(name,'Data cleared');await importer.clearSource(name);
             const keys=store.ownedMediaKeys(name);
             store.clearSubreddit(name);await media.clearSource(name,keys);networkMode.cancel({source:name});
-            json(res,{ok:true,warning:store.compactionWarning});return;
+            json(res,{ok:true,warning:store.compactionWarning??remainingCapacityWarning()});return;
           }
           case '/api/delete-post': {
             if(data.confirm!==true)throw new Error('Confirm deleting this post first');
@@ -309,7 +310,7 @@ export function createReaderServer(options: { database?: string; port?: number; 
             networkMode.cancel({post:id});
             media.stopPost(id);await jobs.stopPost(id);
             const keys=store.deletePost(id),warning=store.compactionWarning;
-            await media.clearPost(id,keys);json(res,{ok:true,warning});return;
+            await media.clearPost(id,keys);json(res,{ok:true,warning:warning??remainingCapacityWarning()});return;
           }
           case '/api/thread': jobs.thread(postId(String(data.id))); break;
           case '/api/clear': networkMode.cancel();await archive.stop(undefined,'Archive data cleared');jobs.pause('Content cleared');await importer.clear();store.clearContent();await media.clear();store.setSetting('imports',[]);json(res,{ok:true,warning:store.compactionWarning});return;

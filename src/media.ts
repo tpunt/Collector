@@ -38,6 +38,7 @@ export class MediaCache {
   private metadataBytes = 0;
   private diskFiles = new Map<string,number>();
   private requests = 0;
+  private sourceRequests={reddit:0,tumblr:0};
   private budget: number;
   constructor(store: ReaderStore, options: MediaDependencies) {
     this.store = store; this.options = options; this.budget = options.maxRequests ?? 40;
@@ -67,7 +68,7 @@ export class MediaCache {
       } catch { /* Incomplete cache entries are unavailable, never served. */ }
     }
   }
-  get status() { return {requests:this.requests,bytes:this.bytes,pending:this.tasks.size,revision:this.store.mediaSyncRevision}; }
+  get status() { return {requests:this.requests,requestsBySource:{...this.sourceRequests},bytes:this.bytes,pending:this.tasks.size,revision:this.store.mediaSyncRevision}; }
   async backupFiles():Promise<string[]> {
     await this.ready;
     return [...this.cached.keys()].filter(key=>this.store.hasMediaOwner(key)).flatMap(key=>[key,key+'.json']);
@@ -245,6 +246,7 @@ export class MediaCache {
       if(this.requests>=this.budget)throw new Error('Sync request budget reached; Resume to save remaining media.');
       const signal=AbortSignal.any([task.controller.signal,this.options.queue.signal,AbortSignal.timeout(60*60_000)]);
       this.requests++;
+      this.sourceRequests[feedIdentity(task.subreddit).platform]++;
       const response=await (this.options.fetch??fetch)(url,{redirect:'manual',signal,headers:{Accept:accept}});
       if([301,302,303,307,308].includes(response.status)){
         const location=response.headers.get('location');await response.body?.cancel();

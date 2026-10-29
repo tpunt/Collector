@@ -30,7 +30,11 @@ import type {HistoryDiscovery} from './tumblr-history.ts';
 const ARCHIVE_MEDIA_MATCH="(o.outbound IS NULL OR o.outbound=archived.outbound)";
 const POST_MEDIA=`coalesce(o.media,CASE WHEN ${ARCHIVE_MEDIA_MATCH} THEN archived.media END)`;
 const POST_ATTACHMENTS=`coalesce(o.attachments,CASE WHEN ${ARCHIVE_MEDIA_MATCH} THEN archived.attachments END)`;
-const POST_OUTBOUND='coalesce(o.outbound,archived.outbound)';
+// NULL means unobserved; an empty stored link means a complete live observation
+// confirmed absence. Never revive an archived link through that empty value.
+const POST_OUTBOUND="nullif(coalesce(o.outbound,archived.outbound),'')";
+// Full post extractors affirm availability; listing previews do not.
+const completeMediaObservation=(record:PostObservation)=>record.source==='live'&&record.availability==='available'&&record.bodyNeedsFetch===false&&record.body!==undefined&&record.attachments!==undefined;
 const POST_AUTHOR=`coalesce((SELECT author FROM observation_authors WHERE post_id=p.id AND source_key=o.source_key),
   (SELECT a.author FROM observation_authors a JOIN observations evidence ON evidence.post_id=a.post_id AND evidence.source_key=a.source_key
     WHERE a.post_id=p.id AND evidence.source='archive' ORDER BY evidence.observed_at DESC,evidence.source_key DESC LIMIT 1))`;
@@ -654,9 +658,10 @@ export class ReaderStore {
       this.db.exec("UPDATE metadata SET value=value+1 WHERE key IN ('content_revision','media_sync_revision')");
       return released;
     });
-    this.compactContent();return keys;
+    return keys;
   }
   clearSubreddit(input:string):void {
+    this.compactionWarning=null;
     const name=feedName(input);this.requireSubreddit(name);
     this.transaction(()=>{
       this.setSetting('sourceRevision:'+name,this.sourceRevision(name)+1);
@@ -666,16 +671,19 @@ export class ReaderStore {
       this.db.prepare('DELETE FROM archive_fetches WHERE subreddit=?').run(name);
       this.db.prepare('DELETE FROM feed_sync WHERE subreddit=?').run(name);
       this.db.prepare('DELETE FROM settings WHERE key=?').run('collectionReport:'+name);
-      this.db.prepare('DELETE FROM comment_states WHERE post_id IN (SELECT id FROM posts WHERE subreddit=?)').run(name);
+      this.db.prepare("DELETE FROM comment_states WHERE availability='available' AND post_id IN (SELECT id FROM posts WHERE subreddit=?)").run(name);
       this.db.prepare('UPDATE feeds SET history_target_id=NULL,requested_ms=NULL WHERE name=?').run(name);
       this.db.prepare('DELETE FROM targets WHERE subreddit=?').run(name);
-      this.db.prepare('DELETE FROM posts WHERE subreddit=?').run(name);
+      // Keep only redaction evidence, as Clear all does. Older archives must
+      // never restore known-removed content after clearing its feed.
+      for(const table of ['post_tags','favourite_posts','search_text','read_states','body_sync','thread_snapshots','media_sync','media_evidence','post_media','observations'])
+        this.db.prepare(`DELETE FROM ${table} WHERE post_id IN (SELECT id FROM posts WHERE subreddit=?)`).run(name);
+      this.db.prepare("DELETE FROM posts WHERE subreddit=? AND (live_availability IS NULL OR live_availability='available')").run(name);
       this.setSetting('imports',(this.getSetting<{subreddit?:string}[]>('imports')??[]).filter(item=>item.subreddit!==name));
       this.db.exec("UPDATE metadata SET value=value+1 WHERE key IN ('content_revision','media_sync_revision')");
     });
-    this.compactContent();
   }
-  compactStorage(){this.compactContent('Content kept');}
+  compactStorage(message='Content kept'){this.compactContent(message);}
   private compactContent(message='Content cleared') {
     // Compaction is best effort; logical Clear and file cleanup must still finish.
     this.compactionWarning = null;
@@ -827,8 +835,10 @@ export class ReaderStore {
   setRead(input:string,read:boolean):StoredPost {
     if(typeof read!=='boolean')throw new Error('Invalid read status');
     const id=postId(input);if(!this.getPost(id))throw new Error('Post is no longer stored');
-    if(read)this.db.prepare('INSERT OR IGNORE INTO read_states VALUES (?,?)').run(id,Date.now());
-    else this.db.prepare('DELETE FROM read_states WHERE post_id=?').run(id);
+    this.transaction(()=>{
+      const changed=read?this.db.prepare('INSERT OR IGNORE INTO read_states VALUES (?,?)').run(id,Date.now()).changes:this.db.prepare('DELETE FROM read_states WHERE post_id=?').run(id).changes;
+      if(changed)this.db.exec("UPDATE metadata SET value=value+1 WHERE key='content_revision'");
+    });
     return this.getPost(id)!;
   }
   favouriteUsers():Author[] {
@@ -852,7 +862,7 @@ export class ReaderStore {
   tags(){return this.db.prepare('SELECT tag,count(*) AS posts FROM post_tags GROUP BY tag ORDER BY tag').all().map(row=>({name:String(row.tag),posts:Number(row.posts)}));}
   setPostTags(input:string,value:unknown):StoredPost {
     const id=postId(input),tags=postTags(value);if(!this.getPost(id))throw new Error('Post is no longer stored');
-    this.contentTransaction(()=>{this.db.prepare('DELETE FROM post_tags WHERE post_id=?').run(id);const insert=this.db.prepare('INSERT INTO post_tags VALUES (?,?)');for(const tag of tags)insert.run(id,tag);this.db.exec("UPDATE metadata SET value=value+1 WHERE key='content_revision'");});
+    this.transaction(()=>{this.db.prepare('DELETE FROM post_tags WHERE post_id=?').run(id);const insert=this.db.prepare('INSERT INTO post_tags VALUES (?,?)');for(const tag of tags)insert.run(id,tag);this.db.exec("UPDATE metadata SET value=value+1 WHERE key='content_revision'");});
     return this.getPost(id)!;
   }
   markFeedRead(input:Parameters<ReaderStore['queryFeed']>[0],generation:number):number {
@@ -977,11 +987,8 @@ export class ReaderStore {
       if(generation!==this.generation)throw new StaleGenerationError();
       const record=validateObservation(input),post=this.getPost(record.id);
       if(!post||this.isPostExcluded(record.id))return;
-      if(record.source!=='live'||record.body===undefined||record.bodyNeedsFetch||record.availability!=='available'||record.subreddit!==post.subreddit)throw new Error('Expected complete validated live post content');
+      if(record.source!=='live'||record.body===undefined||record.bodyNeedsFetch!==false||record.attachments===undefined||record.availability!=='available'||record.subreddit!==post.subreddit)throw new Error('Expected complete validated live post content');
       const live=this.db.prepare('SELECT live_state_at FROM posts WHERE id=?').get(record.id);if(live?.live_state_at!==null&&live?.live_state_at!==undefined&&record.observedAt<Number(live.live_state_at))return;
-      this.db.prepare('DELETE FROM media_evidence WHERE post_id=?').run(record.id);
-      if(record.outbound===undefined)this.db.prepare("UPDATE observations SET outbound=NULL WHERE post_id=? AND source_key='live'").run(record.id);
-      if(!record.attachments?.length)this.db.prepare("UPDATE observations SET attachments='[]' WHERE post_id=? AND source_key='live'").run(record.id);
       this.writePost(record);
     });
   }
@@ -1049,6 +1056,7 @@ export class ReaderStore {
     const availability = record.availability ?? (previous?.availability as Availability | undefined)
       ?? (record.source === 'live' ? tombstone?.live_availability as Availability | undefined : undefined) ?? 'available';
     const retainBody = availability === 'available' && !(record.source === 'archive' && tombstone?.live_availability && tombstone.live_availability !== 'available');
+    const completeMedia=completeMediaObservation(record);
     this.db.prepare(`INSERT INTO observations
       (post_id, source_key, source, export_id, title, body, media, availability, observed_at, captured_at, attachments, outbound)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1066,7 +1074,7 @@ export class ReaderStore {
       .run(record.id, key, record.source, record.exportId ?? null, record.title,
         retainBody ? record.body ?? null : null,
         retainBody ? record.media ? JSON.stringify(record.media) : null : '[]',
-        availability, record.observedAt, record.capturedAt ?? null, retainBody ? record.attachments?.length ? JSON.stringify(record.attachments) : null : '[]',retainBody?record.outbound??null:null);
+        availability, record.observedAt, record.capturedAt ?? null, retainBody ? record.attachments&&(record.attachments.length||completeMedia) ? JSON.stringify(record.attachments) : null : '[]',retainBody?record.outbound??(completeMedia?'':null):null);
     if((record.author!==undefined||availability==='deleted')&&(!previous||record.observedAt>=Number(previous.observed_at))){
       this.db.prepare('INSERT INTO observation_authors VALUES (?,?,?) ON CONFLICT(post_id,source_key) DO UPDATE SET author=excluded.author').run(record.id,key,JSON.stringify(availability==='deleted'?null:record.author));
     }
@@ -1099,7 +1107,7 @@ export class ReaderStore {
         .run(record.created.epochMs, record.created.precisionMs, record.id);
     }
     this.writeObservation(record);
-    if(record.source==='live' && ((record.availability && record.availability!=='available') || record.attachments?.length || changedMediaLink))
+    if(record.source==='live' && ((record.availability && record.availability!=='available') || record.attachments?.length || completeMediaObservation(record) || changedMediaLink))
       this.db.prepare('DELETE FROM media_evidence WHERE post_id=?').run(record.id);
     this.syncMediaOwnership(record.id);
     this.updateMediaSync(record.id);

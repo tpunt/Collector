@@ -77,5 +77,5 @@ test('archive import filters deleted posts and comments, including a post buffer
 
 test('deletion remains available at the storage cap',()=>{
  const store=new ReaderStore(':memory:');store.addSubreddit('python');
-  try{store.importArchiveBatch(store.generation,[{...record('abc'),body:'x'.repeat(600000)},{...record('abc'),exportId:'second-capture',body:'y'.repeat(600000)}]);store.setStorageLimit(1000000);assert(store.storage.full);store.deletePost('abc');assert.equal(store.storage.full,false);assert(store.isPostExcluded('abc'));}finally{store.close();}
+  try{store.importArchiveBatch(store.generation,[{...record('abc'),body:'x'.repeat(600000)},{...record('abc'),exportId:'second-capture',body:'y'.repeat(600000)}]);store.setStorageLimit(1000000);assert(store.storage.full);store.deletePost('abc');assert.equal(store.getPost('abc'),null);assert(store.isPostExcluded('abc'));store.compactStorage();assert.equal(store.storage.full,false);}finally{store.close();}
 });

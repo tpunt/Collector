@@ -43,6 +43,17 @@ test('encrypted streaming backup restores owned media, preferences, exclusions a
  }finally{await h.close();}
 });
 
+test('backup and restore retain a complete live post with an explicitly removed archived media link',async()=>{
+ const h=await setup();
+ try{
+  h.store.addSubreddit('tumblr:staff');const base={id:'tumblr:staff:12345',subreddit:'tumblr:staff',permalink:'https://www.tumblr.com/staff/12345',title:'Updated post',created:{epochMs:1700000000000,precisionMs:1000}};
+  h.store.importArchiveBatch(h.store.generation,[{...base,source:'archive',exportId:'old-player',observedAt:1,body:'Old caption',media:['Text','Video'],outbound:'https://www.youtube.com/embed/abcDEF12345'}]);
+  h.store.saveCollectedPost(h.store.generation,{...base,source:'live',observedAt:2,availability:'available',body:'Current text only',bodyNeedsFetch:false,media:['Text'],attachments:[]});
+  const backup=await h.backups.create(secret),preview=await h.backups.prepare(createReadStream(h.backups.download(backup.id).path),secret);assert.equal(preview.posts,2);await h.backups.restore(preview.id);
+  assert.equal(h.store.getPost(base.id)!.outbound,null);assert.deepEqual(h.store.getPost(base.id)!.attachments,[]);assert.equal(h.store.queryFeed({media:'Video',subreddit:'tumblr:staff'}).posts.length,0);assert.equal(h.store.getPost(base.id,'archive')!.outbound,'https://www.youtube.com/embed/abcDEF12345');
+ }finally{await h.close();}
+});
+
 test('wrong passwords, corruption, truncation and cap failures never publish staged content',async()=>{
  const h=await setup();
  try{

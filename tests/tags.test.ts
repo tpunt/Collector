@@ -7,6 +7,14 @@ import {feedName,feedIdentity,tumblrBlog,tumblrUrl,validateListingUrl,tumblrReso
 import {postId,validateObservation} from '../src/domain.ts';
 const record=(id:string,feed='aww')=>({id,subreddit:feed,title:'Photo '+id,body:'A complete caption',author:{platform:'reddit',id:'alice',name:'Alice'},permalink:`/r/${feed}/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'tags',observedAt:1800000000000,media:['Image' as const],attachments:[{kind:'image' as const,url:'https://i.redd.it/photo.jpg'}]});
 
+test('bounded local tags can be edited and removed at capacity while further collection remains blocked',()=>{
+ const store=new ReaderStore(':memory:');store.addSubreddit('aww');
+ try{
+  store.importArchiveBatch(store.generation,[{...record('aaa'),body:'Saved text '.repeat(90000)}]);store.setPostTags('aaa',['old tag']);store.setStorageLimit(1_000_000);assert(store.storage.full);
+  store.setPostTags('aaa',[]);assert.deepEqual(store.getPost('aaa')!.tags,[]);store.setPostTags('aaa',['new tag']);assert.deepEqual(store.getPost('aaa')!.tags,['new tag']);assert.throws(()=>store.importArchiveBatch(store.generation,[record('bbb')]),/Storage cap/);
+ }finally{store.close();}
+});
+
 test('local tags compose with source, media, search, read, favourites and cursor filters without losing media',()=>{
  const store=new ReaderStore(':memory:');store.addSubreddit('aww');store.addSubreddit('python');
  try{

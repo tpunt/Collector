@@ -4,6 +4,22 @@ import {ReaderStore} from '../src/store.ts';
 import {postMediaReferences,mediaReferences} from '../src/media-reference.ts';
 import type {MediaKind,PostObservation,Availability} from '../src/domain.ts';
 import {archivePost} from '../src/archive.ts';
+import {hasExternalAttachment} from '../src/sources.ts';
+
+test('full live media replacement does not resurrect an old archived player or removed attachment, while archive provenance stays readable',()=>{
+ const store=new ReaderStore(':memory:');
+ try{
+  store.addSubreddit('tumblr:staff');const base={id:'tumblr:staff:12345',subreddit:'tumblr:staff',permalink:'https://www.tumblr.com/staff/12345',title:'Media replacement',created:{epochMs:1700000000000,precisionMs:1000}};
+  const archived:PostObservation={...base,source:'archive',exportId:'earlier-copy',observedAt:1,body:'Older caption',media:['Text','Video'],outbound:'https://www.youtube.com/embed/abcDEF12345'};
+  store.importArchiveBatch(store.generation,[archived]);store.saveCollectedPost(store.generation,{...base,source:'live',observedAt:2,availability:'available',body:'Complete current caption',bodyNeedsFetch:false,media:['Text','Video'],attachments:[{kind:'video',url:'https://va.media.tumblr.com/current.mp4'}]});
+  const video=store.getPost(base.id)!;assert.equal(video.outbound,null);assert.equal(hasExternalAttachment(video),false);assert.equal(video.attachments.length,1);assert.equal(store.queryFeed({media:'Video'}).posts.length,1);
+  store.saveCollectedPost(store.generation,{...base,source:'live',observedAt:3,availability:'available',body:'Complete current text only',bodyNeedsFetch:false,media:['Text'],attachments:[]});
+  store.importArchiveBatch(store.generation,[{...archived,observedAt:4}]);const text=store.getPost(base.id)!;assert.equal(text.outbound,null);assert.deepEqual(text.attachments,[]);assert.equal(store.mediaSync(base.id),null);assert.equal(store.queryFeed({media:'Video'}).posts.length,0);assert.equal(store.getPost(base.id,'archive')!.outbound,archived.outbound);
+  const target=store.createTarget({subreddit:'tumblr:staff',upperMs:1700000001000});store.commitBatch({generation:store.generation,targetId:target,continuation:null,observations:[{...base,source:'live',observedAt:5,bodyNeedsFetch:true,media:['Text'],attachments:[]}]});assert.equal(store.getPost(base.id)!.outbound,null);assert.deepEqual(store.getPost(base.id)!.attachments,[]);
+  store.saveMediaReferences(store.generation,base.id,[{kind:'video',url:'https://va.media.tumblr.com/earlier.mp4'}]);assert.equal(store.getPost(base.id)!.attachments.length,1);
+  store.commitBatch({generation:store.generation,targetId:target,continuation:null,observations:[{...base,source:'live',observedAt:Date.now()+1,body:'Verified full text',bodyNeedsFetch:false,availability:'available',media:['Text'],attachments:[]}]});assert.deepEqual(store.getPost(base.id)!.attachments,[]);assert.equal(store.mediaSync(base.id),null);
+ }finally{store.close();}
+});
 
 test('combined Media filter includes images, videos and discovered attachments with no duplicates, and composes with pagination, source and search',()=>{
  const store=new ReaderStore(':memory:');try{
@@ -18,6 +34,19 @@ test('combined Media filter includes images, videos and discovered attachments w
   assert.equal(store.queryFeed({media:'Media',text:'text-only sentinel'}).posts.length,0);
   assert.deepEqual(store.queryFeed({media:'Media',subreddit:'aww',text:'Caption mixed'}).posts.map(post=>post.id),['t3_mixed']);
   assert.equal(store.queryFeed({media:'Image',subreddit:'aww'}).posts.length,2);assert.equal(store.queryFeed({media:'Video',subreddit:'aww'}).posts.length,3);
+ }finally{store.close();}
+});
+
+test('a Reddit listing with an empty visible body cannot discard archive or discovered attachments',()=>{
+ const store=new ReaderStore(':memory:');
+ try{
+  store.addSubreddit('aww');const base={id:'abc',subreddit:'aww',permalink:'/r/aww/comments/abc/',title:'Gallery preview',created:{epochMs:1700000000000,precisionMs:1000}};
+  store.importArchiveBatch(store.generation,[{...base,source:'archive',exportId:'gallery',observedAt:1,body:'Earlier full caption',media:['Image'],outbound:'https://www.reddit.com/gallery/abc',attachments:[{kind:'image',url:'https://i.redd.it/archived.jpg'}]}]);
+  const target=store.createTarget({subreddit:'aww',upperMs:1700000001000});
+  const preview:PostObservation={...base,source:'live',observedAt:2,body:'',bodyNeedsFetch:false,media:['Image'],attachments:[]};
+  store.commitBatch({generation:store.generation,targetId:target,continuation:null,observations:[preview]});assert.equal(store.getPost('abc')!.outbound,'https://www.reddit.com/gallery/abc');assert.equal(store.getPost('abc')!.attachments[0]!.url,'https://i.redd.it/archived.jpg');
+  store.saveMediaReferences(store.generation,'abc',[{kind:'image',url:'https://i.redd.it/discovered.jpg'}]);store.commitBatch({generation:store.generation,targetId:target,continuation:null,observations:[{...preview,observedAt:Date.now()+1}]});assert.equal(store.getPost('abc')!.attachments[0]!.url,'https://i.redd.it/discovered.jpg');
+  assert.throws(()=>store.saveCollectedPost(store.generation,{...preview,availability:'available',attachments:undefined,bodyNeedsFetch:undefined}),/Expected complete/);
  }finally{store.close();}
 });
 

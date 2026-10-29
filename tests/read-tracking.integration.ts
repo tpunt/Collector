@@ -56,3 +56,14 @@ test('a delayed automatic read response cannot overwrite a later manual unread c
   release();await page.waitForTimeout(300);assert.equal(await page.getByRole('button',{name:'Mark read: Read response fixture',exact:true}).count(),1);assert.equal(app.store.getPost('race')!.readAt,null);
  }finally{release();await browser.close();await app.close();}
 });
+
+test('read and unread changes propagate between open readers through ordinary local polling',async()=>{
+ const app=createReaderServer({database:':memory:',port:0});app.store.addSubreddit('python');app.store.importArchiveBatch(app.store.generation,[{id:'shared',subreddit:'python',title:'Shared read fixture',body:'Local text',permalink:'/r/python/comments/shared/',created:{epochMs:1700000000000,precisionMs:1000},source:'archive',exportId:'shared-read',observedAt:1,media:['Text']}]);
+ const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
+ try{
+  const context=await browser.newContext();await context.addInitScript(()=>Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'}));const first=await context.newPage(),second=await context.newPage();await Promise.all([first.goto(origin),second.goto(origin)]);
+  await first.getByRole('button',{name:'Mark read: Shared read fixture',exact:true}).waitFor();await second.getByRole('button',{name:'Mark read: Shared read fixture',exact:true}).waitFor();
+  await first.getByRole('button',{name:'Mark read: Shared read fixture',exact:true}).click();await second.getByRole('button',{name:'Mark unread: Shared read fixture',exact:true}).waitFor();
+  await second.getByRole('button',{name:'Mark unread: Shared read fixture',exact:true}).click();await first.getByRole('button',{name:'Mark read: Shared read fixture',exact:true}).waitFor();assert.equal(app.store.getPost('shared')!.readAt,null);assert(app.networkMode.status.offline);assert.equal(app.problems.status.groups,0);assert.equal(app.jobs.state.requests.sessionTotal,0);
+ }finally{await browser.close();await app.close();}
+});

@@ -1115,3 +1115,89 @@ Validation passed: TypeScript, production build, 224 unit tests and all 149
 browser/API/network checks. The main offline app retained its existing ten
 historical sign-in occurrences and recorded zero collection requests during
 this verification.
+
+### Final general codebase review (2026-10-29)
+
+Reviewed collection/checkpoints, source request policy, persistence, media
+ownership, archives, encrypted backups, local HTTP controls and reader state.
+The main app remained offline and idle, with zero collection requests and the
+same ten historical sign-in diagnostic occurrences. Tests used separate local
+libraries, locally fulfilled pages and temporary Chrome profiles.
+
+Self review reproduced and fixed three issues:
+
+- A complete live post could lose a media link, yet the composed reader would
+  revive that link from an older archive observation. NULL remains unknown; an
+  explicitly empty stored outbound represents verified absence and is exposed
+  as null to readers. Full observations retain explicit empty file lists, clear
+  superseded discovery evidence and update file ownership. Partial listings and
+  text-only discussions retain their intended archive fallback. Regressions cover
+  native video replacement, removal of the last attachment, later archive replay,
+  direct full page commits and encrypted backup/restore without losing provenance.
+- Individual read/unread changes did not invalidate another tab's polling. Read
+  changes now update the content revision transactionally; repeated identical
+  intents do not invalidate it. Two-reader UI tests verify propagation in both
+  directions while existing viewport/read-filter and response-race tests pass.
+- A large Tumblr gallery could consume the Reddit request allowance during a
+  mixed Sync all. A local 121-image gallery reproduced Reddit body collection
+  being skipped. Browser and CDN accounting now keep Reddit's allowance separate
+  from Tumblr while retaining the combined session counter. Archive browser/CDN
+  budgets retain their existing Reddit accounting. The reproduction now completes
+  both feeds, without changing per-source 4–6 second pacing.
+
+One initial browser-suite timeout passed on an isolated rerun and on the full
+stable-build suite. Build and browser checks are run sequentially to avoid
+rebuilding shared assets while a test page is opening.
+
+Claude CLI independently reviewed the source using Opus 5.5 at xhigh effort.
+Its first tool-based run exhausted its turn limit without a report, so it was
+not counted as approval. A completed, source-only single-pass review identified
+four further confirmed issues, all fixed with regressions:
+
+- Scoped Clear now preserves minimal post/comment removal markers, matching
+  global Clear, while removing observations, local post preferences, search
+  content, media ownership and collection progress. Older archives cannot
+  restore text or attachments already known to be removed.
+- Individual deletion and scoped Clear no longer run synchronous VACUUM while
+  unrelated collection continues. Explicit storage cleanup/reclaim still
+  quiesces collection before compaction. File cleanup remains independent of
+  compaction success. A remaining-capacity warning explains when reclaim is
+  needed to reduce physical database allocation.
+- A rejected bulk-read confirmation refreshes its revision for an explicit
+  retry in the same dialog. Its controls remain disabled through that refresh;
+  a browser test holds the response to verify the interval.
+- Bounded local tags remain editable/removable at the storage cap, consistently
+  with read states and favourites; additional content ingestion stays blocked.
+
+The review also queried Offline resume surviving restart. This is intentional,
+documented and tested: every server starts offline, and the saved pause plan
+cannot run until the user explicitly enables external requests in that new
+server session. Manually stopped work is never added to that plan.
+
+Claude's follow-up diff review confirmed the main fixes and requested producer
+and preview checks. All production `saveCollectedPost` callers are completed
+Tumblr permalink extractors, which supply explicit body, availability and
+attachment completeness. Reddit body collection uses `savePostBody` separately.
+The full-media predicate additionally requires explicit available status;
+listing previews cannot discard discovery or archive files even when their
+visible text is empty. A new Reddit gallery regression verifies both fallback
+and discovered file retention. The strict full-post guard deliberately rejects
+incomplete observations rather than committing them as complete.
+
+A final narrow Claude check confirmed those producer, preview and busy-state
+changes. Its remaining cancellation question reproduced as a real race: removing
+a Tumblr feed while media reconciliation was awaiting local work could enqueue
+one late download. Collection now rechecks cancellation after reconciliation,
+before queuing follow-up work for listings or complete posts on either platform.
+The controlled browser reproduction failed with one unwanted download before
+the fix and passed with zero afterwards. The separate 121-image mixed-source
+budget regression also passed again.
+
+Final validation: TypeScript checking, the production build, 230 unit tests and
+153 local Chrome/API/network integration tests passed. The full integration
+suite ran against stable rebuilt assets after the final fixes. Separate delayed-
+response UI/storage/offline regressions also passed. Git whitespace checks pass.
+The main app was restarted with these changes, serves the current UI, and is
+offline and idle with zero collection requests. Its existing ten historical
+sign-in diagnostic occurrences are unchanged; this review made no live Reddit
+or Tumblr requests and did not change the user's stored content or feeds.

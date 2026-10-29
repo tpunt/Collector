@@ -48,3 +48,15 @@ test('tag and bulk read routes require authentication, matching contexts and a c
   assert.equal((await post('read/bulk',input)).status,200);assert.notEqual(app.store.getPost('aaa')!.readAt,null);
  }finally{await app.close();}
 });
+
+test('a stale bulk-read confirmation refreshes its token so the user can confirm again in the same dialog',async()=>{
+ const app=await createOnlineReaderServer({database:':memory:',port:0});app.store.addSubreddit('aww');app.store.importArchiveBatch(app.store.generation,[record('aaa'),record('bbb')]);await app.networkMode.change(true);const origin=await app.listen(),browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
+ try{
+  const page=await browser.newPage();await page.addInitScript(()=>Object.defineProperty(document,'visibilityState',{get:()=> 'hidden'}));await page.goto(origin);await page.locator('.post-card').first().waitFor();await page.getByRole('button',{name:'Mark matching posts read',exact:true}).click();const dialog=page.getByRole('dialog',{name:'Mark matching posts read?'});await dialog.waitFor();app.store.setPostTags('aaa',['changed elsewhere']);
+  let releaseRefresh!:()=>void,refreshStarted!:()=>void;const refreshHeld=new Promise<void>(resolve=>{releaseRefresh=resolve;}),refreshSeen=new Promise<void>(resolve=>{refreshStarted=resolve;});
+  await page.route('**/api/state',async route=>{refreshStarted();await refreshHeld;await route.continue();});
+  const confirmation=dialog.getByRole('button',{name:'Mark all matching posts read',exact:true});await confirmation.click();await dialog.getByRole('alert').filter({hasText:'The library changed'}).waitFor();await refreshSeen;assert(await confirmation.isDisabled());
+  const refreshed=page.waitForResponse(response=>response.url().endsWith('/api/state')&&response.status()===200);releaseRefresh();await refreshed;await page.waitForFunction(()=>!(document.querySelector('[role="dialog"] .primary')as HTMLButtonElement)?.disabled);
+  await confirmation.click();await dialog.waitFor({state:'detached'});assert.notEqual(app.store.getPost('aaa')!.readAt,null);assert.notEqual(app.store.getPost('bbb')!.readAt,null);assert.equal(app.problems.status.groups,0);
+ }finally{await browser.close();await app.close();}
+});

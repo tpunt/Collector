@@ -21,7 +21,7 @@ import {emptySignInStatus} from './sign-in.ts';
 import type {SignInObservation,SignInStatus} from './sign-in.ts';
 
 export interface MediaSyncDriver {
-  readonly status:{requests:number};
+  readonly status:{requests:number;requestsBySource?:{reddit:number;tumblr:number}};
   pendingPosts(source:string,session:string):string[];
   preparePost(id:string,session:string):{discover:boolean}|null;
   syncPost(id:string,session:string,allowance:number,signal:AbortSignal):Promise<void>;
@@ -71,6 +71,7 @@ export class ReaderJobs {
   private browserPlatform:'reddit'|'tumblr'|null=null;
   private closing: Promise<void> | null = null;
   private completedRequests = 0;
+  private completedRedditRequests = 0;
   private archiveRequestBaseline:number|null=null;
   private feedRuns=new Map<string,string>();
   private reportRuns=new Map<string,string>();
@@ -165,7 +166,7 @@ export class ReaderJobs {
     }
     this.start();
   }
-  private totalRequests(){return this.completedRequests+(this.browserOpen?this.browser.counts.released:0)+(this.mediaSync?.status.requests??0);}
+  private redditRequests(){return this.completedRedditRequests+(this.browserOpen&&this.browserPlatform==='reddit'?this.browser.counts.released:0)+(this.mediaSync?.status.requestsBySource?.reddit??this.mediaSync?.status.requests??0);}
   private queueMediaSource(name:string,deadline:number){
     if(!this.mediaSync||this.queue.some(work=>work.kind==='media-source'&&work.subreddit===name))return;
     this.queue.push({id:randomUUID(),kind:'media-source',subreddit:name,deadline,generation:this.store.generation});
@@ -232,7 +233,7 @@ export class ReaderJobs {
     }
   }
   /** Only an explicit archive Start/Resume resets its browser/CDN allowance. */
-  beginArchiveRun() {this.archiveRequestBaseline=this.totalRequests();}
+  beginArchiveRun() {this.archiveRequestBaseline=this.redditRequests();}
   /** Save just this committed archive page before the fetcher advances. */
   async archiveMedia(ids:string[],signal:AbortSignal) {
     signal.throwIfAborted();
@@ -292,7 +293,7 @@ export class ReaderJobs {
     if (this.closing) return this.closing;
     this.closing = (async () => {
       await this.browser.close();
-      if (this.browserOpen) { this.completedRequests += this.browser.counts.released; this.browserOpen = false;this.browserPlatform=null; }
+      if (this.browserOpen) { this.completedRequests += this.browser.counts.released;if(this.browserPlatform==='reddit')this.completedRedditRequests+=this.browser.counts.released;this.browserOpen = false;this.browserPlatform=null; }
     })();
     try { await this.closing; } finally { this.closing = null; }
   }
@@ -463,7 +464,7 @@ export class ReaderJobs {
   }
   private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();const done=this.pump();this.pumpDone=done;void done.catch(error=>this.problem(error,{operation:'collection'})).finally(()=>{if(this.pumpDone===done)this.pumpDone=null;}); } }
   private async pump() {
-    const startingRequests = this.totalRequests();
+    const startingRequests = this.redditRequests();
     try {
       while (this.queue.length && !this.stopping) {
         const ready=(work:Work)=>work.kind!=='target'||!this.store.getTarget(work.targetId)?.dependsOn||this.store.getTarget(this.store.getTarget(work.targetId)!.dependsOn!)?.status==='done';
@@ -499,7 +500,7 @@ export class ReaderJobs {
           }
           const requestBaseline=work.requestBaseline??startingRequests;
           const isTumblr=Boolean(this.sourceOf(work)&&feedIdentity(this.sourceOf(work)!).platform==='tumblr');
-          const remaining=isTumblr?Number.MAX_SAFE_INTEGER:120-(this.totalRequests()-requestBaseline);
+          const remaining=isTumblr?Number.MAX_SAFE_INTEGER:120-(this.redditRequests()-requestBaseline);
           if(remaining<=0)throw new SyncLimitError(work.requestBaseline!==undefined?'Archive media request budget reached; Resume archive to save remaining media.':'Sync request budget reached; Resume to fetch remaining posts and media.');
           if(work.kind==='media'){
             const plan=this.mediaSync?.preparePost(work.postId,workSession);if(!plan)continue;
@@ -508,14 +509,14 @@ export class ReaderJobs {
             this.message=`Saving media for ${feedIdentity(post.subreddit).label}: ${post.title}`;
             if(plan.discover&&feedIdentity(post.subreddit).platform==='tumblr'){
               if(this.browserOpen&&this.mediaMode)await this.closeBrowser();
-              await this.openBrowser(120-(this.totalRequests()-requestBaseline),'tumblr');
+              await this.openBrowser(120-(this.redditRequests()-requestBaseline),'tumblr');
               this.attemptedBodies.add(post.id);
               const saved=await this.fetchTumblrPost(post,work.generation);if(!saved)continue;this.controller.signal.throwIfAborted();
               this.store.saveCollectedPost(work.generation,saved);
               if(!saved.attachments?.length){const current=this.store.getPost(post.id)!;if(hasExternalAttachment(current))this.store.setMediaSync(work.generation,post.id,'unavailable',externalAttachmentNote(current),workSession);else if(current.media.some(kind=>kind==='Image'||kind==='Video'))throw new ExtractionError('post-content','Tumblr did not expose its supported media; collection is incomplete',{expectedId:post.id,missingFields:['attachments']});continue;}
             }else if(plan.discover){
               if(this.browserOpen&&!this.mediaMode)await this.closeBrowser();
-              await this.openBrowser(120-(this.totalRequests()-requestBaseline),'media');
+              await this.openBrowser(120-(this.redditRequests()-requestBaseline),'media');
               const page=await this.browser.navigate(this.pageUrl=post.permalink.replace('https://www.reddit.com','https://old.reddit.com'),this.controller.signal);
               const account=await this.account(page);this.controller.signal.throwIfAborted();if(!account)throw new AccessError('Saved sign-in is unavailable');this.verifyRedditAccount(account);
               let attachments;
@@ -536,7 +537,7 @@ export class ReaderJobs {
               await this.mediaSync?.reconcile?.();
             }
             await this.closeBrowser();this.controller.signal.throwIfAborted();
-            await this.mediaSync!.syncPost(post.id,workSession,isTumblr?Number.MAX_SAFE_INTEGER:120-(this.totalRequests()-requestBaseline),this.controller.signal);
+            await this.mediaSync!.syncPost(post.id,workSession,isTumblr?Number.MAX_SAFE_INTEGER:120-(this.redditRequests()-requestBaseline),this.controller.signal);
             this.reports?.observe(post.subreddit,[post],[post.id]);
             const progress=this.store.offlineMedia(post.subreddit);
             this.message=`${feedIdentity(post.subreddit).label}: media saved for ${progress.ready}/${progress.total} posts`;
@@ -550,7 +551,7 @@ export class ReaderJobs {
             if(state){await this.tumblrHistoryStep(work,target,state);continue;}
             if(target.continuation&&new URL(target.continuation).pathname.startsWith('/search/')){await this.tumblrHistoryStep(work,target,newTumblrHistory(target));continue;}
           }
-          await this.openBrowser(120-(this.totalRequests()-requestBaseline),tumblr?'tumblr':false);
+          await this.openBrowser(120-(this.redditRequests()-requestBaseline),tumblr?'tumblr':false);
           this.controller.signal.throwIfAborted();
           if (work.kind === 'target') {
             const target = this.store.getTarget(work.targetId);
@@ -596,6 +597,7 @@ export class ReaderJobs {
               reason: result.reason ?? (result.stalled ? 'Listing repeated three times; continuation needs inspection' : undefined) });
             this.reports?.observe(target.subreddit,previous,listing.posts.map(post=>post.id));
             await this.mediaSync?.reconcile?.();
+            this.controller.signal.throwIfAborted();
             this.message = `${feedIdentity(target.subreddit).label}: ${listing.posts.length} posts checked${listing.omissions ? `, ${listing.omissions} omitted` : ''}`;
             if (!result.done && !result.stalled) this.queue.push({ ...work, head: false });
             this.queueMediaSource(target.subreddit,work.deadline);
@@ -612,6 +614,7 @@ export class ReaderJobs {
               const saved=await this.fetchTumblrPost(post,work.generation);if(!saved)continue;this.controller.signal.throwIfAborted();
               this.store.saveCollectedPost(work.generation,saved);
               await this.mediaSync?.reconcile?.();
+              this.controller.signal.throwIfAborted();
               if(this.mediaSync&&this.store.mediaSync(post.id))this.queue.push({id:randomUUID(),kind:'media',postId:post.id,deadline:work.deadline,generation:work.generation});
               this.reports?.observe(post.subreddit,[post],[post.id]);this.message='Tumblr post text and attachment references saved';continue;
             }
@@ -629,6 +632,7 @@ export class ReaderJobs {
             }else this.store.saveSnapshot(work.generation, snapshot);
             if(attachments)this.store.saveMediaReferences(work.generation,post.id,attachments);
             await this.mediaSync?.reconcile?.();
+            this.controller.signal.throwIfAborted();
             if(this.mediaSync&&this.store.followedSources().includes(post.subreddit)&&this.store.mediaSync(post.id))this.queue.push({id:randomUUID(),kind:'media',postId:post.id,deadline:work.deadline,generation:work.generation});
             this.reports?.observe(post.subreddit,[post],[post.id]);
             this.message = work.kind==='body'?'Post text saved offline':`Discussion saved: ${snapshot.comments.length} sampled comments; sort ${snapshot.sort}`;
