@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {ReaderStore} from '../src/store.ts';
 import {cleanupCriteria} from '../src/library-storage.ts';
 import {tagName,postTags} from '../src/tags.ts';
-import {feedName,feedIdentity,tumblrBlog,tumblrUrl,validateListingUrl,tumblrResourceAllowed,listingUrl,tumblrPostUrl} from '../src/sources.ts';
+import {feedName,feedIdentity,tumblrBlog,tumblrUrl,validateListingUrl,tumblrResourceAllowed,listingUrl,tumblrPostUrl,tumblrArchiveUrl,tumblrContentUrl} from '../src/sources.ts';
 import {postId,validateObservation} from '../src/domain.ts';
 const record=(id:string,feed='aww')=>({id,subreddit:feed,title:'Photo '+id,body:'A complete caption',author:{platform:'reddit',id:'alice',name:'Alice'},permalink:`/r/${feed}/comments/${id}/`,created:{epochMs:1700000000000,precisionMs:1000},source:'archive' as const,exportId:'tags',observedAt:1800000000000,media:['Image' as const],attachments:[{kind:'image' as const,url:'https://i.redd.it/photo.jpg'}]});
 
@@ -80,4 +80,10 @@ test('Tumblr native frames require explicit navigation and remain bound to their
  assert(tumblrResourceAllowed(frame,'Document','staff',frame));
  assert.equal(tumblrResourceAllowed(frame.replace('staff','other'),'Document','staff',frame),false);
  assert.equal(tumblrResourceAllowed('https://www.tumblr.com/video/staff/12345/500/','Document','staff',frame),false);
+});
+
+test('documented Tumblr archives require an explicit same-blog navigation and are never normal listings',()=>{
+ const archive='https://staff.tumblr.com/archive';assert.equal(tumblrArchiveUrl(archive,'tumblr:staff').href,archive);assert.equal(tumblrContentUrl(archive,'staff').href,archive);
+ assert.equal(tumblrResourceAllowed(archive,'Document','staff'),false);assert(tumblrResourceAllowed(archive,'Document','staff',archive));assert.throws(()=>validateListingUrl(archive,'tumblr:staff'));
+ for(const url of ['https://other.tumblr.com/archive','https://staff.tumblr.com/archive?before=1','https://staff.tumblr.com/archive#month','https://staff.tumblr.com/api/read','https://staff.tumblr.com:444/archive'])assert.throws(()=>tumblrArchiveUrl(url,'staff'));
 });

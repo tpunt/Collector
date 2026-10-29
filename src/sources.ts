@@ -49,9 +49,17 @@ export function tumblrEmbedUrl(input:string,feed:string,expectedId?:string):URL 
   if(!match||expectedId&&match[1]!==expectedId)throw new Error('Tumblr media frame does not belong to the requested post');
   return url;
 }
+/** The documented, public per-blog archive entry point. Traversal needs its own
+ * adapter; accepting this document never makes it a normal post/listing. */
+export function tumblrArchiveUrl(input:string,feed:string):URL {
+  const blog=tumblrBlog(feed),url=new URL(input,`https://${blog}.tumblr.com/`);
+  if(url.protocol!=='https:'||url.hostname!==blog+'.tumblr.com'||url.port||url.username||url.password||url.search||url.hash||url.pathname.replace(/\/$/,'')!=='/archive')throw new Error('Expected the selected Tumblr blog archive');
+  return url;
+}
 export function tumblrContentUrl(input:string,feed:string):URL {
   try{return tumblrUrl(input,feed,true);}catch{/* Try the post layout next. */}
-  try{return tumblrUrl(input,feed);}catch{return tumblrEmbedUrl(input,feed);}
+  try{return tumblrUrl(input,feed);}catch{/* An archive is a separate public document. */}
+  try{return tumblrArchiveUrl(input,feed);}catch{return tumblrEmbedUrl(input,feed);}
 }
 export function listingUrl(feed:string){const identity=feedIdentity(feed);return identity.platform==='tumblr'?`https://www.tumblr.com/${identity.name}`:`https://old.reddit.com/r/${identity.name}/new/`;}
 export function validateListingUrl(input:string,feed:string){
@@ -66,6 +74,7 @@ export function tumblrResourceAllowed(input:string,type:string,blog:string|null,
     if(url.protocol!=='https:'||url.port||url.username||url.password||!blog)return false;
     if(type==='Document'){
       const feed='tumblr:'+tumblrBlog(blog);
+      try{tumblrArchiveUrl(input,feed);return input===navigation;}catch{/* Not an archive entry point. */}
       tumblrContentUrl(input,feed);
       try{tumblrEmbedUrl(input,feed);return input===navigation;}catch{return true;}
     }

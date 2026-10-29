@@ -30,6 +30,11 @@ export function collectTumblrDom(){
     // provenance only when a visible bookmark in this same card confirms it.
     const originalPost=web&&postPage&&actionId&&canonical&&postKey(canonical)&&postKey(canonical)!==postKey(location.href)&&links.some(link=>link.rel.split(/\s+/).includes('bookmark')&&postKey(link.href)===postKey(canonical))?canonical:null;
     const locationPost=postPage&&ownPost(location.href)?location.href:null;
+    // Signed-in post pages omit the logged-out like-button ID and permalink.
+    // Bind their one main article only when independent canonical metadata and
+    // its rendered author both agree with this blog/post. Never infer an ID
+    // from the requested URL alone or attribute recommendation cards to it.
+    const canonicalIdentity=!actionId&&!permalink&&web&&postPage&&canonical&&postKey(canonical)===postKey(location.href)&&author&&visible(author)&&new URL(author.href,location.href).origin===location.origin&&new URL(author.href,location.href).pathname.replace(/\/$/,'')==='/'+blog&&element.closest('main')&&roots.filter(root=>root.closest('main')).length===1?canonical:null;
     const clone=element.cloneNode(true) as HTMLElement;
     const original=[...element.querySelectorAll('*')],copied=[...clone.querySelectorAll('*')];
     original.forEach((node,index)=>{if(!visible(node))copied[index]?.remove();});
@@ -71,8 +76,8 @@ export function collectTumblrDom(){
       const file=fileUrl(selected);if(file)addFile(file);else if(node.tagName==='VIDEO'||node.tagName==='PICTURE')incomplete=true;
     }
     const readMore=incomplete||links.some(link=>/read more|keep reading/i.test(link.textContent??''));
-    return [{permalink:element.getAttribute('data-post-url')??permalink?.href??(actionId&&locationPost?locationPost:null),
-      id:element.getAttribute('data-post-id')??actionId??element.id.match(/(?:post[-_]?)?([0-9]{5,})$/)?.[1]??null,
+    return [{permalink:element.getAttribute('data-post-url')??permalink?.href??(actionId&&locationPost?locationPost:null)??canonicalIdentity,
+      id:element.getAttribute('data-post-id')??actionId??element.id.match(/(?:post[-_]?)?([0-9]{5,})$/)?.[1]??(canonicalIdentity?new URL(canonicalIdentity).pathname.split('/')[2]!:null),
       title:element.querySelector('h1,h2,h3')?.textContent?.trim()??text.split('\n')[0]?.slice(0,200)??'',
       datetime:element.querySelector('time[datetime]')?.getAttribute('datetime')??pageDate??null,
       timestamp:element.getAttribute('data-timestamp'),

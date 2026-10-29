@@ -921,3 +921,50 @@ authenticated deep-history traversal remains a separate outstanding task.
 Local browser checks cover concurrent scripts/styles, client-handled form POST
 preservation, atomic request budgets, Offline request/redirect blocking and the
 unchanged automated spacing, redirects, frame/worker interception and budgets.
+
+### Authenticated Tumblr collection and history limits (2026-10-29)
+
+Reused the user's saved Tumblr profile in bounded, script-disabled collection
+checks. All automated document/CSS/CDN requests retained random 4–6 second
+spacing; no APIs, hidden application state or private account content were used.
+The main library was left unchanged.
+
+The Staff listing returned 17 dated posts spanning 12 February–17 September 2026,
+without a captured Next/Archive link. A current full-post read exposed a real
+authenticated-layout bug: the one main article had no logged-out like-button ID
+or self-permalink. The reader now accepts that one article only when its visible
+same-origin author and canonical blog/post identity independently agree; conflicting
+metadata, wrong authors and ambiguous multiple articles remain rejected. A
+regression fixture covers these conditions and preserves all four attachments.
+
+One documented Staff archive request still returned HTTP 403 with the saved
+session. It was not retried or bypassed. The collection boundary can now explicitly
+visit a validated same-blog archive entry point for discovery, without treating
+it as an ordinary post/listing or allowing hidden archive frames to dispatch.
+
+A dated search before 2015 returned HTTP 200 with no rendered articles or captured
+Next link. This is unverified coverage, not proof that older content is absent.
+A previously verified January 2025 search returned three Staff posts dated
+7, 14 and 28 January. The fixed production post reader successfully extracted
+the 7 January post (416 body characters, 30 ordered images) and the 17 September
+2026 post (924 characters, four images).
+
+Both real observations were committed to an isolated live-provenance test library
+with an explicitly paused, incomplete verification target. The normal MediaCache
+saved all 34 images (27,237,360 bytes) in 34 paced CDN requests. Reopening that
+library with Offline mode enabled retained both text bodies and all 34 ready files,
+with zero external requests. Manual checks in the actual reader UI verified both
+galleries, the Media filter, a January 2025 image in full view and Escape to exit.
+The temporary UI server was closed after the check.
+
+These probes released 50 external requests in total (16 document/CSS requests,
+including the one denied archive, plus 34 images), sequentially and with pacing.
+The normal app was restarted offline with the extraction fix; its saved profile
+and user library were preserved. Type checking, build, 209 unit checks and 12
+Tumblr browser checks passed.
+
+This verifies signed-in post collection and offline images, not automatic deep
+history. Automatic Sync still follows the finite blog listing/captured theme
+pagination. Resumable dated-search discovery, dense-result splitting and explicit
+unverified-window coverage have not yet been implemented; search alone cannot
+establish complete all-time coverage.

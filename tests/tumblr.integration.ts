@@ -19,6 +19,19 @@ async function settle(app:Awaited<ReturnType<typeof createOnlineReaderServer>>){
 const publicArticle=(id:string,detail=false)=>`<article><header><a rel="author" href="/staff">staff</a><a data-login-wall-type="blogView"><img alt="Avatar" src="https://64.media.tumblr.com/avatar.png"></a></header>${detail?'':`<a rel="bookmark" aria-label="Permalink" href="/staff/${id}/example">Post</a>`}<h1>Public post ${id}</h1><p>Complete public text with <a href="https://example.org/story">a useful link</a>.</p><button aria-label="Image"><img srcset="https://64.media.tumblr.com/preview.pnj 100w, https://64.media.tumblr.com/full.pnj 1280w"></button><button aria-label="Image"><img srcset="https://64.media.tumblr.com/animated.gifv 1280w"></button><footer><button data-login-wall-type="like" data-login-wall-blog-name="staff" data-login-wall-id="${id}">Like</button><a data-testid="tag-link">#example</a></footer></article>`;
 const publicHtml=(id?:string)=>`<!doctype html><html><head><meta name="parsely-pub-date" content="${id?'2026-09-17T13:16:22.000Z':'2008-01-01T00:00:00.000Z'}"><meta property="og:type" content="${id?'article':'profile'}">${id?`<meta property="og:url" content="https://www.tumblr.com/staff/${id}/example">`:''}</head><body><main>${publicArticle(id??'12345',Boolean(id))}${id?'':'<article><header><a rel="author" href="/other">other</a></header><a rel="bookmark" href="/other/99999/recommended">Recommendation</a></article>'}</main></body></html>`;
 
+test('signed-in Tumblr post pages without logged-out action IDs use matching canonical and single-article author evidence',async()=>{
+ const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'}),page=await browser.newPage({javaScriptEnabled:false});
+ const body='<!doctype html><link rel="canonical" href="https://www.tumblr.com/staff/12345/example"><meta property="og:url" content="https://www.tumblr.com/staff/12345/example"><main><article><header><a rel="author" href="/staff">staff</a></header><time datetime="2026-09-17T13:16:22.000Z"></time><h1>Signed-in full post</h1><p>Complete body.</p>'+Array.from({length:4},(_,i)=>`<img src="https://64.media.tumblr.com/full-${i}.png">`).join('')+'</article></main>';
+ try{
+  await page.route('**/*',route=>route.fulfill({contentType:'text/html',body}));await page.goto('https://www.tumblr.com/staff/12345/example');
+  const post=await readTumblrPost(page,'tumblr:staff:12345');assert.equal(post.id,'tumblr:staff:12345');assert.equal(post.attachments?.length,4);assert.match(post.body!,/Complete body/);assert.equal(post.bodyNeedsFetch,false);
+  await page.locator('a[rel="author"]').evaluate(node=>node.setAttribute('href','/other'));await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/requested post/);
+  await page.locator('a[rel="author"]').evaluate(node=>node.setAttribute('href','https://example.org/staff'));await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/requested post/);
+  await page.setContent(body.replace('staff/12345/example','staff/99999/example'));await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/requested post/);
+  await page.setContent(body.replace('</main>','<article><header><a rel="author" href="/staff">staff</a></header><h1>Ambiguous second article</h1></article></main>'));await assert.rejects(readTumblrPost(page,'tumblr:staff:12345'),/requested post/);
+ }finally{await browser.close();}
+});
+
 test('default public Tumblr view resolves post-specific dates and every image without treating blog metadata, avatars or recommendations as posts',async()=>{
  const browser=await chromium.launch({...browserLaunchOptions,headless:true,channel:'chrome'});
  try{

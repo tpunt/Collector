@@ -93,17 +93,20 @@ Classic account header after a successful sign-in redirect. After restarting the
 server, statuses are unverified until an explicit sign-in check or collection;
 startup remains offline and makes no authentication requests.
 
-**Deep Tumblr history is not yet implemented beyond captured theme pages.**
-Live investigation found that documented public date searches can discover older
-posts: a January 2025 search returned three Staff posts, and Collector extracted
-one full post with 20 attachment references. Search results are capped, may omit
-reblogs/unindexed posts, and have indexing restrictions before 2017. Empty server-rendered search
-pages also do not provide a dependable explicit empty marker. Search alone cannot
-prove complete coverage. The Staff `/archive` page remained 403-blocked, and a
-bounded Internet Archive index probe timed out. The next step is to inspect the
-archive and older-post controls with a user-completed Tumblr sign-in, then build
-and verify resumable history traversal against that actual layout. Signing in
-alone does not change the current history collector or verify private-blog access.
+**Automatic deep Tumblr history is still limited to captured theme pagination.**
+A signed-in live check on 29 October 2026 read 17 dated Staff listing posts,
+spanning 12 February to 17 September 2026, with no next-page link. Documented
+January 2025 searches returned three older posts. The full-post reader now also
+handles signed-in pages that omit logged-out action IDs: it requires a matching
+canonical URL, a visible same-blog author and one main article before assigning
+that identity. Unknown or contradictory identity still pauses collection.
+The Staff `/archive` page remained HTTP 403-blocked after sign-in. A search before
+2015 returned no rendered results, which does not prove those posts are missing.
+Search results are capped, may omit unindexed content, and have indexing
+restrictions before 2017. Empty search pages lack a dependable completion marker.
+The next missing piece is resumable dated-search discovery with explicit coverage
+gaps and dense-window handling; it is not yet part of automatic Sync. Signing in
+does not by itself remove the current listing limit or verify private-blog access.
 
 Star a post to save it in **Favourite posts**, or star the author beside their
 username to add them to **Favourite users**. Both views work offline with the
