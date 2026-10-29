@@ -35,8 +35,12 @@ It reads attached DOM and explicit page/media metadata, and fetches captured
 individual post links to verify full text, publication dates and attachments.
 Supported custom-theme pages and captured `/page/N` links remain readable.
 It uses no Tumblr API or hidden application state.
-The existing random 4–6 second shared request spacing, session budgets, storage
-cap, Stop/Resume and Offline mode apply. Nothing collects on startup.
+The existing random 4–6 second shared request spacing, storage cap, Stop/Resume
+and Offline mode apply. Dated Tumblr history runs through the selected range
+without the Reddit collector's 120-request / one-hour session limit; browser
+contexts rotate between tasks and retain their own request ceilings. Access
+blocks, storage limits and Offline mode still pause collection. Nothing collects
+on startup.
 
 Supported layouts must expose post identities, absolute dates, complete post
 content and direct Tumblr CDN image/video files. Feed-level blog creation dates
@@ -60,15 +64,15 @@ custom-domain blogs, replies/notes and third-party Tumblr archives
 are not supported. Tumblr service access failures pause Tumblr collection separately;
 layout/post errors stop only the affected feed.
 Reddit and its archives can continue. Bulk Sync skips paused Tumblr until an
-explicit **Resume Tumblr** (respecting any cooldown). An end-of-listing result discloses that older history could
-not be verified. Reddit's archive tools remain Reddit-specific.
+explicit **Resume Tumblr** (respecting any cooldown). Dated searches extend
+the finite default listing. Reddit's archive tools remain Reddit-specific.
 
 The custom-theme Staff hostname returned a JavaScript browser challenge with
 HTTP 403 during development. Its default `www.tumblr.com/staff` public view
 returned HTTP 200 without JavaScript on 29 October 2026. This view exposes a
-finite set of posts without a captured next-page link; Collector reports that
-older history could not be verified. It does not guess private pagination APIs
-or claim all-time coverage. Local end-to-end tests cover both layouts, reblogs,
+finite set of posts without a captured next-page link; Collector continues with
+dated website searches. It does not guess private pagination APIs or claim
+complete all-time coverage. Local end-to-end tests cover both layouts, reblogs,
 paginated themes, full text, multiple attachments, local serving and interrupted
 collection. The integration remains experimental because public visibility and
 website layouts vary by blog.
@@ -93,20 +97,42 @@ Classic account header after a successful sign-in redirect. After restarting the
 server, statuses are unverified until an explicit sign-in check or collection;
 startup remains offline and makes no authentication requests.
 
-**Automatic deep Tumblr history is still limited to captured theme pagination.**
-A signed-in live check on 29 October 2026 read 17 dated Staff listing posts,
-spanning 12 February to 17 September 2026, with no next-page link. Documented
-January 2025 searches returned three older posts. The full-post reader now also
-handles signed-in pages that omit logged-out action IDs: it requires a matching
-canonical URL, a visible same-blog author and one main article before assigning
-that identity. Unknown or contradictory identity still pauses collection.
-The Staff `/archive` page remained HTTP 403-blocked after sign-in. A search before
-2015 returned no rendered results, which does not prove those posts are missing.
-Search results are capped, may omit unindexed content, and have indexing
-restrictions before 2017. Empty search pages lack a dependable completion marker.
-The next missing piece is resumable dated-search discovery with explicit coverage
-gaps and dense-window handling; it is not yet part of automatic Sync. Signing in
-does not by itself remove the current listing limit or verify private-blog access.
+**Automatic Tumblr history:** choose a history limit on **Feeds**, including
+**All time**, then Sync. After the finite default listing, Collector searches the
+same blog using documented `from:`, `since:` and `before:` operators, newest
+windows first. Crowded windows split down to individual `date:` searches. It
+keeps searching older years through the selected limit; All time searches back
+to the earliest representable post date. Boundary searches overlap and posts
+are deduplicated by their platform/blog/post identity.
+
+Each window and its saving phase are persisted together with the discovered
+posts. Full text and supported attachments must be saved before its checkpoint
+advances. Stop, Offline mode, shutdown, access errors and failed downloads retain
+that phase; **Resume** continues it and reuses valid local files. Offline mode
+still starts enabled on every server launch. Expanding the history limit starts
+a wider scan, and reducing it never deletes stored content.
+
+The feed card shows checked/queued windows, the oldest checked window,
+unverified empty windows and daily result limits. **Rescan history** restarts
+discovery over the selected limit without deleting posts or downloading valid
+cached files again. Interrupted windows are unfinished work, separate from
+completed searches whose coverage remains uncertain.
+
+Tumblr search is an index, so this is **as far back as the website exposes**,
+not a guarantee of every post. Indexing restrictions especially affect content
+before 2017. Empty loading-only pages are recorded as unverified; crowded single
+days retain an explicit result-limit gap while older windows continue. Access
+gates and unrecognised layouts pause at the exact saved query rather than
+silently skipping it. The Staff `/archive` page remained HTTP 403-blocked after
+sign-in; it is not retried or bypassed. See Tumblr's [search operator and indexing
+documentation](https://help.tumblr.com/knowledge-base/search-and-filtering-basics/).
+
+Live verification on 29 October 2026 resumed an interrupted January 2025 search
+using the saved session, found the older post and retained its complete body and
+all 30 cached images without new media requests. Local browser tests additionally
+cover dense splitting, multi-year traversal, more than 120 requests, interrupted
+gallery downloads, failed layouts, rescanning and offline recovery. This does
+not verify private-blog access.
 
 Star a post to save it in **Favourite posts**, or star the author beside their
 username to add them to **Favourite users**. Both views work offline with the
@@ -314,7 +340,7 @@ Reopening a current database pauses interrupted scans, downloads and archive job
 - One app browser and one automated collection operation at a time. A fresh **random 4–6 second delay after response readiness** before the next HTTP request is dispatched, including redirects and CSS. Manually operated sign-in windows use normal browser loading without this delay; automated browser, archive and media requests share the paced queue; manifest, video and audio hops also receive independent random gaps. Longer service cooldowns and at least ten seconds after page readiness before the next navigation still apply.
 - Collector scripts, images, media, fonts, XHR/fetch, pings and miscellaneous assets are suppressed before network dispatch. CSS remains available to determine rendered visibility. Interactive sign-in permits normal resources through the same request gate. Direct image/video links are saved from rendered DOM evidence. Sync fetches full post bodies and downloads supported media for each collected batch, including unfinished content from previously stored posts, before continuing deeper into history. Observed text posts are re-read to capture updates; a listing preview is not treated as the full saved body. Discussions remain an explicit on-demand action. Native galleries traverse every rendered slide, preserve captions and commit the ordered full-size file list before downloading. Complete archive gallery/video metadata can supply those file URLs directly without a Reddit visit. Saved images and videos in the feed and thread drawer use local files. Supported external video players stream online when shown; they are separate from collection downloads and do not count toward offline storage, the collector request counter or its pacing limit. A persistent per-post ledger records pending, downloading, ready, failed and unavailable media. Feeds shows the number of media posts saved offline. Stop preserves unfinished media; Resume finishes it. Native Reddit players without a saved direct file are expanded automatically during sync in the dedicated browser. This media-only mode enables normal page JavaScript and observes the player’s public CDN DASH-manifest/MP4 request URLs, suppressing those requests before dispatch; it never reads hidden state or network text bodies. The bounded DASH manifest is parsed with fast-xml-parser to select an explicit main video file (up to 720p) and any audio track. Those files are downloaded through the paced queue and combined locally using FFmpeg. Low-resolution preview streams are not used as a substitute for the main video. YouTube and Vimeo links also have online players; other unsupported providers retain an original link.
 - 429, document 403, lost login, challenge/layout failure or request-control failure stops collection. No automatic retry. This applies to media CDN 403/429 too. Retry-After is a minimum cooldown; explicit Resume is required.
-- Every explicit feed Sync/Resume, including adding a feed or expanding history: up to 60 minutes. Each sync session has a shared **120-request ceiling** covering actual browser and CDN requests together. Each page is a scheduling slice so queued explicit thread/head requests can be serviced. Pause closes the collector and preserves the last committed Next checkpoint. Cancel preserves collected content. Restart requires explicit Sync/Resume.
+- Every explicit Reddit feed Sync/Resume, including adding a feed or expanding history: up to 60 minutes. Reddit work has a shared **120-request ceiling** covering actual browser and CDN requests together. Tumblr dated history continues through its selected range at the same 4–6 second spacing, with bounded rotating browser contexts instead of this Reddit session ceiling. Each page is a scheduling slice so queued explicit thread/head requests can be serviced. Pause closes the collector and preserves the last committed Next checkpoint. Cancel preserves collected content. Restart requires explicit Sync/Resume.
 - A date crossing needs five distinct older ordinary records across two batches, with unknown-time cards resetting the evidence. Known IDs never establish completion. Repeat/cycle detection pauses after three no-progress batches. Actual content and checkpoint commit together.
 - Extraction reads only the main listing's posts and its Next control; sidebar and recently viewed lists are ignored. A native-video poster never substitutes for its video file. Startup verifies already-saved media against local file metadata; missing files become pending for the next explicit sync. Removed and superseded attachments release their file ownership; unowned files are reclaimed during collection and on startup, while shared files remain available. Reading a discussion preserves known media when the page supplies only text; removal markers still hide the media.
 - Website exhaustion means the end Reddit served, not complete historical coverage. The oldest collected date and omissions are visible in Collection history. Imported and live posts share the dated feed but retain provenance.

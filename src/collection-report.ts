@@ -42,6 +42,7 @@ export class CollectionReports {
   // content is saved, only its counters are needed: deep history must not keep
   // every historical post fingerprint in memory for the whole job.
   releaseArchivePage(feed:string,ids:string[]){const item=this.current(feed);if(item?.report.kind==='archive')for(const id of ids)item.seen.delete(postId(id));}
+  releaseHistoryPage(feed:string,ids:string[]){const item=this.current(feed);if(item?.report.kind==='sync')for(const id of ids)item.seen.delete(postId(id));}
   saved(feed:string,bytes:number){const item=this.current(feed);if(!item)return;item.report.filesSaved++;item.report.bytesSaved+=bytes;this.save(feed);}
   finish(feed:string,state:'finished'|'paused',reason:string|null=null,expectedId?:string){const item=this.current(feed);if(expectedId&&this.active.get(feed)?.report.id!==expectedId)return;if(item){Object.assign(item.report,{state,reason,finishedAt:Date.now()});this.save(feed);}this.active.delete(feed);}
   private save(feed:string){const item=this.current(feed);if(item)this.store.setSetting(key(feed),item.report);}

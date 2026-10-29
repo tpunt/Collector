@@ -250,6 +250,12 @@ export function createReaderServer(options: { database?: string; port?: number; 
             const names = selected.filter(name => feedStatus(name) === 'idle');
             json(res,{queued:jobs.syncFeeds(names)});return;
           }
+          case '/api/history/rescan': {
+            const name=feedName(String(data.name));jobs.assertCanQueue(true);
+            if(!store.followedSources().includes(name))throw new Error('Subscribe to this feed first');
+            if(feedStatus(name)!=='idle')throw new Error('Stop this feed before rescanning history');
+            const id=store.rescanHistory(name);jobs.syncFeeds([name],{heads:[],history:[id]});json(res,{targetId:id});return;
+          }
           case '/api/history': {
             const name=feedName(String(data.name)),months=historyMonths(data.months);
             if(archive.active?.subreddit===name)throw new Error('Stop the archive fetch before changing this feed’s history');

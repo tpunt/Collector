@@ -8,7 +8,7 @@ import { BrowserLimiter, retryAfter } from './limiter.ts';
 import { ChromiumRequestGate, chromiumControlUrl, RequestQueue, DEFAULT_REQUEST_INTERVAL } from './request-gate.ts';
 import type { RequestInterval } from './request-gate.ts';
 import { redditUrl } from './domain.ts';
-import {tumblrResourceAllowed,tumblrContentUrl,tumblrBlog} from './sources.ts';
+import {tumblrResourceAllowed,tumblrContentUrl,tumblrBlog,parseTumblrSearchUrl} from './sources.ts';
 import type {Platform} from './sources.ts';
 import {join} from 'node:path';
 import {watchSignIn,MANUAL_SIGN_IN_REQUEST_LIMIT} from './sign-in.ts';
@@ -121,7 +121,7 @@ export class ReaderBrowser {
     this.queue.assertOnline();
     const tumblr=this.platform==='tumblr';
     const input=new URL(urlInput);
-    const blog=tumblr?(input.hostname==='www.tumblr.com'?(input.pathname.startsWith('/video/')?this.tumblrBlog:tumblrBlog(input.pathname.split('/')[1]??'')):input.hostname.split('.')[0]!):null;
+    const blog=tumblr?(input.hostname==='www.tumblr.com'?(input.pathname.startsWith('/search/')?parseTumblrSearchUrl(urlInput).blog:input.pathname.startsWith('/video/')?this.tumblrBlog:tumblrBlog(input.pathname.split('/')[1]??'')):input.hostname.split('.')[0]!):null;
     const url = tumblr?tumblrContentUrl(urlInput,blog!):redditUrl(urlInput);
     if(tumblr){this.tumblrBlog=blog;this.tumblrNavigation=url.href;}
     if (!tumblr&&(url.hostname !== 'old.reddit.com' || url.pathname.endsWith('.json'))) throw new Error('Collector requires a Classic Reddit page');

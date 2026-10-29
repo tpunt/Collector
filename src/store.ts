@@ -22,6 +22,8 @@ import type {CleanupCriteria} from './library-storage.ts';
 import {authorIdentity} from './authors.ts';
 import {postTags,tagName} from './tags.ts';
 import type {Author} from './authors.ts';
+import {tumblrHistorySummary} from './tumblr-history.ts';
+import type {HistoryDiscovery} from './tumblr-history.ts';
 
 // A listing can omit fields that an archive already saved. Compose the reader
 // view without relabelling archive evidence as a new live observation.
@@ -55,7 +57,7 @@ export interface HistoryTarget {
   oldestMs: number | null;
   status: 'queued' | 'paused' | 'done' | 'cancelled';
   reason: string | null;
-  boundary: { olderIds: string[]; batches: number; lastSignature: string | null; repeats: number };
+  boundary: { olderIds: string[]; batches: number; lastSignature: string | null; repeats: number;source?:unknown };
 }
 export interface StoredPost {
   author:Author|null;
@@ -95,6 +97,7 @@ export interface FeedSyncSummary {
   reason:string|null;
 }
 export interface FeedSource {
+  historyDiscovery:HistoryDiscovery|null;
   text:{total:number;ready:number;pending:number;failed:number};
   name: string;
   postCount: number;
@@ -240,12 +243,14 @@ export class ReaderStore {
       .all().map(row => this.getTarget(String(row.id))!);
   }
   hasBatch(targetId: string, signature: string): boolean { return Boolean(this.db.prepare('SELECT 1 FROM target_batches WHERE target_id = ? AND signature = ?').get(targetId, signature)); }
+  hasTargetPost(targetId:string,id:string):boolean{return Boolean(this.db.prepare('SELECT 1 FROM target_posts WHERE target_id=? AND post_id=?').get(targetId,postId(id)));}
 
   /** A page and its checkpoint either both commit or neither does. */
   commitBatch(input: {
     generation: number;
     targetId: string;
     observations: PostObservation[];
+    seenPostIds?:string[];
     continuation: string | null;
     omissions?: number;
     status?: HistoryTarget['status'];
@@ -279,6 +284,13 @@ export class ReaderStore {
         newTargetPosts += Number(this.db.prepare('INSERT OR IGNORE INTO target_posts VALUES (?, ?)')
           .run(target.id, observation.id).changes);
         oldest = Math.min(oldest ?? Infinity, observation.created.epochMs);
+      }
+      for(const inputId of input.seenPostIds??[]){
+        const id=postId(inputId);if(this.isPostExcluded(id))continue;
+        const post=this.db.prepare('SELECT subreddit,created_ms FROM posts WHERE id=?').get(id);
+        if(!post||post.subreddit!==target.subreddit)throw new Error('Known history post does not belong to this feed');
+        newTargetPosts+=Number(this.db.prepare('INSERT OR IGNORE INTO target_posts VALUES (?,?)').run(target.id,id).changes);
+        oldest=Math.min(oldest??Infinity,Number(post.created_ms));
       }
       const newBatch = !input.batchKey || Boolean(this.db.prepare('INSERT OR IGNORE INTO target_batches VALUES (?, ?)').run(target.id, input.batchKey).changes);
       this.db.prepare(`UPDATE targets SET continuation = ?, observed_count = observed_count + ?,
@@ -512,7 +524,9 @@ export class ReaderStore {
         state='incomplete';reason??=bodies?`${bodies} post body/bodies still need saving; Resume to retry`:media.failed?`${media.failed} media post(s) failed to save; Resume to retry`:media.pending?`${media.pending} media post(s) still need saving; Resume to continue`:'Post collection is unfinished; Resume to continue';
       }else{
         const gaps:string[]=[];
-        if(targets.some(target=>target?.completion==='listing-end'))gaps.push(`Reached the end ${feedIdentity(name).platform==='tumblr'?'Tumblr':'Reddit'} serves; full historical coverage could not be verified`);
+        const searched=targets.map(target=>target?.boundary.source?target:null).filter(Boolean);
+        if(searched.length)gaps.push(searched.map(target=>target!.reason).filter(Boolean).join(' '));
+        if(targets.some(target=>target?.completion==='listing-end'&&!target.boundary.source))gaps.push(`Reached the end ${feedIdentity(name).platform==='tumblr'?'Tumblr':'Reddit'} serves; full historical coverage could not be verified`);
         const omitted=targets.reduce((sum,target)=>sum+(target?.omissionCount??0),0);
         if(omitted)gaps.push(`${omitted} post extraction(s) omitted`);
         if(media.unavailable)gaps.push(`${media.unavailable} media post(s) unavailable for offline saving`);
@@ -677,7 +691,7 @@ export class ReaderStore {
       (SELECT count(*) FROM posts p WHERE p.subreddit = s.name AND EXISTS(SELECT 1 FROM observations WHERE post_id = p.id AND source = 'live')) AS live_count,
       (SELECT count(*) FROM posts p WHERE p.subreddit = s.name AND EXISTS(SELECT 1 FROM observations o WHERE o.post_id = p.id)) AS post_count
       FROM feeds s WHERE s.subscribed=1 ORDER BY s.name`).all()
-      .map(row => ({ name: String(row.name),text:this.offlineText(String(row.name)), postCount: Number(row.post_count), historyMonths: historyMonths(Number(row.history_months)),
+      .map(row => ({ historyDiscovery:tumblrHistorySummary(row.history_target_id?this.getTarget(String(row.history_target_id)):null),name: String(row.name),text:this.offlineText(String(row.name)), postCount: Number(row.post_count), historyMonths: historyMonths(Number(row.history_months)),
         historyTarget: row.history_target_id ? this.getTarget(String(row.history_target_id)) : null, oldestMs: row.oldest_ms as number | null, newestMs: row.newest_ms as number | null,
         liveCount: Number(row.live_count), archiveCount: Number(row.post_count)-Number(row.live_count),sync:this.feedSync(String(row.name)) }));
   }
@@ -687,6 +701,9 @@ export class ReaderStore {
       for(const input of names){
         const name=feedName(input),pref=this.getHistoryPreference(name);
         let goal=pref.targetId?this.getTarget(pref.targetId):null;
+        if(goal&&feedIdentity(name).platform==='tumblr'&&goal.status==='done'&&goal.completion==='listing-end'&&!goal.boundary.source){
+          this.db.prepare("UPDATE targets SET status='queued',completion=NULL,continuation=NULL,reason='Continue older history with dated searches' WHERE id=?").run(goal.id);goal=this.getTarget(goal.id);
+        }
         if(!goal||goal.status==='cancelled')goal=this.getTarget(this.createHistoryGoal(name,pref.months,now));
         const currentCutoff=historyLowerBound(pref.months,now);
         if(goal&&currentCutoff!==null&&goal.anchorMs<currentCutoff){
@@ -721,7 +738,8 @@ export class ReaderStore {
     const preferred=selected?this.getTarget(selected):null;
     const candidate=this.db.prepare(`SELECT id FROM targets WHERE subreddit = ? AND (continuation IS NOT NULL OR last_page IS NOT NULL)
       ORDER BY upper_ms DESC, (oldest_ms IS NULL), oldest_ms ASC, rowid DESC LIMIT 1`).get(name);
-    const previous=fromHead?null:preferred&&(preferred.continuation||preferred.lastPage)?preferred:candidate?this.getTarget(String(candidate.id)):null;
+    const selectedPrevious=fromHead?null:preferred&&(preferred.continuation||preferred.lastPage)?preferred:candidate?this.getTarget(String(candidate.id)):null;
+    const previous=feedIdentity(name).platform==='tumblr'&&selectedPrevious?.boundary.source?null:selectedPrevious;
     const id=this.createTarget({subreddit:name,lowerMs:lower ?? undefined,upperMs:now});
     // Expanding continues where prior committed browser work stopped. Unknown/stale
     // links are revalidated by the collector and can pause; dates never invent a cursor.
@@ -752,6 +770,14 @@ export class ReaderStore {
     const name=feedName(input),pref=this.getHistoryPreference(name),target=pref.targetId?this.getTarget(pref.targetId):null;
     if(target&&target.status!=='cancelled')return target.id;
     return this.transaction(()=>this.createHistoryGoal(name,pref.months,now));
+  }
+  rescanHistory(input:string,now=Date.now()):string {
+    const name=feedName(input);if(feedIdentity(name).platform!=='tumblr')throw new Error('Dated history rescanning is available for Tumblr');
+    return this.transaction(()=>{
+      const pref=this.getHistoryPreference(name);
+      this.db.prepare("UPDATE targets SET status='cancelled',reason='History rescan requested; saved posts retained' WHERE subreddit=? AND status IN ('queued','paused')").run(name);
+      return this.createHistoryGoal(name,pref.months,now,false,true);
+    });
   }
   pauseSource(input: string, reason: string): void {
     const name = feedName(input);

@@ -2,15 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { ReaderBrowser, AccessError } from './browser.ts';
 import { readListing, readThread, collectClassicListingDom } from './extract.ts';
 import { advanceBoundary } from './history.ts';
-import type { ReaderStore } from './store.ts';
+import type { ReaderStore,HistoryTarget } from './store.ts';
 import {postId} from './domain.ts';
-import {feedName,feedIdentity,listingUrl,tumblrPostUrl} from './sources.ts';
+import {feedName,feedIdentity,listingUrl,tumblrPostUrl,tumblrSearchUrl} from './sources.ts';
 import type {Platform} from './sources.ts';
 import type { Page } from 'playwright';
 import type { RequestQueue } from './request-gate.ts';
 import { discoverMedia } from './media-discovery.ts';
 import { SyncLimitError, UnsupportedMediaError, PostUnavailableError,PostIdentityError,ExtractionError } from './sync-errors.ts';
-import {readTumblrListing,readTumblrPost} from './tumblr.ts';
+import {readTumblrListing,readTumblrPost,readTumblrSearch} from './tumblr.ts';
+import {newTumblrHistory,tumblrHistoryCheckpoint,planTumblrWindow,captureTumblrWindow,finishTumblrWindow,tumblrCheckpointUrl,tumblrHistoryReason} from './tumblr-history.ts';
+import type {TumblrHistoryCheckpoint} from './tumblr-history.ts';
 import type {CollectionReports} from './collection-report.ts';
 import type {ProblemContext,ProblemReporter} from './problems.ts';
 import {StorageLimitError} from './storage-limit.ts';
@@ -42,6 +44,7 @@ export interface JobDependencies {
   readListing?: typeof readListing;
   readThread?: typeof readThread;
   readAccount?: (page: Page) => Promise<string | null>;
+  readTumblrSearch?:typeof readTumblrSearch;
 }
 export class ReaderJobs {
   private store: ReaderStore;
@@ -49,6 +52,7 @@ export class ReaderJobs {
   private listing: typeof readListing;
   private discussion: typeof readThread;
   private account: NonNullable<JobDependencies['readAccount']>;
+  private tumblrSearch:typeof readTumblrSearch;
   private queue: Work[] = [];
   private active: Work | null = null;
   private controller: AbortController | null = null;
@@ -93,6 +97,7 @@ export class ReaderJobs {
     this.listing = dependencies.readListing ?? readListing;
     this.discussion = dependencies.readThread ?? readThread;
     this.account = dependencies.readAccount ?? (async page => (await page.evaluate(collectClassicListingDom)).account);
+    this.tumblrSearch=dependencies.readTumblrSearch??readTumblrSearch;
   }
   private problem(error:unknown,extra:Partial<ProblemContext>={}){
     if(error instanceof Error){if(this.reported.has(error))return;this.reported.add(error);}
@@ -278,7 +283,10 @@ export class ReaderJobs {
     // Count the previous profile's requests before ReaderBrowser opens another
     // platform or mode; its underlying counter resets when the context changes.
     if(this.browserOpen&&(this.browserPlatform!==platform||this.mediaMode!==media))await this.closeBrowser();
-    await this.browser.open(remaining,mode);this.browserOpen=true;this.browserPlatform=platform;this.mediaMode=media;
+    // Long Tumblr history runs keep going at the shared rate, rotating bounded
+    // browser contexts between tasks. Access failures never auto-retry.
+    if(mode==='tumblr'&&this.browserOpen&&this.browser.counts.released>=200)await this.closeBrowser();
+    await this.browser.open(mode==='tumblr'?1000:remaining,mode);this.browserOpen=true;this.browserPlatform=platform;this.mediaMode=media;
   }
   private async closeBrowser() {
     if (this.closing) return this.closing;
@@ -375,6 +383,69 @@ export class ReaderJobs {
   }
   async finishSignIn() {if(!this.manual)throw new Error('No sign-in browser is open');this.pause('Sign-in browser closed without confirmation. Recheck the saved session before relying on it.'); await this.closeBrowser(); }
   async close(reason='Application stopped; explicit Resume required') { this.pause(reason); await this.closeBrowser();await this.pumpDone;await this.signingIn?.catch(()=>{});await this.closeBrowser(); }
+  private async tumblrHistoryStep(work:Extract<Work,{kind:'target'}>,target:HistoryTarget,state:TumblrHistoryCheckpoint){
+    const save=(observations:Parameters<ReaderStore['commitBatch']>[0]['observations']=[],seenPostIds:string[]=[])=>{
+      this.controller!.signal.throwIfAborted();
+      this.store.commitBatch({generation:work.generation,targetId:target.id,observations,seenPostIds,continuation:tumblrCheckpointUrl(target.subreddit,state),boundary:{...target.boundary,source:state},status:'queued'});
+    };
+    if(state.active&&state.active.outcome!=='query'){
+      let pending=false,unavailable=false;
+      for(const id of state.active.ids){
+        if(this.store.isPostExcluded(id))continue;
+        const post=this.store.getPost(id);if(!post)throw new Error('A saved Tumblr history post is missing; checkpoint retained');
+        if(post.availability!=='available'){unavailable=true;continue;}
+        if(post.bodySync?.status==='failed')throw new Error('Tumblr post text failed to save; Resume retries it before advancing history');
+        if(post.bodySync&&post.bodySync.status!=='ready')pending=true;
+        const media=this.mediaSync?this.store.mediaSync(id):null;
+        if(media?.status==='failed')throw new Error('Tumblr media failed to save; Resume retries it before advancing history');
+        if(media&&['pending','downloading'].includes(media.status))pending=true;
+        if(media?.status==='unavailable')unavailable=true;
+      }
+      if(pending){
+        this.queueBodies(target.subreddit,work.deadline);this.queueMediaSource(target.subreddit,work.deadline);
+        this.queue.push({...work,head:false});return;
+      }
+      if(unavailable)this.store.noteSyncGap(target.subreddit);
+      this.reports?.releaseHistoryPage(target.subreddit,state.active.ids);
+      for(const id of state.active.ids)this.attemptedBodies.delete(id);
+      finishTumblrWindow(state);
+    }
+    const range=planTumblrWindow(state);
+    if(!range){
+      this.store.commitBatch({generation:work.generation,targetId:target.id,observations:[],continuation:null,boundary:{...target.boundary,source:state},status:'done',completion:'listing-end',reason:tumblrHistoryReason(state)});
+      this.message=`${feedIdentity(target.subreddit).label}: dated history finished; ${state.unverified} windows unverified`;return;
+    }
+    save();
+    const url=tumblrSearchUrl(target.subreddit,range.lower,range.upper);
+    this.message=`Searching ${feedIdentity(target.subreddit).label} history · ${new Date(range.lower).toISOString().slice(0,10)} to ${new Date(range.upper).toISOString().slice(0,10)} · ${state.checked} windows checked`;
+    await this.openBrowser(1000,'tumblr');
+    const page=await this.browser.navigate(this.pageUrl=url,this.controller!.signal);
+    const inside=(time:number)=>time>=(target.lowerMs??0)&&time<=target.upperMs;
+    const result=await this.tumblrSearch(page,target.subreddit,{
+      navigate:next=>this.browser.navigate(this.pageUrl=next,this.controller!.signal),
+      knownDate:id=>{const post=this.store.getPost(id);return post?{epochMs:post.createdMs,precisionMs:post.precisionMs}:null;},
+      excluded:id=>this.store.isPostExcluded(id),
+      resolved:post=>{
+        if(!inside(post.created.epochMs)||this.store.isPostExcluded(post.id))return;
+        const before=this.store.getPost(post.id);save([post]);this.attemptedBodies.add(post.id);this.reports?.observe(target.subreddit,[before],[post.id]);
+      }
+    });
+    this.controller!.signal.throwIfAborted();
+    const candidates=result.posts.filter(post=>inside(post.created.epochMs)&&!this.store.isPostExcluded(post.id));
+    const known:string[]=[],observations:typeof candidates=[];
+    const before=candidates.map(post=>this.store.getPost(post.id));
+    const firstSeen=candidates.map(post=>!this.store.hasTargetPost(target.id,post.id));
+    candidates.forEach((post,index)=>{
+      if(before[index]&&before[index]!.source==='live')known.push(post.id);
+      else observations.push({...post,body:undefined,bodyNeedsFetch:true});
+    });
+    captureTumblrWindow(state,candidates.map(post=>post.id),result.potentiallyCapped,result.unverifiedEmpty);
+    save(observations,known);
+    const changed=candidates.map((post,index)=>({post,before:before[index],first:firstSeen[index]})).filter(item=>item.first||!item.before||item.before.source!=='live'||item.before.bodySync?.status!=='ready');
+    this.reports?.observe(target.subreddit,changed.map(item=>item.before),changed.map(item=>item.post.id));
+    this.queueBodies(target.subreddit,work.deadline);this.queueMediaSource(target.subreddit,work.deadline);
+    this.queue.push({...work,head:false});
+  }
   private start() { if (!this.pumping && this.queue.length) { this.pumping = true;this.session=randomUUID();this.attemptedBodies.clear();const done=this.pump();this.pumpDone=done;void done.catch(error=>this.problem(error,{operation:'collection'})).finally(()=>{if(this.pumpDone===done)this.pumpDone=null;}); } }
   private async pump() {
     const startingRequests = this.totalRequests();
@@ -389,7 +460,7 @@ export class ReaderJobs {
         const workSession=this.feedRuns.get(this.sourceOf(work)??'')??this.retryRuns.get(this.sourceOf(work)??'')??this.session;
         this.active = work;this.pageUrl=null;
         this.controller = new AbortController();
-        if (Date.now() >= work.deadline) {
+        if (Date.now() >= work.deadline&&feedIdentity(this.sourceOf(work)??'unknown').platform!=='tumblr') {
           if (work.kind === 'target') this.store.pauseTarget(work.targetId, 'Session time budget reached; Resume to fetch more');
           continue;
         }
@@ -412,7 +483,8 @@ export class ReaderJobs {
             continue;
           }
           const requestBaseline=work.requestBaseline??startingRequests;
-          const remaining=120-(this.totalRequests()-requestBaseline);
+          const isTumblr=Boolean(this.sourceOf(work)&&feedIdentity(this.sourceOf(work)!).platform==='tumblr');
+          const remaining=isTumblr?Number.MAX_SAFE_INTEGER:120-(this.totalRequests()-requestBaseline);
           if(remaining<=0)throw new SyncLimitError(work.requestBaseline!==undefined?'Archive media request budget reached; Resume archive to save remaining media.':'Sync request budget reached; Resume to fetch remaining posts and media.');
           if(work.kind==='media'){
             const plan=this.mediaSync?.preparePost(work.postId,workSession);if(!plan)continue;
@@ -450,7 +522,7 @@ export class ReaderJobs {
               await this.mediaSync?.reconcile?.();
             }
             await this.closeBrowser();this.controller.signal.throwIfAborted();
-            await this.mediaSync!.syncPost(post.id,workSession,120-(this.totalRequests()-requestBaseline),this.controller.signal);
+            await this.mediaSync!.syncPost(post.id,workSession,isTumblr?Number.MAX_SAFE_INTEGER:120-(this.totalRequests()-requestBaseline),this.controller.signal);
             this.reports?.observe(post.subreddit,[post],[post.id]);
             const progress=this.store.offlineMedia(post.subreddit);
             this.message=`${feedIdentity(post.subreddit).label}: media saved for ${progress.ready}/${progress.total} posts`;
@@ -458,6 +530,12 @@ export class ReaderJobs {
           }
           if(this.browserOpen&&this.mediaMode)await this.closeBrowser();
           const source=this.sourceOf(work),tumblr=source&&feedIdentity(source).platform==='tumblr';
+          if(tumblr&&work.kind==='target'){
+            const target=this.store.getTarget(work.targetId);if(!target||['done','cancelled'].includes(target.status))continue;
+            const state=tumblrHistoryCheckpoint(target);
+            if(state){await this.tumblrHistoryStep(work,target,state);continue;}
+            if(target.continuation&&new URL(target.continuation).pathname.startsWith('/search/')){await this.tumblrHistoryStep(work,target,newTumblrHistory(target));continue;}
+          }
           await this.openBrowser(120-(this.totalRequests()-requestBaseline),tumblr?'tumblr':false);
           this.controller.signal.throwIfAborted();
           if (work.kind === 'target') {
@@ -485,6 +563,13 @@ export class ReaderJobs {
             this.controller.signal.throwIfAborted();
             if (this.store.getTarget(target.id)?.status === 'cancelled') continue;
             if(!tumblr)this.verifyRedditAccount(listing.account);
+            if(tumblr&&!listing.next){
+              const state=newTumblrHistory(target,listing.posts.map(post=>post.id));
+              const previous=listing.posts.map(post=>this.store.getPost(post.id));
+              this.store.commitBatch({generation:work.generation,targetId:target.id,observations:listing.posts.map(post=>post.bodyNeedsFetch&&this.attemptedBodies.has(post.id)?{...post,body:undefined,bodyNeedsFetch:false}:post),continuation:tumblrCheckpointUrl(target.subreddit,state),boundary:{...target.boundary,source:state},fromHead:head,pageUrl:url});
+              this.reports?.observe(target.subreddit,previous,listing.posts.map(post=>post.id));
+              this.queueMediaSource(target.subreddit,work.deadline);this.queueBodies(target.subreddit,work.deadline);this.queue.push({...work,head:false});continue;
+            }
             const result = advanceBoundary(target, listing, this.store.hasBatch(target.id, listing.signature));
             const previous=listing.posts.map(post=>this.store.getPost(post.id));
             this.store.commitBatch({ generation: work.generation, targetId: target.id, observations: listing.posts.map(post=>post.bodyNeedsFetch&&this.attemptedBodies.has(post.id)?{...post,body:undefined,bodyNeedsFetch:false}:post),

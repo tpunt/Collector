@@ -968,3 +968,59 @@ history. Automatic Sync still follows the finite blog listing/captured theme
 pagination. Resumable dated-search discovery, dense-result splitting and explicit
 unverified-window coverage have not yet been implemented; search alone cannot
 establish complete all-time coverage.
+
+### Automatic, resumable Tumblr dated history (2026-10-29)
+
+This supersedes the preceding automatic-history limitation. Sync now continues
+past a finite Tumblr listing, including a captured custom-theme pagination end,
+with documented same-blog website searches. Year windows run newest first and
+split on potentially saturated results down to exact calendar-day queries.
+UTC boundary overlap, strict source URLs, visible query/timeline validation,
+platform-scoped identities and normal content deduplication remain enforced.
+All time walks back to the earliest representable timestamp; it does not claim
+that the search index contains every published post. The observed 15-row search
+page is treated conservatively as potentially capped. Empty loading-only results
+and capped single days retain explicit coverage uncertainty; other older windows
+continue. Unknown layouts/access gates pause rather than skip a window.
+
+A bounded source checkpoint lives in the existing target boundary JSON: a year
+cursor, pending split stack, one active page and coverage counters. Captured posts
+and their checkpoint commit atomically. An active saving phase is held until its
+full text and supported attachments are durable; failed files/text pause that
+phase for an explicit retry. Stop, shutdown and Offline mode preserve it. Cached
+files and existing complete live observations are reused, while archive-only
+matches still require live content verification. The feed card shows checked and
+queued windows, unverified results, daily limits and oldest checked date. Rescan
+history restarts discovery over the selected limit without deleting saved posts,
+local metadata, cached files or post-deletion exclusions. Expanding the range
+starts a fresh wider search scope; contraction never prunes content.
+
+Tumblr jobs can run beyond the Reddit-specific one-hour / 120-request work
+budget. Individual browser contexts retain a request ceiling and rotate between
+tasks; per-post attachment validation, per-file limits, storage limits and access
+pauses remain. Completed per-window report fingerprints are released so memory
+does not grow with all historical post IDs. Browser documents, styles and CDN
+files still share the random 4–6 second completion-based queue. No failed access
+request is automatically retried and no private API, scripts, hydration state,
+CAPTCHA bypass or 403 workaround was added. Startup remains offline.
+
+Live verification used the existing saved session and a separate library, with
+a bounded January 2025 window. The first query was interrupted, then the server
+was reopened: it started offline and retained the exact active query. Explicit
+Resume finished the dated search, encountered the 7 January post, and retained
+its complete body and 30 ready local images. Four browser requests were released
+across the interruption/resume; no additional media requests were needed. The
+user library and authentication profile were preserved. Manual reader checks
+confirmed the coverage display, disabled offline rescan control and collection
+report. The screenshot is in the ignored runtime QA directory.
+
+Validation: TypeScript, production build and 215 unit tests passed. The full
+132-test browser/API/network suite passed before the final custom-theme fallback
+and two added recovery/API cases; the subsequent 17-test focused Tumblr suite
+passed with those final changes. Fixtures cover all-time traversal to the epoch,
+dense splitting, runs exceeding 120 requests, Stop/restart mid-gallery, a failed
+attachment retry, unchanged cached files, malformed layouts, daily caps, range
+expansion, authenticated/online rescan restrictions, busy-feed rejection, clear
+and deletion-exclusion preservation. Fixtures use local responses, not external
+requests. Live all-time completeness is intentionally not asserted: Tumblr's
+search indexing and daily rendered-result limits remain observable constraints.

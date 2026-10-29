@@ -56,14 +56,36 @@ export function tumblrArchiveUrl(input:string,feed:string):URL {
   if(url.protocol!=='https:'||url.hostname!==blog+'.tumblr.com'||url.port||url.username||url.password||url.search||url.hash||url.pathname.replace(/\/$/,'')!=='/archive')throw new Error('Expected the selected Tumblr blog archive');
   return url;
 }
+export const TUMBLR_DAY=86_400_000;
+const searchDate=(value:string)=>{const time=Date.parse(value+'T00:00:00Z');if(!/^\d{4}-\d{2}-\d{2}$/.test(value)||!Number.isFinite(time)||new Date(time).toISOString().slice(0,10)!==value)throw new Error('Invalid Tumblr search date');return time;};
+/** Only generated, blog-bound dated website searches; no APIs or free queries. */
+export function parseTumblrSearchUrl(input:string,feed?:string){
+  const url=new URL(input);
+  if(url.protocol!=='https:'||url.hostname!=='www.tumblr.com'||url.port||url.username||url.password||url.search||url.hash)throw new Error('Invalid Tumblr dated search');
+  const match=/^\/search\/([^/]+)\/recent\/?$/.exec(url.pathname);if(!match)throw new Error('Invalid Tumblr dated search');
+  const query=decodeURIComponent(match[1]!),parts=/^from:([a-z0-9-]+) since:(\d{4}-\d{2}-\d{2}) before:(\d{4}-\d{2}-\d{2})$/.exec(query),day=/^from:([a-z0-9-]+) date:(\d{4}-\d{2}-\d{2})$/.exec(query);
+  if(!parts&&!day)throw new Error('Invalid Tumblr dated search');const blog=tumblrBlog((parts??day)![1]!);
+  if(feed!==undefined&&blog!==tumblrBlog(feed))throw new Error('Tumblr dated search left the selected blog');
+  const lower=day?searchDate(day[2]!):searchDate(parts![2]!)+TUMBLR_DAY,upper=day?lower+TUMBLR_DAY:searchDate(parts![3]!)-TUMBLR_DAY;
+  if(lower<0||upper<=lower)throw new Error('Invalid Tumblr search interval');
+  return{url,blog,query,lower,upper,exactDay:Boolean(day)};
+}
+export function tumblrSearchUrl(feed:string,lower:number,upper:number):string {
+  if(!Number.isSafeInteger(lower)||!Number.isSafeInteger(upper)||lower<0||upper<=lower||lower%TUMBLR_DAY||upper%TUMBLR_DAY)throw new Error('Invalid Tumblr history window');
+  // Overlap both UTC boundaries: Tumblr's date operators need not use the same
+  // timezone/inclusive convention as the explicit post timestamps we validate.
+  const query=upper-lower===TUMBLR_DAY?`from:${tumblrBlog(feed)} date:${new Date(lower).toISOString().slice(0,10)}`:`from:${tumblrBlog(feed)} since:${new Date(lower-TUMBLR_DAY).toISOString().slice(0,10)} before:${new Date(upper+TUMBLR_DAY).toISOString().slice(0,10)}`;
+  const url='https://www.tumblr.com/search/'+encodeURIComponent(query)+'/recent';parseTumblrSearchUrl(url,feed);return url;
+}
 export function tumblrContentUrl(input:string,feed:string):URL {
   try{return tumblrUrl(input,feed,true);}catch{/* Try the post layout next. */}
   try{return tumblrUrl(input,feed);}catch{/* An archive is a separate public document. */}
+  try{return parseTumblrSearchUrl(input,feed).url;}catch{/* Not a dated search. */}
   try{return tumblrArchiveUrl(input,feed);}catch{return tumblrEmbedUrl(input,feed);}
 }
 export function listingUrl(feed:string){const identity=feedIdentity(feed);return identity.platform==='tumblr'?`https://www.tumblr.com/${identity.name}`:`https://old.reddit.com/r/${identity.name}/new/`;}
 export function validateListingUrl(input:string,feed:string){
-  if(feedIdentity(feed).platform==='tumblr')return tumblrUrl(input,feed,true);
+  if(feedIdentity(feed).platform==='tumblr'){if(new URL(input).pathname.startsWith('/search/'))return parseTumblrSearchUrl(input,feed).url;return tumblrUrl(input,feed,true);}
   const url=redditUrl(input);if(url.hash||url.hostname!=='old.reddit.com'||!new RegExp(`^/r/${subredditName(feed)}/new/?$`,'i').test(url.pathname))throw new Error('Invalid committed listing URL');return url;
 }
 /** A public theme may contain frames or links to legacy APIs. Navigation and
@@ -75,6 +97,7 @@ export function tumblrResourceAllowed(input:string,type:string,blog:string|null,
     if(type==='Document'){
       const feed='tumblr:'+tumblrBlog(blog);
       try{tumblrArchiveUrl(input,feed);return input===navigation;}catch{/* Not an archive entry point. */}
+      try{parseTumblrSearchUrl(input,feed);return input===navigation;}catch{/* Not a dated search. */}
       tumblrContentUrl(input,feed);
       try{tumblrEmbedUrl(input,feed);return input===navigation;}catch{return true;}
     }

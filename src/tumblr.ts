@@ -1,16 +1,16 @@
 import type {Page} from 'playwright';
 import {absoluteTime,postId,validateObservation} from './domain.ts';
 import type {PostObservation,MediaKind,CreatedTime} from './domain.ts';
-import {feedIdentity,tumblrItem,tumblrUrl,tumblrEmbedUrl} from './sources.ts';
+import {feedIdentity,tumblrItem,tumblrUrl,tumblrEmbedUrl,parseTumblrSearchUrl} from './sources.ts';
 import {mediaReferences,MAX_MEDIA_REFERENCES} from './media-reference.ts';
 import type {Listing} from './extract.ts';
 import {PostIdentityError,ExtractionError} from './sync-errors.ts';
 
 /** Public website HTML only: attached content and explicit attributes. No API,
  * hydration-state traversal, screenshots or page-script execution. */
-export function collectTumblrDom(){
+export function collectTumblrDom(selectedBlog?:string){
   const visible=(element:Element)=>!element.closest('[hidden],template,[aria-hidden="true"],.notes,.post-notes')&&getComputedStyle(element).display!=='none'&&getComputedStyle(element).visibility!=='hidden'&&element.getClientRects().length>0;
-  const web=location.hostname==='www.tumblr.com',blog=web?location.pathname.split('/')[1]??'':location.hostname.split('.')[0]!;
+  const web=location.hostname==='www.tumblr.com',blog=selectedBlog??(web?location.pathname.split('/')[1]??'':location.hostname.split('.')[0]!);
   const postPage=web?new RegExp(`^/${blog}/[1-9][0-9]{0,19}(?:/|$)`).test(location.pathname):location.pathname.startsWith('/post/');
   const canonical=document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href??document.querySelector<HTMLMetaElement>('meta[property="og:url"]')?.content??null;
   const pageDate=postPage?(document.querySelector<HTMLMetaElement>('meta[property="article:published_time"]')?.content??(document.querySelector<HTMLMetaElement>('meta[property="og:type"]')?.content==='article'?document.querySelector<HTMLMetaElement>('meta[name="parsely-pub-date"]')?.content:undefined)):undefined;
@@ -91,7 +91,11 @@ export function collectTumblrDom(){
   })??pageLinks.find(link=>link.rel.split(/\s+/).includes('next')&&/\/page\//.test(link.href));
   const blocked=/log in to|sign up to|verify you are human|access denied|too many requests|privacy consent/i.test(document.querySelector('h1')?.textContent??'');
   const empty=Boolean(document.querySelector('.no-posts,.no_posts,[data-empty-blog="true"]'));
-  return {rows,next:next?.href??null,blocked,empty,canonical};
+  const query=[...document.querySelectorAll<HTMLInputElement>('input[aria-label="Search"],input[type="search"],input[name="q"]')].find(visible)?.value??null;
+  const timeline=document.querySelector('main [data-timeline-id^="searchTimeline-post-"]')?.getAttribute('data-timeline-id')??null;
+  const searchEmpty=[...document.querySelectorAll('main [data-testid="no-search-results"],main .noresults,main h1,main h2,main p')].some(node=>visible(node)&&/^(?:no (?:posts|results)(?: found)?|nothing found)[.!]?$/i.test((node.textContent??'').trim()));
+  const searchNext=[...document.querySelectorAll<HTMLAnchorElement>('main a[rel~="next"]')].find(visible)?.href??null;
+  return {rows,next:next?.href??null,blocked,empty,canonical,search:{query,timeline,empty:searchEmpty,next:searchNext}};
 }
 function observation(row:ReturnType<typeof collectTumblrDom>['rows'][number],feed:string,complete=false,knownDate?:CreatedTime):PostObservation {
   const identity=feedIdentity(feed),url=row.permalink?tumblrUrl(row.permalink,feed):null;
@@ -115,14 +119,19 @@ export interface TumblrListingOptions {
   navigate?:(url:string)=>Promise<Page>;
   knownDate?:(id:string)=>CreatedTime|null;
   resolved?:(post:PostObservation)=>void;
+  excluded?:(id:string)=>boolean;
 }
-export async function readTumblrListing(page:Page,feed:string,options:TumblrListingOptions={}):Promise<Listing>{
-  const listingUrl=tumblrUrl(page.url(),feed,true);const dom=await page.evaluate(collectTumblrDom);
+async function readTumblrPage(page:Page,feed:string,options:TumblrListingOptions={},search=false){
+  const searchScope=search?parseTumblrSearchUrl(page.url(),feed):null;
+  const listingUrl=searchScope?.url??tumblrUrl(page.url(),feed,true);const dom=await page.evaluate(collectTumblrDom,search?feedIdentity(feed).name:undefined);
   const evidence={rows:dom.rows.length,selector:'article,[data-post-id],.post[id]',emptyMarker:dom.empty,nextPresent:Boolean(dom.next)};
   if(dom.blocked)throw new ExtractionError('access','Tumblr requires sign-in or access confirmation; public-blog collection paused',evidence);
-  if(!dom.rows.length&&!dom.empty)throw new ExtractionError('listing-layout','Tumblr theme was not recognised; no explicit empty state',evidence);
+  if(searchScope&&(dom.search.query!==searchScope.query||!dom.search.timeline?.includes(searchScope.query)))throw new ExtractionError('listing-layout','Tumblr search layout/query was not recognised; date checkpoint kept',evidence);
+  if(!search&&!dom.rows.length&&!dom.empty)throw new ExtractionError('listing-layout','Tumblr theme was not recognised; no explicit empty state',evidence);
+  if(dom.rows.length>2000)throw new ExtractionError('listing-records','Tumblr returned too many rows to validate safely; checkpoint kept',evidence);
   const posts:PostObservation[]=[],ordinary:Listing['ordinary']=[];let omissions=0;
   for(const row of dom.rows){
+    if(row.permalink&&options.excluded){const url=tumblrUrl(row.permalink,feed);if(options.excluded(`tumblr:${feedIdentity(feed).name}:${url.pathname.split('/')[2]}`))continue;}
     let known:CreatedTime|undefined;
     if(!row.datetime&&!row.timestamp&&row.permalink){
       const url=tumblrUrl(row.permalink,feed),rawId=url.pathname.split('/')[2]!,id=`tumblr:${feedIdentity(feed).name}:${rawId}`;
@@ -145,15 +154,19 @@ export async function readTumblrListing(page:Page,feed:string,options:TumblrList
   // Unknown dates/identity must remain retryable, rather than permanently skip a
   // page or report that all history was collected.
   if(omissions)throw new ExtractionError('listing-records',`${omissions} Tumblr post(s) lacked a supported identity or absolute time; page checkpoint kept for retry`,{...evidence,accepted:posts.length,rejected:omissions,missingFields:['id','datetime','permalink']});
-  const next=dom.next?tumblrUrl(dom.next,feed,true).href:null;
+  if(searchScope&&dom.search.next){const next=parseTumblrSearchUrl(dom.search.next,feed);if(next.lower!==searchScope.lower||next.upper!==searchScope.upper)throw new ExtractionError('pagination','Tumblr search Next left the selected date window; checkpoint kept',evidence);}
+  const next=!search&&dom.next?tumblrUrl(dom.next,feed,true).href:null;
   if(next){const current=Number(listingUrl.pathname.match(/^\/page\/([0-9]+)/)?.[1]??1);if(new URL(next).pathname.replace(/\/$/,'')!==`/page/${current+1}`)throw new ExtractionError('pagination','Tumblr next-page link did not advance one page; checkpoint kept',evidence);}
-  return{account:'',posts,ordinary,unknownTime:false,omissions:0,next,empty:dom.empty,signature:posts.map(post=>post.id).join(',')};
+  return{account:'',posts,ordinary,unknownTime:false,omissions:0,next,empty:dom.empty,signature:posts.map(post=>post.id).join(','),
+    potentiallyCapped:dom.rows.length>=15||Boolean(dom.search.next),unverifiedEmpty:search&&!dom.rows.length&&!dom.search.empty};
 }
+export async function readTumblrListing(page:Page,feed:string,options:TumblrListingOptions={}):Promise<Listing>{return readTumblrPage(page,feed,options);}
+export async function readTumblrSearch(page:Page,feed:string,options:TumblrListingOptions={}){return readTumblrPage(page,feed,options,true);}
 export async function readTumblrPost(page:Page,input:string,navigate?:(url:string)=>Promise<Page>):Promise<PostObservation>{
   const id=postId(input),identity=tumblrItem(id);if(!identity)throw new PostIdentityError(input,[],page.url());
   const feed='tumblr:'+identity.blog;const url=tumblrUrl(page.url(),feed);
   if(url.pathname.split('/')[2]!==identity.id)throw new PostIdentityError(id,[],page.url());
-  const dom=await page.evaluate(collectTumblrDom);
+  const dom=await page.evaluate(collectTumblrDom,undefined);
   if(dom.blocked)throw new Error('Tumblr requires sign-in or access confirmation');
   const row=dom.rows.find(row=>row.id===identity.id||row.permalink&&new URL(row.permalink,page.url()).pathname.split('/')[2]===identity.id);
   if(!row)throw new PostIdentityError(id,dom.rows.map(row=>row.id),page.url());
